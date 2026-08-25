@@ -81,6 +81,7 @@ func TestParseRejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
 func TestValidateRejectsHighRiskStrings(t *testing.T) {
 	tests := map[string]func(*Manifest){
 		"schema":                    func(m *Manifest) { m.Schema = 2 },
+		"macos only false":          func(m *Manifest) { m.Homebrew.MacOSOnly = false },
 		"formula name slash":        func(m *Manifest) { m.Formula.Name = "bad/name" },
 		"formula name ruby":         func(m *Manifest) { m.Formula.Name = `bad\"; system(\"id\")` },
 		"class punctuation":         func(m *Manifest) { m.Formula.Class = "Bad::Formula" },
@@ -171,6 +172,43 @@ func TestValidateRejectsEveryRubyInterpolationIntroducer(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestFormulaClassMustBeDerivedFromFormulaName(t *testing.T) {
+	tests := []struct {
+		name      string
+		class     string
+		wantClass string
+		valid     bool
+	}{
+		{name: "claude-rc-proxy", class: "ClaudeRcProxy", wantClass: "ClaudeRcProxy", valid: true},
+		{name: "tool2-api3", class: "Tool2Api3", wantClass: "Tool2Api3", valid: true},
+		{name: "claude-rc-proxy", class: "ClaudeRCProxy", wantClass: "ClaudeRcProxy", valid: false},
+		{name: "2tool", class: "Tool", valid: false},
+		{name: "tool-2api", class: "Tool2Api", valid: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+"/"+tt.class, func(t *testing.T) {
+			m, err := Parse([]byte(validManifest))
+			if err != nil {
+				t.Fatalf("valid fixture: %v", err)
+			}
+			m.Formula.Name = tt.name
+			m.Formula.Class = tt.class
+			err = m.Validate()
+			if tt.valid && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if !tt.valid && err == nil {
+				t.Fatal("Validate() unexpectedly succeeded")
+			}
+			if tt.wantClass != "" {
+				if got := formulaClassForName(tt.name); got != tt.wantClass {
+					t.Fatalf("formulaClassForName(%q) = %q, want %q", tt.name, got, tt.wantClass)
+				}
+			}
+		})
 	}
 }
 

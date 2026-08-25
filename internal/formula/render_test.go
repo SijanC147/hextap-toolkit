@@ -71,16 +71,15 @@ func TestRenderSortsEnvironmentDeterministically(t *testing.T) {
 	}
 }
 
-func TestRenderOmitsDisabledServiceAndOptionalMacDependency(t *testing.T) {
+func TestRenderOmitsDisabledService(t *testing.T) {
 	m := loadManifest(t)
 	m.Homebrew.Service = &manifest.Service{Enabled: false}
-	m.Homebrew.MacOSOnly = false
 	got, err := Render(m, "0.1.0", armSHA, amdSHA)
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
 	text := string(got)
-	for _, absent := range []string{"service do", "depends_on :macos", "environment_variables"} {
+	for _, absent := range []string{"service do", "environment_variables"} {
 		if strings.Contains(text, absent) {
 			t.Fatalf("Render() unexpectedly contains %q", absent)
 		}

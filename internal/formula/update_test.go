@@ -83,6 +83,67 @@ func TestUpdateIgnoresMetadataWordsInsideCaveats(t *testing.T) {
 	}
 }
 
+func TestUpdateRejectsHeredocMarkersThatCouldHideFormulaDeclarations(t *testing.T) {
+	base := string(renderedFormula(t))
+	insertBefore := "\n  def install\n"
+	markers := map[string]string{
+		"comment text": `  # <<~EOS`,
+		"string text":  `  marker = "<<~EOS"`,
+	}
+	declarations := map[string]string{
+		"version": `  version "9.9.9"`,
+		"URL":     `  url "https://example.invalid/hidden.tar.gz"`,
+		"SHA":     `  sha256 "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"`,
+	}
+	for markerName, marker := range markers {
+		for declarationName, declaration := range declarations {
+			t.Run(markerName+"/"+declarationName, func(t *testing.T) {
+				hidden := marker + "\n" + declaration + "\n  EOS"
+				input := strings.Replace(base, insertBefore, "\n"+hidden+insertBefore, 1)
+				if _, _, err := Update([]byte(input), loadManifest(t), "1.2.4", newArmSHA, newAmdSHA); err == nil {
+					t.Fatal("Update() accepted a declaration hidden behind non-code heredoc text")
+				}
+			})
+		}
+	}
+}
+
+func TestUpdateAcceptsOnlyTheGeneratedCaveatsBlock(t *testing.T) {
+	base := string(renderedFormula(t))
+	insertBefore := "\n  def install\n"
+	generatedBlock := "  def caveats\n    <<~EOS\n      generated text\n    EOS\n  end"
+	tests := map[string]string{
+		"unsupported heredoc":    strings.Replace(base, insertBefore, "\n  def other\n    <<~TEXT\n      data\n    TEXT\n  end"+insertBefore, 1),
+		"marker indentation":     strings.Replace(base, "    <<~EOS\n", "      <<~EOS\n", 1),
+		"terminator indentation": strings.Replace(base, "    EOS\n", "      EOS\n", 1),
+		"end indentation": strings.Replace(
+			base,
+			"      Logs are written below #{var}/log/claude-rc-proxy.\n    EOS\n  end\n",
+			"      Logs are written below #{var}/log/claude-rc-proxy.\n    EOS\n    end\n",
+			1,
+		),
+		"additional caveats block": strings.Replace(base, insertBefore, "\n"+generatedBlock+insertBefore, 1),
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := Update([]byte(input), loadManifest(t), "1.2.4", newArmSHA, newAmdSHA); err == nil {
+				t.Fatal("Update() accepted a non-generated caveats/heredoc structure")
+			}
+		})
+	}
+
+	withoutCaveats := loadManifest(t)
+	withoutCaveats.Homebrew.Caveats = ""
+	formulaWithoutCaveats, err := Render(withoutCaveats, "1.2.3", armSHA, amdSHA)
+	if err != nil {
+		t.Fatalf("Render(without caveats): %v", err)
+	}
+	withUnexpectedBlock := strings.Replace(string(formulaWithoutCaveats), insertBefore, "\n"+generatedBlock+insertBefore, 1)
+	if _, _, err := Update([]byte(withUnexpectedBlock), withoutCaveats, "1.2.4", newArmSHA, newAmdSHA); err == nil {
+		t.Fatal("Update() accepted caveats when the manifest disables them")
+	}
+}
+
 func TestUpdateRejectsDowngrade(t *testing.T) {
 	if _, _, err := Update(renderedFormula(t), loadManifest(t), "1.2.2", newArmSHA, newAmdSHA); err == nil {
 		t.Fatal("Update() unexpectedly allowed a downgrade")

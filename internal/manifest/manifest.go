@@ -18,7 +18,7 @@ import (
 const CurrentSchema = 1
 
 var (
-	formulaNamePattern  = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	formulaNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$`)
 	classNamePattern    = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
 	repositoryPattern   = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
 	ownerPattern        = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
@@ -205,6 +205,9 @@ func (m Manifest) Validate() error {
 	if !classNamePattern.MatchString(m.Formula.Class) {
 		return errors.New("validate manifest: formula.class must be a single Ruby constant")
 	}
+	if expected := formulaClassForName(m.Formula.Name); m.Formula.Class != expected {
+		return fmt.Errorf("validate manifest: formula.class must be %q as derived from formula.name", expected)
+	}
 	if err := validateRubyLine("formula.description", m.Formula.Description); err != nil {
 		return err
 	}
@@ -238,6 +241,9 @@ func (m Manifest) Validate() error {
 	if len(m.Homebrew.TestArgs) == 0 {
 		return errors.New("validate manifest: homebrew.test_args must contain at least one argument")
 	}
+	if !m.Homebrew.MacOSOnly {
+		return errors.New("validate manifest: homebrew.macos_only must be true for schema 1 Darwin assets")
+	}
 	for i, value := range m.Homebrew.TestArgs {
 		if !argumentPattern.MatchString(value) {
 			return fmt.Errorf("validate manifest: homebrew.test_args[%d] contains unsafe characters", i)
@@ -252,6 +258,16 @@ func (m Manifest) Validate() error {
 		return err
 	}
 	return nil
+}
+
+func formulaClassForName(name string) string {
+	parts := strings.Split(name, "-")
+	for index, part := range parts {
+		if part != "" {
+			parts[index] = strings.ToUpper(part[:1]) + part[1:]
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 func (s Service) validate() error {
@@ -306,10 +322,19 @@ func validateRubyLine(field, value string) error {
 	if strings.TrimSpace(value) == "" {
 		return fmt.Errorf("validate manifest: %s must not be empty", field)
 	}
-	if !utf8.ValidString(value) || containsRubyInjection(value) || strings.ContainsAny(value, "\r\n\x00") {
+	if !utf8.ValidString(value) || containsRubyInjection(value) || containsC0Control(value) {
 		return fmt.Errorf("validate manifest: %s contains unsafe Ruby characters", field)
 	}
 	return nil
+}
+
+func containsC0Control(value string) bool {
+	for _, character := range value {
+		if character <= '\x1f' {
+			return true
+		}
+	}
+	return false
 }
 
 func containsRubyInjection(value string) bool {

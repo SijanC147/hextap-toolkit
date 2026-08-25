@@ -15,7 +15,7 @@ import (
 
 var (
 	architectureLine   = regexp.MustCompile(`^([ \t]*)if Hardware::CPU\.arm\?$`)
-	heredocStart       = regexp.MustCompile(`<<[~-]?([A-Z][A-Z0-9_]*)\b`)
+	caveatsDeclaration = regexp.MustCompile(`^[ \t]*def[ \t]+caveats\b`)
 	formulaVersionLine = regexp.MustCompile(`^[ \t]*version\b.*$`)
 	formulaURLLine     = regexp.MustCompile(`^[ \t]*url\b.*$`)
 	formulaSHALine     = regexp.MustCompile(`^[ \t]*sha256\b.*$`)
@@ -129,7 +129,7 @@ func inspect(data []byte, project manifest.Manifest) (metadata, error) {
 	if len(lines) == 0 {
 		return metadata{}, errors.New("inspect Formula: file is empty")
 	}
-	codeLines, err := formulaCodeLines(lines)
+	codeLines, err := formulaCodeLines(lines, project.Homebrew.Caveats != "")
 	if err != nil {
 		return metadata{}, err
 	}
@@ -206,27 +206,51 @@ func inspect(data []byte, project manifest.Manifest) (metadata, error) {
 	return metadata{version: armVersion, armURL: armURL, armSHA: armSHA, amdURL: amdURL, amdSHA: amdSHA}, nil
 }
 
-func formulaCodeLines(lines []line) ([]bool, error) {
+func formulaCodeLines(lines []line, expectCaveats bool) ([]bool, error) {
 	result := make([]bool, len(lines))
-	inHeredoc := false
-	terminator := ""
-	for index, current := range lines {
-		if inHeredoc {
-			if strings.TrimSpace(current.body) == terminator {
-				inHeredoc = false
-				terminator = ""
+	caveatsBlocks := 0
+	for index := 0; index < len(lines); index++ {
+		current := lines[index]
+		result[index] = true
+		if current.body == "  def caveats" {
+			caveatsBlocks++
+			if caveatsBlocks > 1 {
+				return nil, errors.New("inspect Formula: expected at most one generated caveats block")
 			}
+			if index+3 >= len(lines) || lines[index+1].body != "    <<~EOS" {
+				return nil, errors.New("inspect Formula: caveats must begin with the exact generated def caveats/<<~EOS structure")
+			}
+			terminator := -1
+			for candidate := index + 2; candidate < len(lines); candidate++ {
+				if lines[candidate].body == "    EOS" {
+					terminator = candidate
+					break
+				}
+				if !strings.HasPrefix(lines[candidate].body, "      ") {
+					return nil, errors.New("inspect Formula: caveats content does not have generated indentation")
+				}
+			}
+			if terminator < index+3 || terminator+1 >= len(lines) || lines[terminator+1].body != "  end" {
+				return nil, errors.New("inspect Formula: caveats must end with the exact generated EOS/end structure")
+			}
+			for hidden := index; hidden <= terminator+1; hidden++ {
+				result[hidden] = false
+			}
+			index = terminator + 1
 			continue
 		}
-		result[index] = true
-		match := heredocStart.FindStringSubmatch(current.body)
-		if match != nil {
-			inHeredoc = true
-			terminator = match[1]
+		if caveatsDeclaration.MatchString(current.body) {
+			return nil, errors.New("inspect Formula: unsupported caveats declaration")
+		}
+		if strings.Contains(current.body, "<<") {
+			return nil, errors.New("inspect Formula: unsupported heredoc operator outside generated caveats")
 		}
 	}
-	if inHeredoc {
-		return nil, fmt.Errorf("inspect Formula: unterminated %s heredoc", terminator)
+	if expectCaveats && caveatsBlocks != 1 {
+		return nil, errors.New("inspect Formula: manifest requires exactly one generated caveats block")
+	}
+	if !expectCaveats && caveatsBlocks != 0 {
+		return nil, errors.New("inspect Formula: manifest does not permit a caveats block")
 	}
 	return result, nil
 }

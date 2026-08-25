@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/SijanC147/hextap-toolkit/schema/project-manifest.schema.json",
   "title": "Hextap project manifest",
-  "description": "Declarative project metadata consumed by hextapctl. Go validation remains authoritative for cross-field constraints such as distinct architecture assets.",
+  "description": "Declarative project metadata consumed by hextapctl. Go validation remains authoritative for derived formula.class, distinct architecture assets, and exact caveats placeholder grammar.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -28,7 +28,7 @@
   "$defs": {
     "formulaName": {
       "type": "string",
-      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$"
     },
     "className": {
       "type": "string",
@@ -67,21 +67,74 @@
     "rubyLine": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?!.*(?:#\\{|#@|#\\$))[^\"\\\\\\u0000-\\u001F]+$"
+      "allOf": [
+        {
+          "not": {
+            "pattern": "[\"\\\\]"
+          }
+        },
+        {
+          "not": {
+            "pattern": "[\\x00-\\x1F]"
+          }
+        },
+        {
+          "not": {
+            "pattern": "#(?:\\{|@|\\$)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^[ \\t\\r\\n]*$"
+          }
+        }
+      ]
     },
     "homepage": {
       "type": "string",
       "format": "uri",
-      "pattern": "^https://[^?#]+$"
+      "pattern": "^https://[^/?#@]+(?:/[^?#]*)?$"
     },
     "environmentValue": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?!.*(?:#\\{|#@|#\\$))[^\"\\\\\\u0000\\r\\n]+$"
+      "allOf": [
+        {
+          "not": {
+            "pattern": "[\"\\\\]"
+          }
+        },
+        {
+          "not": {
+            "pattern": "[\\x00\\r\\n]"
+          }
+        },
+        {
+          "not": {
+            "pattern": "#(?:\\{|@|\\$)"
+          }
+        }
+      ]
     },
     "caveats": {
       "type": "string",
-      "pattern": "^(?![\\s\\S]*(?:#\\{|#@|#\\$))(?![\\s\\S]*\\r)(?![\\s\\S]*(?:^|\\n)[ \\t]*EOS[ \\t]*(?:\\n|$))[\\s\\S]*$"
+      "allOf": [
+        {
+          "not": {
+            "pattern": "#(?:\\{|@|\\$)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "[\\x00\\r]"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(^|\\n)[ \\t]*EOS[ \\t]*(\\n|$)"
+          }
+        }
+      ]
     },
     "repository": {
       "type": "object",
@@ -288,7 +341,7 @@
       ],
       "properties": {
         "macos_only": {
-          "type": "boolean"
+          "const": true
         },
         "test_args": {
           "type": "array",

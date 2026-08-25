@@ -3,6 +3,7 @@ package manifest
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func loadProjectSchema(t *testing.T) map[string]any {
@@ -108,19 +110,243 @@ func TestExampleFixtureConformsToGoAndMachineSchema(t *testing.T) {
 	}
 }
 
+func TestManifestConformanceCorpus(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "examples", "claude-rc-proxy.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(example): %v", err)
+	}
+	var base map[string]any
+	if err := json.Unmarshal(data, &base); err != nil {
+		t.Fatalf("Unmarshal(example): %v", err)
+	}
+	type corpusCase struct {
+		name   string
+		valid  bool
+		mutate func(map[string]any)
+	}
+	cases := []corpusCase{
+		{name: "valid complete service", valid: true},
+		{name: "valid omitted service", valid: true, mutate: func(value map[string]any) {
+			delete(object(t, value["homebrew"], "homebrew"), "service")
+		}},
+		{name: "valid null service", valid: true, mutate: func(value map[string]any) {
+			object(t, value["homebrew"], "homebrew")["service"] = nil
+		}},
+		{name: "valid disabled service", valid: true, mutate: func(value map[string]any) {
+			object(t, value["homebrew"], "homebrew")["service"] = map[string]any{"enabled": false}
+		}},
+		{name: "invalid schema const", mutate: func(value map[string]any) { value["schema"] = float64(2) }},
+		{name: "invalid missing release", mutate: func(value map[string]any) { delete(value, "release") }},
+		{name: "invalid root property", mutate: func(value map[string]any) { value["unknown"] = true }},
+		{name: "invalid macos false", mutate: func(value map[string]any) {
+			object(t, value["homebrew"], "homebrew")["macos_only"] = false
+		}},
+		{name: "invalid formula name pattern", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["name"] = "2tool"
+		}},
+		{name: "invalid owner maximum", mutate: func(value map[string]any) {
+			formula := object(t, value["formula"], "formula")
+			object(t, formula["repository"], "repository")["owner"] = strings.Repeat("a", 40)
+		}},
+		{name: "invalid empty description", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["description"] = ""
+		}},
+		{name: "invalid whitespace description", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["description"] = "   "
+		}},
+		{name: "invalid description control", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["description"] = "bad\tvalue"
+		}},
+		{name: "invalid ruby interpolation", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["license"] = "MIT #@danger"
+		}},
+		{name: "invalid homepage scheme", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["homepage"] = "http://example.com/project"
+		}},
+		{name: "invalid homepage credentials", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["homepage"] = "https://user@example.com/project"
+		}},
+		{name: "invalid homepage format", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["homepage"] = "https://exa mple.com/project"
+		}},
+		{name: "invalid asset pattern", mutate: func(value map[string]any) {
+			formula := object(t, value["formula"], "formula")
+			object(t, formula["assets"], "assets")["darwin_arm64"] = "archive.zip"
+		}},
+		{name: "invalid build path", mutate: func(value map[string]any) {
+			object(t, value["release"], "release")["build_script"] = "../build"
+		}},
+		{name: "invalid boolean type", mutate: func(value map[string]any) {
+			object(t, value["release"], "release")["linux"] = "yes"
+		}},
+		{name: "invalid empty test arguments", mutate: func(value map[string]any) {
+			object(t, value["homebrew"], "homebrew")["test_args"] = []any{}
+		}},
+		{name: "invalid test argument pattern", mutate: func(value map[string]any) {
+			object(t, value["homebrew"], "homebrew")["test_args"] = []any{"$(id)"}
+		}},
+		{name: "invalid restart minimum", mutate: func(value map[string]any) {
+			service := object(t, object(t, value["homebrew"], "homebrew")["service"], "service")
+			service["restart_delay"] = float64(0)
+		}},
+		{name: "invalid restart maximum", mutate: func(value map[string]any) {
+			service := object(t, object(t, value["homebrew"], "homebrew")["service"], "service")
+			service["restart_delay"] = float64(3601)
+		}},
+		{name: "invalid environment property name", mutate: func(value map[string]any) {
+			service := object(t, object(t, value["homebrew"], "homebrew")["service"], "service")
+			object(t, service["environment"], "environment")["lowercase"] = "value"
+		}},
+		{name: "invalid environment value", mutate: func(value map[string]any) {
+			service := object(t, object(t, value["homebrew"], "homebrew")["service"], "service")
+			object(t, service["environment"], "environment")["RUNTIME_MODE"] = "#$danger"
+		}},
+		{name: "invalid empty environment value", mutate: func(value map[string]any) {
+			service := object(t, object(t, value["homebrew"], "homebrew")["service"], "service")
+			object(t, service["environment"], "environment")["RUNTIME_MODE"] = ""
+		}},
+		{name: "invalid keep alive oneOf", mutate: func(value map[string]any) {
+			service := object(t, object(t, value["homebrew"], "homebrew")["service"], "service")
+			object(t, service["keep_alive"], "keep_alive")["successful_exit"] = false
+		}},
+		{name: "invalid service property", mutate: func(value map[string]any) {
+			service := object(t, object(t, value["homebrew"], "homebrew")["service"], "service")
+			service["unknown"] = true
+		}},
+		{name: "invalid caveats interpolation", mutate: func(value map[string]any) {
+			object(t, value["homebrew"], "homebrew")["caveats"] = "#$danger"
+		}},
+		{name: "invalid caveats terminator", mutate: func(value map[string]any) {
+			object(t, value["homebrew"], "homebrew")["caveats"] = "before\nEOS\nafter"
+		}},
+	}
+
+	schema := loadProjectSchema(t)
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := cloneJSONObject(t, base)
+			if testCase.mutate != nil {
+				testCase.mutate(fixture)
+			}
+			encoded, err := json.Marshal(fixture)
+			if err != nil {
+				t.Fatalf("Marshal(fixture): %v", err)
+			}
+			_, goError := Parse(encoded)
+			var schemaValue any
+			if err := json.Unmarshal(encoded, &schemaValue); err != nil {
+				t.Fatalf("Unmarshal(schema fixture): %v", err)
+			}
+			schemaError := validateFixtureShape(schema, schema, schemaValue, "$")
+			if testCase.valid {
+				if goError != nil || schemaError != nil {
+					t.Fatalf("valid corpus case failed: Go=%v schema=%v", goError, schemaError)
+				}
+				return
+			}
+			if goError == nil || schemaError == nil {
+				t.Fatalf("invalid corpus case accepted: Go=%v schema=%v", goError, schemaError)
+			}
+		})
+	}
+}
+
+func cloneJSONObject(t *testing.T, value map[string]any) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("Marshal(clone): %v", err)
+	}
+	var clone map[string]any
+	if err := json.Unmarshal(data, &clone); err != nil {
+		t.Fatalf("Unmarshal(clone): %v", err)
+	}
+	return clone
+}
+
+func TestMachineSchemaUsesOnlySupportedEvaluatorKeywords(t *testing.T) {
+	supported := map[string]bool{
+		"$schema": true, "$id": true, "$defs": true, "$ref": true,
+		"title": true, "description": true,
+		"type": true, "const": true, "oneOf": true, "allOf": true, "not": true,
+		"properties": true, "required": true, "additionalProperties": true, "propertyNames": true,
+		"items": true, "minItems": true,
+		"minLength": true, "maxLength": true, "pattern": true, "format": true,
+		"minimum": true, "maximum": true,
+	}
+	var walk func(map[string]any, string)
+	walk = func(current map[string]any, location string) {
+		for keyword, raw := range current {
+			if !supported[keyword] {
+				t.Errorf("unsupported schema keyword %s at %s", keyword, location)
+				continue
+			}
+			if keyword == "properties" || keyword == "$defs" {
+				children, _ := raw.(map[string]any)
+				for name, child := range children {
+					if childSchema, ok := child.(map[string]any); ok {
+						walk(childSchema, location+"/"+keyword+"/"+name)
+					}
+				}
+				continue
+			}
+			switch typed := raw.(type) {
+			case map[string]any:
+				walk(typed, location+"/"+keyword)
+			case []any:
+				for index, child := range typed {
+					if childSchema, ok := child.(map[string]any); ok {
+						walk(childSchema, fmt.Sprintf("%s/%s/%d", location, keyword, index))
+					}
+				}
+			}
+		}
+	}
+	walk(loadProjectSchema(t), "#")
+}
+
 func TestMachineSchemaDeclaresEveryRubyInterpolationGuard(t *testing.T) {
 	definitions := object(t, loadProjectSchema(t)["$defs"], "$defs")
 	for _, definitionName := range []string{"rubyLine", "environmentValue", "caveats"} {
-		pattern, ok := definition(t, definitions, definitionName)["pattern"].(string)
-		if !ok {
-			t.Fatalf("$defs.%s.pattern is missing", definitionName)
-		}
-		for _, introducer := range []string{`#\{`, "#@", `#\$`} {
-			if !strings.Contains(pattern, introducer) {
+		patterns := schemaPatterns(definition(t, definitions, definitionName))
+		for _, introducer := range []string{"#{", "#@", "#$"} {
+			if !anyPatternMatches(patterns, introducer) {
 				t.Errorf("$defs.%s.pattern does not guard %q", definitionName, introducer)
 			}
 		}
 	}
+}
+
+func schemaPatterns(value any) []string {
+	patterns := make([]string, 0)
+	var walk func(any)
+	walk = func(current any) {
+		switch typed := current.(type) {
+		case map[string]any:
+			if pattern, ok := typed["pattern"].(string); ok {
+				patterns = append(patterns, pattern)
+			}
+			for _, child := range typed {
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	return patterns
+}
+
+func anyPatternMatches(patterns []string, value string) bool {
+	for _, pattern := range patterns {
+		compiled, err := regexp.Compile(pattern)
+		if err == nil && compiled.MatchString(value) {
+			return true
+		}
+	}
+	return false
 }
 
 func assertStructProperties(t *testing.T, schema map[string]any, structType reflect.Type) {
@@ -236,6 +462,22 @@ func validateFixtureShape(root, schema map[string]any, value any, location strin
 		}
 		return nil
 	}
+	if requirements, ok := schema["allOf"].([]any); ok {
+		for index, requirement := range requirements {
+			candidate, ok := requirement.(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s: allOf[%d] is not an object", location, index)
+			}
+			if err := validateFixtureShape(root, candidate, value, location); err != nil {
+				return err
+			}
+		}
+	}
+	if negated, ok := schema["not"].(map[string]any); ok {
+		if validateFixtureShape(root, negated, value, location) == nil {
+			return fmt.Errorf("%s: matched forbidden schema", location)
+		}
+	}
 	if constant, exists := schema["const"]; exists && !reflect.DeepEqual(constant, value) {
 		return fmt.Errorf("%s: value %v does not equal const %v", location, value, constant)
 	}
@@ -251,6 +493,13 @@ func validateFixtureShape(root, schema map[string]any, value any, location strin
 			return fmt.Errorf("%s: expected object", location)
 		}
 		properties, _ := schema["properties"].(map[string]any)
+		if namesSchema, ok := schema["propertyNames"].(map[string]any); ok {
+			for key := range objectValue {
+				if err := validateFixtureShape(root, namesSchema, key, location+".<property>"); err != nil {
+					return err
+				}
+			}
+		}
 		if required, ok := schema["required"].([]any); ok {
 			for _, requiredValue := range required {
 				key, _ := requiredValue.(string)
@@ -294,17 +543,8 @@ func validateFixtureShape(root, schema map[string]any, value any, location strin
 			}
 		}
 	case "string":
-		text, ok := value.(string)
-		if !ok {
+		if _, ok := value.(string); !ok {
 			return fmt.Errorf("%s: expected string", location)
-		}
-		if minimum, ok := schema["minLength"].(float64); ok && len(text) < int(minimum) {
-			return fmt.Errorf("%s: string too short", location)
-		}
-		if pattern, ok := schema["pattern"].(string); ok {
-			if compiled, err := regexp.Compile(pattern); err == nil && !compiled.MatchString(text) {
-				return fmt.Errorf("%s: does not match %s", location, pattern)
-			}
 		}
 	case "integer":
 		number, ok := value.(float64)
@@ -320,6 +560,33 @@ func validateFixtureShape(root, schema map[string]any, value any, location strin
 	case "boolean":
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("%s: expected boolean", location)
+		}
+	}
+	if text, ok := value.(string); ok {
+		length := utf8.RuneCountInString(text)
+		if minimum, ok := schema["minLength"].(float64); ok && length < int(minimum) {
+			return fmt.Errorf("%s: string too short", location)
+		}
+		if maximum, ok := schema["maxLength"].(float64); ok && length > int(maximum) {
+			return fmt.Errorf("%s: string too long", location)
+		}
+		if pattern, ok := schema["pattern"].(string); ok {
+			compiled, err := regexp.Compile(pattern)
+			if err != nil {
+				return fmt.Errorf("%s: invalid schema pattern %q: %w", location, pattern, err)
+			}
+			if !compiled.MatchString(text) {
+				return fmt.Errorf("%s: does not match required pattern", location)
+			}
+		}
+		if format, ok := schema["format"].(string); ok {
+			if format != "uri" {
+				return fmt.Errorf("%s: unsupported format %q", location, format)
+			}
+			parsed, err := url.ParseRequestURI(text)
+			if err != nil || !parsed.IsAbs() {
+				return fmt.Errorf("%s: invalid URI", location)
+			}
 		}
 	}
 	return nil

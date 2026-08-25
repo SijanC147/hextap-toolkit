@@ -45,9 +45,16 @@ The canonical example is
 [`examples/claude-rc-proxy.json`](examples/claude-rc-proxy.json). The checked-in
 [Draft 2020-12 JSON Schema](schema/project-manifest.schema.json) provides a
 machine-readable contract for editors and other tooling without adding a
-runtime dependency. Parity tests keep its objects, required fields, patterns,
-and example fixture aligned with the authoritative Go types and validator under
-`internal/manifest`. The schema has this stable shape:
+runtime dependency. The checked-in standard-library conformance suite runs one
+shared valid/invalid corpus through both the schema evaluator and
+`manifest.Parse`, and rejects schema keywords the evaluator does not implement.
+The Go validator remains authoritative. JSON Schema cannot express four
+schema-1/input checks exactly: `formula.class` derived from `formula.name`,
+distinct arm64/amd64 asset values, the caveats rule that only `{{home}}` and
+`{{var}}` placeholders are accepted, and the raw-input requirement that a file
+contain exactly one JSON document with no trailing value. Call `hextapctl
+manifest validate` before rendering or publishing even when an editor reports
+that the JSON Schema is valid. The schema has this stable shape:
 
 ```json
 {
@@ -98,8 +105,8 @@ and example fixture aligned with the authoritative Go types and validator under
 | Field | Contract |
 |---|---|
 | `schema` | Must be exactly `1`. |
-| `formula.name` | Lowercase kebab-case Formula name. |
-| `formula.class` | One Ruby constant such as `ClaudeRcProxy`; namespaces and punctuation are rejected. |
+| `formula.name` | Lowercase kebab-case name whose segments each begin with a letter, so class derivation is unambiguous. |
+| `formula.class` | Must exactly equal the PascalCase class derived from `formula.name`; `claude-rc-proxy` therefore requires `ClaudeRcProxy`. |
 | `formula.description` | Required, one line, and safe for a Ruby string. All Ruby interpolation introducers (`#{`, `#@`, and `#$`) are rejected. |
 | `formula.homepage` | HTTPS URL with no credentials, query, or fragment. |
 | `formula.license` | Required, one line, and safe for a Ruby string. All Ruby interpolation introducers are rejected. |
@@ -108,7 +115,7 @@ and example fixture aligned with the authoritative Go types and validator under
 | `formula.assets` | Distinct safe `.tar.gz` basenames for Darwin arm64 and amd64. |
 | `release.build_script` | Clean repository-relative path; absolute paths, traversal, backslashes, and unsafe path components are rejected. |
 | `release.linux` | Required boolean recording whether the future release workflow should also build Linux archives. |
-| `homebrew.macos_only` | Required boolean; when true, rendering adds `depends_on :macos`. |
+| `homebrew.macos_only` | Must be `true` in schema 1 because its Formula contract defines only Darwin assets. Rendering always adds `depends_on :macos`. |
 | `homebrew.test_args` | One or more shell-safe arguments used by the Formula test. |
 | `homebrew.service` | Optional. Use `null`, omit it, or set only `{"enabled": false}` to disable service generation. |
 | `service.run_args` | Required array for an enabled service; may be empty. |
@@ -168,9 +175,12 @@ Rendering produces deterministic Ruby with:
 - `bin.install`, an optional service, optional caveats, and a version test
 - sorted environment variables and a final newline
 
-The write uses a same-directory temporary file and atomic rename. An existing
-destination mode is preserved. Validation or write failures do not partially
-rewrite the destination.
+The write uses a same-directory temporary file, atomic rename, and parent
+directory sync. An existing destination mode is preserved. Every failure
+before rename leaves the original destination unchanged and removes the
+temporary file. A parent-directory sync failure happens after rename: the
+command returns an error explaining that crash durability was not confirmed,
+but the complete replacement may already be visible and is not rolled back.
 
 ### Update an existing Formula
 
@@ -187,9 +197,13 @@ The updater supports only the generated golden-path Formula and fails closed
 unless the existing file has exactly the canonical seven-line architecture
 block and exactly two `url` and two `sha256` declarations across all Formula
 code. Additional declarations at any indentation, including `resource` blocks,
-are unsupported and rejected. Text inside the generated caveats heredoc is not
-treated as Ruby code. Both release URLs must target the manifest repository and
-expected architecture asset, use the same stable version, and have an
+are unsupported and rejected. The only supported heredoc is the exact optional
+generated `def caveats` / `<<~EOS` / `EOS` / `end` block with its expected
+indentation and manifest presence. Every other heredoc operator—including one
+written in a comment or Ruby string—is rejected, so it cannot hide a version,
+URL, or SHA declaration from validation. Text inside the recognized generated
+caveats body is not treated as Ruby code. Both release URLs must target the
+manifest repository and expected architecture asset, use the same stable version, and have an
 immediately following lowercase SHA-256. Any top-level `version` invocation is
 rejected, including quoted, parenthesized, and trailing-comment forms.
 

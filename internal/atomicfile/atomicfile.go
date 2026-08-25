@@ -11,10 +11,10 @@ import (
 // Write replaces path with data using a fully written and synced temporary
 // file in the destination directory. The caller supplies the final mode.
 func Write(path string, data []byte, mode fs.FileMode) error {
-	return write(path, data, mode, os.Rename)
+	return write(path, data, mode, os.Rename, syncDirectory)
 }
 
-func write(path string, data []byte, mode fs.FileMode, rename func(string, string) error) (retErr error) {
+func write(path string, data []byte, mode fs.FileMode, rename func(string, string) error, syncParent func(string) error) (retErr error) {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 	temp, err := os.CreateTemp(dir, "."+base+".tmp-*")
@@ -49,6 +49,25 @@ func write(path string, data []byte, mode fs.FileMode, rename func(string, strin
 	closed = true
 	if err := rename(tempName, path); err != nil {
 		return fmt.Errorf("replace %q atomically: %w", path, err)
+	}
+	if err := syncParent(dir); err != nil {
+		return fmt.Errorf("sync parent directory for %q after rename; replacement may already be visible: %w", path, err)
+	}
+	return nil
+}
+
+func syncDirectory(path string) (retErr error) {
+	directory, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open directory %q: %w", path, err)
+	}
+	defer func() {
+		if closeErr := directory.Close(); retErr == nil && closeErr != nil {
+			retErr = fmt.Errorf("close directory %q: %w", path, closeErr)
+		}
+	}()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("sync directory %q: %w", path, err)
 	}
 	return nil
 }

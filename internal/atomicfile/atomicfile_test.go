@@ -33,12 +33,19 @@ func TestWriteRenameFailurePreservesOriginalAndRemovesTemporaryFile(t *testing.T
 		return errors.New("injected rename failure")
 	}
 
-	err := write(destination, replacement, 0o600, rename)
+	syncCalled := false
+	err := write(destination, replacement, 0o600, rename, func(string) error {
+		syncCalled = true
+		return nil
+	})
 	if err == nil || !strings.Contains(err.Error(), "injected rename failure") {
 		t.Fatalf("write() error = %v, want injected rename failure", err)
 	}
 	if !renameObservedWrittenTemporaryFile {
 		t.Fatal("rename injection was not reached after the temporary write")
+	}
+	if syncCalled {
+		t.Fatal("directory sync ran even though rename failed")
 	}
 	got, readErr := os.ReadFile(destination)
 	if readErr != nil {
@@ -60,5 +67,51 @@ func TestWriteRenameFailurePreservesOriginalAndRemovesTemporaryFile(t *testing.T
 	}
 	if gotMode := info.Mode().Perm(); gotMode != 0o640 {
 		t.Fatalf("destination mode changed to %#o", gotMode)
+	}
+}
+
+func TestWriteDirectorySyncFailureReturnsErrorAfterReplacement(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "Formula.rb")
+	original := []byte("original contents\n")
+	replacement := []byte("replacement contents\n")
+	if err := os.WriteFile(destination, original, 0o640); err != nil {
+		t.Fatalf("WriteFile(original): %v", err)
+	}
+
+	syncCalls := 0
+	err := write(destination, replacement, 0o600, os.Rename, func(path string) error {
+		syncCalls++
+		if path != directory {
+			t.Fatalf("sync directory = %q, want %q", path, directory)
+		}
+		return errors.New("injected directory sync failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "replacement may already be visible") || !strings.Contains(err.Error(), "injected directory sync failure") {
+		t.Fatalf("write() error = %v, want post-rename durability error", err)
+	}
+	if syncCalls != 1 {
+		t.Fatalf("directory sync calls = %d, want 1", syncCalls)
+	}
+	got, readErr := os.ReadFile(destination)
+	if readErr != nil {
+		t.Fatalf("ReadFile(destination): %v", readErr)
+	}
+	if string(got) != string(replacement) {
+		t.Fatalf("replacement is not visible after rename: %q", got)
+	}
+	info, statErr := os.Stat(destination)
+	if statErr != nil {
+		t.Fatalf("Stat(destination): %v", statErr)
+	}
+	if gotMode := info.Mode().Perm(); gotMode != 0o600 {
+		t.Fatalf("replacement mode = %#o, want 0600", gotMode)
+	}
+	temporaryFiles, globErr := filepath.Glob(filepath.Join(directory, ".Formula.rb.tmp-*"))
+	if globErr != nil {
+		t.Fatalf("Glob(temporary): %v", globErr)
+	}
+	if len(temporaryFiles) != 0 {
+		t.Fatalf("temporary files remain after post-rename sync failure: %v", temporaryFiles)
 	}
 }
