@@ -19,6 +19,7 @@ on:
 concurrency:
   group: hextap-release-${{ github.repository }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   validate:
@@ -227,6 +228,7 @@ jobs:
           artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
           path: ${{ runner.temp }}/validated-manifest
           digest-mismatch: error
+          merge-multiple: true
       - name: Verify and place validated manifest
         env:
           EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
@@ -297,6 +299,7 @@ jobs:
           artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
           path: ${{ runner.temp }}/validated-manifest
           digest-mismatch: error
+          merge-multiple: true
       - name: Verify validated manifest
         env:
           EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
@@ -313,6 +316,7 @@ jobs:
           artifact-ids: ${{ needs.build.outputs.release_assets_artifact_id }}
           path: ${{ runner.temp }}/dist
           digest-mismatch: error
+          merge-multiple: true
       - name: Verify and execute native binary
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
@@ -330,7 +334,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [validate, build, native-verify]
+    needs: [validate, quality, build, native-verify]
     if: needs.validate.outputs.mode == 'full'
     runs-on: ubuntu-latest
     permissions:
@@ -353,6 +357,7 @@ jobs:
           artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
           path: ${{ runner.temp }}/validated-manifest
           digest-mismatch: error
+          merge-multiple: true
       - name: Verify validated manifest
         env:
           EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
@@ -369,6 +374,7 @@ jobs:
           artifact-ids: ${{ needs.build.outputs.release_assets_artifact_id }}
           path: ${{ runner.temp }}/dist
           digest-mismatch: error
+          merge-multiple: true
       - name: Reverify assets
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
@@ -401,9 +407,10 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           for _ in {1..20}; do
-            state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')"
-            if [[ "$state" == $'false\ttrue' ]] && gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
-              exit 0
+            if state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')"; then
+              if [[ "$state" == $'false\ttrue' ]] && gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
+                exit 0
+              fi
             fi
             sleep 3
           done
@@ -442,6 +449,7 @@ jobs:
           artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
           path: ${{ runner.temp }}/validated-manifest
           digest-mismatch: error
+          merge-multiple: true
       - name: Verify validated manifest
         env:
           EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}

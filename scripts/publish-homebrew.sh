@@ -30,6 +30,7 @@ gh auth setup-git >/dev/null
 
 status=""
 tap_commit=""
+last_push_output=""
 for attempt in 1 2 3; do
   attempt_dir="$workspace/attempt-$attempt"
   gh repo clone "$tap_repository" "$attempt_dir" -- --branch main --depth 1 >/dev/null
@@ -95,10 +96,22 @@ for attempt in 1 2 3; do
   git -C "$attempt_dir" config user.email "actions@github.com"
   git -C "$attempt_dir" commit -m "Update $formula to $version" >/dev/null
   tap_commit="$(git -C "$attempt_dir" rev-parse HEAD)"
-  if git -C "$attempt_dir" push origin HEAD:main >/dev/null 2>&1; then
+  if push_output="$(git -C "$attempt_dir" push origin HEAD:main 2>&1)"; then
     status="published"
     break
+  else
+    push_status=$?
   fi
+  push_diagnostic="${push_output,,}"
+  case "$push_diagnostic" in
+    *"fetch first"* | *"non-fast-forward"*)
+      last_push_output="$push_output"
+      ;;
+    *)
+      printf '%s\n' "$push_output" >&2
+      exit "$push_status"
+      ;;
+  esac
   tap_commit=""
   if (( attempt < 3 )); then
     sleep "$attempt"
@@ -107,6 +120,7 @@ done
 
 [[ -n "$tap_commit" ]] || {
   echo "tap main moved during all publication attempts" >&2
+  [[ -z "$last_push_output" ]] || printf '%s\n' "$last_push_output" >&2
   exit 1
 }
 
