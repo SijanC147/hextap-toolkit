@@ -40,8 +40,8 @@ checksums.
   co-located with the called reusable workflow.
 - GitHub currently documents both `job.workflow_sha` and
   `concurrency.queue: max`. Actionlint 1.7.12 does not yet model either field;
-  `scripts/check-actionlint.sh` verifies that its only diagnostics are the
-  reviewed schema-lag set.
+  `scripts/check-actionlint.sh` requires that pinned version to fail with
+  exactly the reviewed schema-lag set. A clean/no-op result also fails.
 - Manifest schema changes require a toolkit release. Existing stable toolkit
   releases and their exact-SHA callers remain immutable.
 

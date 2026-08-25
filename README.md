@@ -491,6 +491,8 @@ scripts/check-actionlint.sh
 
 GitHub currently documents `concurrency.queue: max` and the reusable-job
 `job.workflow_sha` identity fields. Actionlint 1.7.12 predates both. The checker
-script does not suppress diagnostics broadly: it accepts a future clean run or
-exactly the reviewed one queue plus five workflow-SHA schema-lag diagnostics,
-and fails on any additional or changed result.
+script does not suppress diagnostics broadly: for the pinned 1.7.12 version it
+requires a nonzero result containing exactly the reviewed one queue plus five
+workflow-SHA schema-lag diagnostics, and fails on a clean/no-op, missing,
+additional, changed, or differently versioned result. A future Actionlint
+upgrade must update that expectation explicitly.

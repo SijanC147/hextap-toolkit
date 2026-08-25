@@ -79,8 +79,10 @@ Status: accepted until upstream release support lands.
 Current GitHub documentation supports `concurrency.queue: max` and the
 `job.workflow_*` identity fields. Latest released Actionlint 1.7.12 predates
 both and has open upstream work for them. The repository does not use a broad
-ignore: its checker accepts either a clean result or exactly one queue and five
-workflow-SHA diagnostics, failing on any other output.
+ignore: its pinned checker must return nonzero with exactly one queue and five
+workflow-SHA diagnostics. Clean/no-op, missing, extra, changed, or differently
+versioned results fail. A future Actionlint upgrade must revise the expectation
+explicitly.
 
 Authoritative references: [GitHub concurrency queues](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
 [GitHub reusable-job workflow identity](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#example-usage-of-job-context-workflow-identity),

@@ -89,8 +89,9 @@ archive support is intentionally outside this initiative.
   onboarding transactions, fake-`gh` online doctor flows, and native process
   limits.
 - `actionlint` 1.7.12 predates two current GitHub schema additions. The
-  repository checker accepts only its exact one-plus-five known diagnostics and
-  rejects anything else; a future clean Actionlint result passes normally.
+  repository checker requires its exact nonzero one-plus-five known diagnostics
+  and rejects a clean/no-op or anything else. A future checker upgrade must
+  change the pinned expectation in a reviewed PR.
 - Hosted runners, immutable-release settings, 1Password authorization, direct
   tap write scope, and real tap CI remain live gates. Static green tests are not
   reported as live publication proof.

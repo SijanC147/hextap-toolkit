@@ -18,16 +18,11 @@ diagnostics="$(actionlint -oneline .github/workflows/*.yml 2>&1)"
 status=$?
 set -e
 
-if [[ $status -eq 0 ]]; then
-  echo "actionlint $version: workflows valid"
-  exit 0
-fi
-
 # GitHub added concurrency.queue and the job.workflow_* reusable-workflow
 # identity fields after actionlint 1.7.12. Until an actionlint release contains
-# upstream support, accept only the exact known schema-lag diagnostics. Any new
-# diagnostic, missing expected diagnostic, or different actionlint version
-# fails closed.
+# upstream support, the pinned checker must return nonzero with exactly the
+# known schema-lag diagnostics. A clean/no-op result, any new diagnostic, any
+# missing expected diagnostic, or a different version fails closed.
 if [[ "$version" != "1.7.12" && "$version" != "v1.7.12" ]]; then
   printf '%s\n' "$diagnostics" >&2
   echo "actionlint $version reported unexpected diagnostics" >&2
@@ -40,7 +35,7 @@ queue_count="$(printf '%s\n' "$diagnostics" | grep -F -c "$queue_pattern" || tru
 workflow_count="$(printf '%s\n' "$diagnostics" | grep -F -c "$workflow_pattern" || true)"
 unexpected="$(printf '%s\n' "$diagnostics" | grep -F -v "$queue_pattern" | grep -F -v "$workflow_pattern" || true)"
 
-if [[ "$queue_count" != 1 || "$workflow_count" != 5 || -n "$unexpected" ]]; then
+if [[ $status -eq 0 || "$queue_count" != 1 || "$workflow_count" != 5 || -n "$unexpected" ]]; then
   printf '%s\n' "$diagnostics" >&2
   echo "actionlint 1.7.12 diagnostics differ from the reviewed schema-lag set" >&2
   exit 1
