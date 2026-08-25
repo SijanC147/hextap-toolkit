@@ -157,6 +157,105 @@ Success is deterministic:
 manifest valid: examples/claude-rc-proxy.json (schema 1, formula claude-rc-proxy)
 ```
 
+### Export manifest values for GitHub Actions
+
+```sh
+hextapctl manifest export \
+  --file examples/claude-rc-proxy.json \
+  --repository SijanC147/claude-rc-proxy \
+  --github-output "$GITHUB_OUTPUT"
+```
+
+The repository argument must exactly match the manifest's canonical
+`owner/name`. The command appends these validated, single-line outputs in a
+stable order:
+
+```text
+formula
+binary
+owner
+repository_name
+repository
+arm64_asset
+amd64_asset
+build_script
+linux
+```
+
+`--github-output` must name the existing regular, non-symlink file created by
+the GitHub Actions runner. Existing newline-terminated outputs are preserved.
+The command rejects duplicate, multiline, control-character, oversized, or
+otherwise unsafe output records before appending anything.
+
+### Normalize release metadata
+
+```sh
+hextapctl release metadata \
+  --tag v1.2.3 \
+  --mode full \
+  --github-output "$GITHUB_OUTPUT"
+```
+
+Tags must be strict, `v`-prefixed SemVer without build metadata. Stable tags
+such as `v1.2.3` and prereleases such as `v1.2.3-rc.1` are accepted in `full`
+mode; `homebrew-only` accepts stable tags only. When `--github-output` is
+provided, the command appends `tag`, normalized `version`, `stable`,
+`prerelease`, and `mode`. Omitting it skips the output-file append; either form
+prints one deterministic summary line to standard output.
+
+### Build deterministic release archives
+
+```sh
+mkdir /path/to/project/dist
+hextapctl release build \
+  --manifest /path/to/project/.hextap.json \
+  --version 1.2.3 \
+  --commit 0123456789abcdef0123456789abcdef01234567 \
+  --source /path/to/project \
+  --output /path/to/project/dist
+```
+
+The source and output must be real directories rather than symlinks; the
+output directory must already exist and be empty. The manifest must resolve
+inside the source tree. The source must contain regular `LICENSE` and
+`README.md` files and the manifest's executable `release.build_script`.
+
+The builder invokes the adapter once for each Darwin target and, when
+`release.linux` is true, once for each Linux target. It packages the resulting
+binary with `LICENSE` and `README.md` into the declared `.tar.gz` asset names,
+then writes a sorted `SHA256SUMS`. Tar and gzip metadata, member order, modes,
+owners, and timestamps are canonical, so identical adapter output produces
+byte-identical release files. A failed target leaves the output directory
+empty.
+
+#### Build-adapter contract
+
+The adapter runs with the source directory as its working directory, no stdin,
+and discarded stdout/stderr. It receives a sanitized environment: a small
+toolchain/OS allowlist from the parent plus exactly these Hextap variables:
+
+| Variable | Meaning |
+|---|---|
+| `HEXTAP_TARGET_OS` | `darwin` or `linux`. |
+| `HEXTAP_TARGET_ARCH` | `arm64` or `amd64`. |
+| `HEXTAP_OUTPUT` | Absolute path at which the adapter must write the target binary. |
+| `HEXTAP_VERSION` | Validated normalized SemVer without a leading `v`. |
+| `HEXTAP_COMMIT` | Validated lowercase source commit, 7–64 hexadecimal characters. |
+
+The inherited allowlist is limited to compiler/toolchain and basic process
+variables: `CC`, `CGO_ENABLED`, `CXX`, `DEVELOPER_DIR`, `GOCACHE`, `GOENV`,
+`GOMODCACHE`, `GOPATH`, `GOPROXY`, `GOROOT`, `GOSUMDB`, `GOTOOLCHAIN`, `HOME`,
+`LANG`, `LC_ALL`, `LOGNAME`, `PATH`, `SDKROOT`, `SHELL`, `SYSTEMROOT`, `TEMP`,
+`TERM`, `TMP`, `TMPDIR`, `TZ`, and `USER`. Other parent variables, including
+credentials, are not inherited.
+
+For each invocation, the adapter must create exactly the file named by
+`HEXTAP_OUTPUT` and no other entry in its isolated staging directory. That file
+must be a regular, non-symlink, single-link binary no larger than 256 MiB. The
+toolkit normalizes its archived mode to `0755`; the adapter must embed
+`HEXTAP_VERSION` and `HEXTAP_COMMIT` itself when the project exposes build
+metadata. Each adapter invocation has a 15-minute timeout.
+
 ### Render a new Formula
 
 ```sh

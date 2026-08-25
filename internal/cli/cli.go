@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/SijanC147/hextap-toolkit/internal/formula"
+	"github.com/SijanC147/hextap-toolkit/internal/githuboutput"
 	"github.com/SijanC147/hextap-toolkit/internal/manifest"
+	"github.com/SijanC147/hextap-toolkit/internal/release"
 )
 
 const errorExit = 2
@@ -17,7 +20,7 @@ const errorExit = 2
 // Run executes one hextapctl command and returns a process exit code.
 func Run(args []string, stdout, stderr io.Writer, version, commit string) int {
 	if len(args) == 0 {
-		return fail(stderr, "command required; expected version, manifest, or formula")
+		return fail(stderr, "command required; expected version, manifest, formula, or release")
 	}
 	switch args[0] {
 	case "version":
@@ -30,21 +33,31 @@ func Run(args []string, stdout, stderr io.Writer, version, commit string) int {
 		return runManifest(args[1:], stdout, stderr)
 	case "formula":
 		return runFormula(args[1:], stdout, stderr)
+	case "release":
+		return runRelease(args[1:], stdout, stderr)
 	default:
-		return fail(stderr, "unknown command %q; expected version, manifest, or formula", args[0])
+		return fail(stderr, "unknown command %q; expected version, manifest, formula, or release", args[0])
 	}
 }
 
 func runManifest(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return fail(stderr, "manifest subcommand required; expected validate")
+		return fail(stderr, "manifest subcommand required; expected validate or export")
 	}
-	if args[0] != "validate" {
-		return fail(stderr, "unknown manifest subcommand %q; expected validate", args[0])
+	switch args[0] {
+	case "validate":
+		return runManifestValidate(args[1:], stdout, stderr)
+	case "export":
+		return runManifestExport(args[1:], stdout, stderr)
+	default:
+		return fail(stderr, "unknown manifest subcommand %q; expected validate or export", args[0])
 	}
+}
+
+func runManifestValidate(args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("manifest validate")
 	file := flags.String("file", "", "project manifest path")
-	if err := flags.Parse(args[1:]); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return fail(stderr, "manifest validate: %v", err)
 	}
 	if flags.NArg() != 0 {
@@ -58,6 +71,130 @@ func runManifest(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "validate manifest: %v", err)
 	}
 	fmt.Fprintf(stdout, "manifest valid: %s (schema %d, formula %s)\n", *file, project.Schema, project.Formula.Name)
+	return 0
+}
+
+func runManifestExport(args []string, stdout, stderr io.Writer) int {
+	flags := newFlagSet("manifest export")
+	file := flags.String("file", "", "project manifest path")
+	repository := flags.String("repository", "", "calling owner/name repository")
+	githubOutput := flags.String("github-output", "", "GitHub Actions output path")
+	if err := flags.Parse(args); err != nil {
+		return fail(stderr, "manifest export: %v", err)
+	}
+	if flags.NArg() != 0 {
+		return fail(stderr, "manifest export: unexpected positional arguments")
+	}
+	if missing := missingFlags([]namedValue{{"--file", *file}, {"--repository", *repository}, {"--github-output", *githubOutput}}); len(missing) != 0 {
+		return fail(stderr, "manifest export: required flag missing: %s", strings.Join(missing, ", "))
+	}
+	project, err := readManifest(*file)
+	if err != nil {
+		return fail(stderr, "export manifest: %v", err)
+	}
+	values, err := project.WorkflowExport(*repository)
+	if err != nil {
+		return fail(stderr, "export manifest: %v", err)
+	}
+	fields := []githuboutput.Field{
+		{Key: "formula", Value: values.Formula},
+		{Key: "binary", Value: values.Binary},
+		{Key: "owner", Value: values.Owner},
+		{Key: "repository_name", Value: values.RepositoryName},
+		{Key: "repository", Value: values.Repository},
+		{Key: "arm64_asset", Value: values.ARM64Asset},
+		{Key: "amd64_asset", Value: values.AMD64Asset},
+		{Key: "build_script", Value: values.BuildScript},
+		{Key: "linux", Value: strconv.FormatBool(values.Linux)},
+	}
+	if err := githuboutput.Append(*githubOutput, fields); err != nil {
+		return fail(stderr, "export manifest: %v", err)
+	}
+	fmt.Fprintf(stdout, "manifest exported: %s (%s)\n", values.Formula, values.Repository)
+	return 0
+}
+
+func runRelease(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return fail(stderr, "release subcommand required; expected metadata or build")
+	}
+	switch args[0] {
+	case "metadata":
+		return runReleaseMetadata(args[1:], stdout, stderr)
+	case "build":
+		return runReleaseBuild(args[1:], stdout, stderr)
+	default:
+		return fail(stderr, "unknown release subcommand %q; expected metadata or build", args[0])
+	}
+}
+
+func runReleaseBuild(args []string, stdout, stderr io.Writer) int {
+	flags := newFlagSet("release build")
+	manifestPath := flags.String("manifest", "", "project manifest path")
+	version := flags.String("version", "", "normalized release version without v")
+	commit := flags.String("commit", "", "lowercase source commit")
+	source := flags.String("source", "", "source directory")
+	output := flags.String("output", "", "existing empty output directory")
+	if err := flags.Parse(args); err != nil {
+		return fail(stderr, "release build: %v", err)
+	}
+	if flags.NArg() != 0 {
+		return fail(stderr, "release build: unexpected positional arguments")
+	}
+	if missing := missingFlags([]namedValue{
+		{"--manifest", *manifestPath},
+		{"--version", *version},
+		{"--commit", *commit},
+		{"--source", *source},
+		{"--output", *output},
+	}); len(missing) != 0 {
+		return fail(stderr, "release build: required flag missing: %s", strings.Join(missing, ", "))
+	}
+	result, err := release.Build(release.BuildOptions{
+		ManifestPath: *manifestPath,
+		Version:      *version,
+		Commit:       *commit,
+		SourceDir:    *source,
+		OutputDir:    *output,
+	})
+	if err != nil {
+		return fail(stderr, "release build: %v", err)
+	}
+	fmt.Fprintf(stdout, "release built: %s (%s %s, %d archives)\n", *output, result.Formula, result.Version, len(result.Assets))
+	return 0
+}
+
+func runReleaseMetadata(args []string, stdout, stderr io.Writer) int {
+	flags := newFlagSet("release metadata")
+	tag := flags.String("tag", "", "v-prefixed release tag")
+	mode := flags.String("mode", "", "full or homebrew-only")
+	githubOutput := flags.String("github-output", "", "optional GitHub Actions output path")
+	if err := flags.Parse(args); err != nil {
+		return fail(stderr, "release metadata: %v", err)
+	}
+	if flags.NArg() != 0 {
+		return fail(stderr, "release metadata: unexpected positional arguments")
+	}
+	if missing := missingFlags([]namedValue{{"--tag", *tag}, {"--mode", *mode}}); len(missing) != 0 {
+		return fail(stderr, "release metadata: required flag missing: %s", strings.Join(missing, ", "))
+	}
+	metadata, err := release.ParseMetadata(*tag, *mode)
+	if err != nil {
+		return fail(stderr, "release metadata: %v", err)
+	}
+	if *githubOutput != "" {
+		fields := []githuboutput.Field{
+			{Key: "tag", Value: metadata.Tag},
+			{Key: "version", Value: metadata.Version},
+			{Key: "stable", Value: strconv.FormatBool(metadata.Stable)},
+			{Key: "prerelease", Value: strconv.FormatBool(metadata.Prerelease)},
+			{Key: "mode", Value: metadata.Mode},
+		}
+		if err := githuboutput.Append(*githubOutput, fields); err != nil {
+			return fail(stderr, "release metadata: %v", err)
+		}
+	}
+	fmt.Fprintf(stdout, "release metadata: %s (version %s, stable %t, prerelease %t, mode %s)\n", metadata.Tag, metadata.Version, metadata.Stable, metadata.Prerelease, metadata.Mode)
 	return 0
 }
 
@@ -159,6 +296,21 @@ func missingFormulaFlags(common formulaFlags, extra map[string]string) []string 
 	for _, key := range order {
 		if value, exists := values[key]; exists && value == "" {
 			missing = append(missing, key)
+		}
+	}
+	return missing
+}
+
+type namedValue struct {
+	name  string
+	value string
+}
+
+func missingFlags(values []namedValue) []string {
+	missing := make([]string, 0)
+	for _, value := range values {
+		if value.value == "" {
+			missing = append(missing, value.name)
 		}
 	}
 	return missing

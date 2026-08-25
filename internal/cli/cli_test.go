@@ -68,6 +68,153 @@ func TestManifestValidateReportsActionableError(t *testing.T) {
 	}
 }
 
+func TestReleaseMetadataCommandAndGitHubOutput(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "github-output")
+	if err := os.WriteFile(output, []byte("existing=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exitCode, stdout, stderr := execute(
+		"release", "metadata",
+		"--tag", "v1.2.3-rc.1",
+		"--mode", "full",
+		"--github-output", output,
+	)
+	if exitCode != 0 || stderr != "" {
+		t.Fatalf("Run(release metadata) = code %d, stdout %q, stderr %q", exitCode, stdout, stderr)
+	}
+	if want := "release metadata: v1.2.3-rc.1 (version 1.2.3-rc.1, stable false, prerelease true, mode full)\n"; stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutput := "existing=value\ntag=v1.2.3-rc.1\nversion=1.2.3-rc.1\nstable=false\nprerelease=true\nmode=full\n"
+	if string(data) != wantOutput {
+		t.Fatalf("GitHub output = %q, want %q", data, wantOutput)
+	}
+}
+
+func TestReleaseMetadataFailureDoesNotAppend(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "github-output")
+	const sentinel = "existing=value\n"
+	if err := os.WriteFile(output, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exitCode, stdout, stderr := execute(
+		"release", "metadata",
+		"--tag", "v1.2.3\ninjected=true",
+		"--mode", "full",
+		"--github-output", output,
+	)
+	if exitCode == 0 || stdout != "" || !strings.Contains(stderr, "error: release metadata") {
+		t.Fatalf("Run(invalid metadata) = code %d, stdout %q, stderr %q", exitCode, stdout, stderr)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil || string(data) != sentinel {
+		t.Fatalf("GitHub output = %q, error = %v", data, err)
+	}
+}
+
+func TestReleaseBuildCommand(t *testing.T) {
+	source := t.TempDir()
+	manifestData, err := os.ReadFile(filepath.Join("..", "..", "examples", "claude-rc-proxy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData = bytes.Replace(manifestData, []byte(`"linux": true`), []byte(`"linux": false`), 1)
+	manifestPath := filepath.Join(source, ".hextap.json")
+	if err := os.WriteFile(manifestPath, manifestData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"LICENSE": "license\n", "README.md": "readme\n"} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter := filepath.Join(source, "scripts", "hextap-build")
+	if err := os.MkdirAll(filepath.Dir(adapter), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(adapter, []byte("#!/bin/sh\nset -eu\nprintf '%s-%s' \"$HEXTAP_TARGET_OS\" \"$HEXTAP_TARGET_ARCH\" > \"$HEXTAP_OUTPUT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exitCode, stdout, stderr := execute(
+		"release", "build",
+		"--manifest", manifestPath,
+		"--version", "1.2.3",
+		"--commit", "0123456789abcdef",
+		"--source", source,
+		"--output", output,
+	)
+	if exitCode != 0 || stderr != "" {
+		t.Fatalf("Run(release build) = code %d, stdout %q, stderr %q", exitCode, stdout, stderr)
+	}
+	want := "release built: " + output + " (claude-rc-proxy 1.2.3, 2 archives)\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	for _, name := range []string{"claude-rc-proxy-darwin-arm64.tar.gz", "claude-rc-proxy-darwin-amd64.tar.gz", "SHA256SUMS"} {
+		if info, err := os.Stat(filepath.Join(output, name)); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("output %s missing or nonregular: %v", name, err)
+		}
+	}
+}
+
+func TestManifestExportCommand(t *testing.T) {
+	manifestPath := exampleManifest(t)
+	output := filepath.Join(t.TempDir(), "github-output")
+	if err := os.WriteFile(output, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exitCode, stdout, stderr := execute(
+		"manifest", "export",
+		"--file", manifestPath,
+		"--repository", "SijanC147/claude-rc-proxy",
+		"--github-output", output,
+	)
+	if exitCode != 0 || stderr != "" {
+		t.Fatalf("Run(manifest export) = code %d, stdout %q, stderr %q", exitCode, stdout, stderr)
+	}
+	if want := "manifest exported: claude-rc-proxy (SijanC147/claude-rc-proxy)\n"; stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutput := "formula=claude-rc-proxy\nbinary=claude-rc-proxy\nowner=SijanC147\nrepository_name=claude-rc-proxy\nrepository=SijanC147/claude-rc-proxy\narm64_asset=claude-rc-proxy-darwin-arm64.tar.gz\namd64_asset=claude-rc-proxy-darwin-amd64.tar.gz\nbuild_script=scripts/hextap-build\nlinux=true\n"
+	if string(data) != wantOutput {
+		t.Fatalf("GitHub output = %q, want %q", data, wantOutput)
+	}
+}
+
+func TestManifestExportRepositoryMismatchDoesNotAppend(t *testing.T) {
+	manifestPath := exampleManifest(t)
+	output := filepath.Join(t.TempDir(), "github-output")
+	const sentinel = "existing=value\n"
+	if err := os.WriteFile(output, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exitCode, stdout, stderr := execute(
+		"manifest", "export",
+		"--file", manifestPath,
+		"--repository", "SijanC147/other",
+		"--github-output", output,
+	)
+	if exitCode == 0 || stdout != "" || !strings.Contains(stderr, "does not match") {
+		t.Fatalf("Run(mismatched export) = code %d, stdout %q, stderr %q", exitCode, stdout, stderr)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil || string(data) != sentinel {
+		t.Fatalf("GitHub output = %q, error = %v", data, err)
+	}
+}
+
 func TestFormulaRenderAndUpdateCommands(t *testing.T) {
 	manifestPath := exampleManifest(t)
 	formulaPath := filepath.Join(t.TempDir(), "ClaudeRcProxy.rb")
@@ -156,6 +303,10 @@ func TestCLIRejectsMissingUnknownAndExtraArguments(t *testing.T) {
 		{"manifest", "validate"},
 		{"formula"},
 		{"formula", "unknown"},
+		{"release"},
+		{"release", "unknown"},
+		{"release", "metadata"},
+		{"release", "build", "--manifest", "x"},
 		{"formula", "render", "--manifest", "x"},
 		{"formula", "update", "extra"},
 	}
