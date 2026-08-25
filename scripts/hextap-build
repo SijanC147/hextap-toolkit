@@ -1,0 +1,119 @@
+#!/bin/sh
+set -eu
+
+LC_ALL=C
+export LC_ALL
+
+fail() {
+  printf 'error: %s\n' "$1" >&2
+  exit 64
+}
+
+validate_numeric_identifier() {
+  case "$1" in
+    0) ;;
+    [1-9]*)
+      case "$1" in
+        *[!0-9]*) fail "HEXTAP_VERSION contains an invalid numeric identifier" ;;
+      esac
+      ;;
+    *) fail "HEXTAP_VERSION contains an invalid numeric identifier" ;;
+  esac
+}
+
+validate_version_core() {
+  version_core=$1
+  case "$version_core" in
+    *.*) ;;
+    *) fail "HEXTAP_VERSION must contain three SemVer components" ;;
+  esac
+  version_major=${version_core%%.*}
+  version_remainder=${version_core#*.}
+  case "$version_remainder" in
+    *.*) ;;
+    *) fail "HEXTAP_VERSION must contain three SemVer components" ;;
+  esac
+  version_minor=${version_remainder%%.*}
+  version_patch=${version_remainder#*.}
+  case "$version_patch" in
+    *.*) fail "HEXTAP_VERSION must contain exactly three SemVer components" ;;
+  esac
+  validate_numeric_identifier "$version_major"
+  validate_numeric_identifier "$version_minor"
+  validate_numeric_identifier "$version_patch"
+}
+
+validate_prerelease() {
+  prerelease=$1
+  case "$prerelease" in
+    ""|.*|*.|*..*|*[!0-9A-Za-z.-]*) fail "HEXTAP_VERSION contains an invalid prerelease" ;;
+  esac
+  while :; do
+    identifier=${prerelease%%.*}
+    if [ "$identifier" = "$prerelease" ]; then
+      prerelease=
+    else
+      prerelease=${prerelease#*.}
+    fi
+    case "$identifier" in
+      *[!0-9]*) ;;
+      0|[1-9]*) ;;
+      *) fail "HEXTAP_VERSION contains a numeric prerelease identifier with a leading zero" ;;
+    esac
+    [ -n "$prerelease" ] || break
+  done
+}
+
+[ -n "${HEXTAP_TARGET_OS:-}" ] || fail "HEXTAP_TARGET_OS is required"
+[ -n "${HEXTAP_TARGET_ARCH:-}" ] || fail "HEXTAP_TARGET_ARCH is required"
+[ -n "${HEXTAP_OUTPUT:-}" ] || fail "HEXTAP_OUTPUT is required"
+[ -n "${HEXTAP_VERSION:-}" ] || fail "HEXTAP_VERSION is required"
+[ -n "${HEXTAP_COMMIT:-}" ] || fail "HEXTAP_COMMIT is required"
+
+case "$HEXTAP_TARGET_OS" in
+  darwin|linux) ;;
+  *) fail "HEXTAP_TARGET_OS must be darwin or linux" ;;
+esac
+case "$HEXTAP_TARGET_ARCH" in
+  arm64|amd64) ;;
+  *) fail "HEXTAP_TARGET_ARCH must be arm64 or amd64" ;;
+esac
+case "$HEXTAP_OUTPUT" in
+  /*) ;;
+  *) fail "HEXTAP_OUTPUT must be an absolute path" ;;
+esac
+if [ -e "$HEXTAP_OUTPUT" ] || [ -L "$HEXTAP_OUTPUT" ]; then
+  fail "HEXTAP_OUTPUT must not already exist"
+fi
+
+case "$HEXTAP_VERSION" in
+  *+*) fail "HEXTAP_VERSION must not contain build metadata" ;;
+  *-*)
+    version_core=${HEXTAP_VERSION%%-*}
+    version_prerelease=${HEXTAP_VERSION#*-}
+    ;;
+  *)
+    version_core=$HEXTAP_VERSION
+    version_prerelease=
+    ;;
+esac
+validate_version_core "$version_core"
+if [ -n "$version_prerelease" ]; then
+  validate_prerelease "$version_prerelease"
+elif [ "$version_core" != "$HEXTAP_VERSION" ]; then
+  fail "HEXTAP_VERSION contains an empty prerelease"
+fi
+
+case "$HEXTAP_COMMIT" in
+  *[!0-9a-f]*) fail "HEXTAP_COMMIT must be lowercase hexadecimal" ;;
+esac
+commit_length=${#HEXTAP_COMMIT}
+if [ "$commit_length" -lt 7 ] || [ "$commit_length" -gt 64 ]; then
+  fail "HEXTAP_COMMIT must contain 7 to 64 hexadecimal characters"
+fi
+
+umask 077
+CGO_ENABLED=0 GOOS="$HEXTAP_TARGET_OS" GOARCH="$HEXTAP_TARGET_ARCH" \
+  go build -mod=readonly -trimpath -buildvcs=false \
+  -ldflags "-s -w -X=main.version=$HEXTAP_VERSION -X=main.commit=$HEXTAP_COMMIT" \
+  -o "$HEXTAP_OUTPUT" ./cmd/brew-hextap

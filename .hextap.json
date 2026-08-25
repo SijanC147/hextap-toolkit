@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "formula": {
+    "name": "hextap",
+    "class": "Hextap",
+    "description": "Deterministic release and onboarding toolkit for Hextap",
+    "homepage": "https://github.com/SijanC147/hextap-toolkit",
+    "license": "MIT",
+    "repository": {
+      "owner": "SijanC147",
+      "name": "hextap-toolkit"
+    },
+    "binary": "brew-hextap",
+    "assets": {
+      "darwin_arm64": "hextap-darwin-arm64.tar.gz",
+      "darwin_amd64": "hextap-darwin-amd64.tar.gz"
+    }
+  },
+  "release": {
+    "build_script": "scripts/hextap-build",
+    "linux": true
+  },
+  "homebrew": {
+    "macos_only": true,
+    "test_args": [
+      "--version"
+    ],
+    "service": {
+      "enabled": false
+    },
+    "caveats": ""
+  }
+}

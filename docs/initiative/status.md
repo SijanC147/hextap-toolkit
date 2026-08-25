@@ -13,15 +13,17 @@ publication proof.
 | Release publication/recovery | Complete locally | Exact assets, draft resume, immutable published rerun acceptance, stable-only Homebrew. |
 | Tap publisher | Complete locally | Source/tap equality, manifest-declared assets, Formula-only stage, direct-push retry, exact tap CI SHA. |
 | `brew-hextap` command | Complete locally | `version`, `onboard`, `validate`, `doctor`; standard-library-only build. |
+| Toolkit self-release source | Complete locally | Strict self-manifest, one-binary adapter, same-commit relative caller, four native targets. |
 | Local onboarding | Complete locally | Seven artifacts, create-only rooted transaction, idempotent rerun, zero remote mutation. |
 | Read-only online doctor | Complete with fake integration | Main, immutable releases, secret name, exact rulesets, stable tag SHA, tap Project/Formula canonical content. |
 
 ## External gates before adopter publication
 
 1. Merge this toolkit PR after CI and human review.
-2. Complete the self-release P0 below, then publish a coordinator-controlled
-   stable toolkit release and record the exact tag-to-commit mapping. No
-   toolkit tag or release exists as part of this PR.
+2. After the source-side self-release P0 below is merged, satisfy its external
+   repository gates, publish a coordinator-controlled stable toolkit release,
+   and record the exact tag-to-commit mapping. No toolkit tag or release exists
+   as part of this PR.
 3. Merge the separately reviewed adopter and tap PRs. Coordinator evidence says
    adopter PR #4 head `dc576a7...5009` and tap PR #5 head `5e21bf3...9a3d`
    currently have equal manifests and green required checks; merge state remains
@@ -35,14 +37,22 @@ publication proof.
    `claude-rc-proxy v0.1.0` predates the current XDG-aware caveats and is outside
    the strict manifest-equality recovery window.
 
-## P0 before the first toolkit tag
+## Source-side P0 before the first toolkit tag
 
-The release boundary is decided, but self-release wiring is intentionally not
-added by this capped PR. Before creating toolkit `v0.1.0`, add and review the
-toolkit's own source manifest, build adapter, thin caller workflow, and paired
-tap registration/Formula bootstrap. The one-executable archive must contain
-`brew-hextap` only. `hextapctl` remains built from pinned source by reusable
-workflows and for development; multi-binary archives are out of scope.
+This branch adds the toolkit's own strict source manifest, validating build
+adapter, and same-commit thin caller. The one-executable archive contains
+`brew-hextap`, `LICENSE`, and `README.md`; `hextapctl` remains built from source
+by the reusable workflow and for development. The caller runs `full` only from
+a tag and reserves manual dispatch for `homebrew-only` recovery of an existing
+stable immutable tag.
+
+Before creating toolkit `v0.1.0`, the coordinator must merge this source
+change, enable immutable releases, configure the one required secret, and
+confirm the source rulesets. After the immutable source release exists, the
+separate tap bootstrap must pair the exact `Projects/hextap.json` registration
+with a release-backed `Formula/hextap.rb`; a later `homebrew-only` dispatch
+then completes or recovers Formula publication. None of those live or sibling
+repository mutations are performed by this branch.
 
 ## Follow-up work, not blockers for this PR
 
