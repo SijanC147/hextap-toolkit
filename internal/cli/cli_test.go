@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/SijanC147/hextap-toolkit/internal/release"
 )
 
 const (
@@ -37,6 +39,46 @@ func TestVersionCommand(t *testing.T) {
 	exitCode, stdout, stderr := execute("version")
 	if exitCode != 0 || stdout != "hextapctl 0.9.0 (commit abc1234)\n" || stderr != "" {
 		t.Fatalf("Run(version) = code %d, stdout %q, stderr %q", exitCode, stdout, stderr)
+	}
+}
+
+func TestReleaseVerifyCommandSmoke(t *testing.T) {
+	source := t.TempDir()
+	manifest := filepath.Join(source, ".hextap.json")
+	data, err := os.ReadFile(filepath.Join("..", "..", "examples", "claude-rc-proxy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.Replace(data, []byte(`"linux": true`), []byte(`"linux": false`), 1)
+	if err := os.WriteFile(manifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "LICENSE"), []byte("license\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("readme\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(source, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(source, "scripts", "hextap-build")
+	if err := os.WriteFile(adapter, []byte("#!/bin/sh\nset -eu\nGOOS=darwin GOARCH=\"$HEXTAP_TARGET_ARCH\" go build -o \"$HEXTAP_OUTPUT\" ./main.go\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "main.go"), []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := release.Build(release.BuildOptions{ManifestPath: manifest, Version: "1.2.3", Commit: "0123456", SourceDir: source, OutputDir: directory}); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := execute("release", "verify", "--manifest", manifest, "--version", "1.2.3", "--commit", "0123456", "--dir", directory)
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "release verified: "+directory) {
+		t.Fatalf("Run(verify) = code %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
 

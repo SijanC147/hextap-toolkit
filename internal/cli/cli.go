@@ -116,16 +116,57 @@ func runManifestExport(args []string, stdout, stderr io.Writer) int {
 
 func runRelease(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return fail(stderr, "release subcommand required; expected metadata or build")
+		return fail(stderr, "release subcommand required; expected metadata, build, or verify")
 	}
 	switch args[0] {
 	case "metadata":
 		return runReleaseMetadata(args[1:], stdout, stderr)
 	case "build":
 		return runReleaseBuild(args[1:], stdout, stderr)
+	case "verify":
+		return runReleaseVerify(args[1:], stdout, stderr)
 	default:
-		return fail(stderr, "unknown release subcommand %q; expected metadata or build", args[0])
+		return fail(stderr, "unknown release subcommand %q; expected metadata, build, or verify", args[0])
 	}
+}
+
+func runReleaseVerify(args []string, stdout, stderr io.Writer) int {
+	flags := newFlagSet("release verify")
+	manifestPath := flags.String("manifest", "", "project manifest path")
+	version := flags.String("version", "", "normalized release version without v")
+	commit := flags.String("commit", "", "lowercase source commit")
+	directory := flags.String("dir", "", "release distribution directory")
+	executeTarget := flags.String("execute-target", "", "optional target to execute, such as darwin-arm64")
+	if err := flags.Parse(args); err != nil {
+		return fail(stderr, "release verify: %v", err)
+	}
+	if flags.NArg() != 0 {
+		return fail(stderr, "release verify: unexpected positional arguments")
+	}
+	if missing := missingFlags([]namedValue{
+		{"--manifest", *manifestPath},
+		{"--version", *version},
+		{"--commit", *commit},
+		{"--dir", *directory},
+	}); len(missing) != 0 {
+		return fail(stderr, "release verify: required flag missing: %s", strings.Join(missing, ", "))
+	}
+	result, err := release.Verify(release.VerifyOptions{
+		ManifestPath:  *manifestPath,
+		Version:       *version,
+		Commit:        *commit,
+		Directory:     *directory,
+		ExecuteTarget: *executeTarget,
+	})
+	if err != nil {
+		return fail(stderr, "release verify: %v", err)
+	}
+	if result.ExecutedTarget != "" {
+		fmt.Fprintf(stdout, "release verified: %s (%s %s, %d archives, executed %s)\n", *directory, result.Formula, result.Version, len(result.Assets), result.ExecutedTarget)
+	} else {
+		fmt.Fprintf(stdout, "release verified: %s (%s %s, %d archives)\n", *directory, result.Formula, result.Version, len(result.Assets))
+	}
+	return 0
 }
 
 func runReleaseBuild(args []string, stdout, stderr io.Writer) int {

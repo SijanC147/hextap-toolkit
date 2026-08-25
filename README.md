@@ -235,6 +235,34 @@ owners, and timestamps are canonical, so identical adapter output produces
 byte-identical release files. A failed target leaves the output directory
 empty.
 
+### Verify release archives
+
+```sh
+hextapctl release verify \
+  --manifest /path/to/project/.hextap.json \
+  --version 1.2.3 \
+  --commit 0123456789abcdef0123456789abcdef01234567 \
+  --dir /path/to/project/dist
+```
+
+Verification derives the exact archive set from the manifest, checks the
+strict sorted `SHA256SUMS` file, and validates every gzip/tar header, member,
+mode, owner, timestamp, size, and executable format. Darwin archives must
+contain a single-architecture Mach-O executable; Linux archives must contain
+a 64-bit x86_64 or aarch64 ELF executable. The distribution directory is
+read-only to the verifier. On a matching host, an optional target check also
+extracts only that target's binary into a private temporary directory and
+requires its exact version output:
+
+```sh
+hextapctl release verify \
+  --manifest /path/to/project/.hextap.json \
+  --version 1.2.3 \
+  --commit 0123456789abcdef0123456789abcdef01234567 \
+  --dir /path/to/project/dist \
+  --execute-target darwin-arm64
+```
+
 #### Build-adapter contract
 
 The adapter runs with the source directory as its working directory, no stdin,
