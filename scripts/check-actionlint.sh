@@ -28,7 +28,7 @@ fi
 # upstream support, accept only the exact known schema-lag diagnostics. Any new
 # diagnostic, missing expected diagnostic, or different actionlint version
 # fails closed.
-if [[ "$version" != "1.7.12" ]]; then
+if [[ "$version" != "1.7.12" && "$version" != "v1.7.12" ]]; then
   printf '%s\n' "$diagnostics" >&2
   echo "actionlint $version reported unexpected diagnostics" >&2
   exit 1
