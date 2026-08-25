@@ -424,7 +424,17 @@ func pathWithin(root, candidate string) bool {
 func runAdapter(adapterPath, sourceDir, binaryPath string, buildTarget target, version, commit string) error {
 	timer := time.NewTimer(defaultBuildTimeout)
 	defer timer.Stop()
-	return runAdapterWithControl(adapterPath, sourceDir, binaryPath, buildTarget, version, commit, timer.C, terminateProcessTree)
+	return runAdapterWithControl(adapterPath, sourceDir, binaryPath, buildTarget, version, commit, timer.C, terminateAdapter)
+}
+
+func terminateAdapter(command *exec.Cmd) {
+	killAdapterLeader(command.Process)
+}
+
+func killAdapterLeader(process *os.Process) {
+	if process != nil {
+		_ = process.Kill()
+	}
 }
 
 func runAdapterWithControl(adapterPath, sourceDir, binaryPath string, buildTarget target, version, commit string, timeout <-chan time.Time, terminate func(*exec.Cmd)) error {
@@ -434,7 +444,6 @@ func runAdapterWithControl(adapterPath, sourceDir, binaryPath string, buildTarge
 	command.Stdin = nil
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
-	configureProcess(command)
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("start build adapter for %s-%s: %w", buildTarget.OS, buildTarget.Arch, err)
 	}
@@ -450,8 +459,8 @@ func runAdapterWithControl(adapterPath, sourceDir, binaryPath string, buildTarge
 		return nil
 	case <-timeout:
 		// Prefer a completed Wait if timeout and exit became ready together.
-		// terminateProcessTree additionally verifies that the leader has not
-		// already been reaped before signaling its process group.
+		// The timeout path kills only the still-unreaped adapter leader; child
+		// process cleanup is the adapter or runner's responsibility.
 		select {
 		case err := <-wait:
 			if err != nil {

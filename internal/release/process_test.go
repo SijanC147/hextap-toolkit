@@ -3,7 +3,6 @@
 package release
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,18 +43,23 @@ func TestRunAdapterDoesNotKillCompletedAdapter(t *testing.T) {
 	}
 }
 
-func TestRunAdapterKillsOnlyOnTimeoutBeforeWait(t *testing.T) {
-	adapter := writeAdapterScript(t, "#!/bin/sh\nsleep 30\n")
+func TestRunAdapterKillsAndReapsLeaderOnlyOnTimeout(t *testing.T) {
+	adapter := writeAdapterScript(t, "#!/bin/sh\nexec sleep 30\n")
 	var terminateCalls atomic.Int32
+	var killedCommand *exec.Cmd
 	timeout := make(chan time.Time, 1)
 	timeout <- time.Now()
 	err := runAdapterWithControl(adapter, t.TempDir(), filepath.Join(t.TempDir(), "output"), target{OS: "darwin", Arch: "arm64"}, "1.2.3", testCommit, timeout, func(command *exec.Cmd) {
 		terminateCalls.Add(1)
+		killedCommand = command
 		if command.Process == nil {
 			t.Error("terminate callback received command without a process")
 			return
 		}
-		terminateProcessTree(command)
+		if command.SysProcAttr != nil {
+			t.Errorf("adapter process has process-group attributes: %#v", command.SysProcAttr)
+		}
+		killAdapterLeader(command.Process)
 	})
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("runAdapterWithControl() error = %v, want timeout", err)
@@ -63,28 +67,8 @@ func TestRunAdapterKillsOnlyOnTimeoutBeforeWait(t *testing.T) {
 	if got := terminateCalls.Load(); got != 1 {
 		t.Fatalf("terminate callback calls = %d, want 1", got)
 	}
-}
-
-func TestTerminateProcessTreeDoesNotSignalGroupAfterWait(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "survived")
-	adapter := writeAdapterScript(t, fmt.Sprintf("#!/bin/sh\n(sleep 0.2; printf survived > %q) &\nexit 0\n", marker))
-	command := exec.Command(adapter)
-	configureProcess(command)
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	if err := command.Wait(); err != nil {
-		t.Fatal(err)
-	}
-
-	// The leader has been reaped. Its child remains in the process group and
-	// must not be reached through a stale negative PGID signal.
-	terminateProcessTree(command)
-	time.Sleep(500 * time.Millisecond)
-	if got, err := os.ReadFile(marker); err != nil {
-		t.Fatalf("post-wait child marker was removed by termination: %v", err)
-	} else if string(got) != "survived" {
-		t.Fatalf("post-wait child marker = %q", got)
+	if killedCommand == nil || killedCommand.ProcessState == nil {
+		t.Fatal("timeout adapter leader was not reaped before return")
 	}
 }
 

@@ -263,7 +263,9 @@ toolkit normalizes its archived mode to `0755`; the adapter must embed
 `HEXTAP_VERSION` and `HEXTAP_COMMIT` itself when the project exposes build
 metadata. Each adapter invocation has a 15-minute timeout.
 Adapters must not daemonize or intentionally leave child processes behind;
-they must finish all work before the adapter process exits.
+they must finish all work before the adapter process exits. On timeout, the
+toolkit kills only the adapter leader and waits for it; child-process cleanup
+is the adapter or runner's responsibility and is outside this core.
 
 ### Render a new Formula
 
