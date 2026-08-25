@@ -1,26 +1,25 @@
 # hextap-toolkit
 
-`hextap-toolkit` is the deterministic, dependency-free core for reusable
-release automation targeting the private Hextap Homebrew tap. Its
-`hextapctl` command validates versioned project manifests and renders or
-metadata-updates Homebrew Formulae without allowing project input to inject
-Ruby or shell code.
+`hextap-toolkit` is the deterministic, dependency-free release and onboarding
+toolkit for the private Hextap Homebrew tap. `hextapctl` remains the workflow
+engine that validates manifests, builds and verifies archives, and renders or
+updates Formulae. The separately installable `brew-hextap` executable is the
+human-facing `brew hextap` command for conflict-safe local onboarding,
+validation, and read-only doctor checks.
 
-This repository currently contains **toolkit core only**. It does not yet
-contain the complete release stack: reusable GitHub Actions workflows, secret
-loading, repository onboarding/mutation, direct tap publication, CI polling,
-the `brew hextap` wrapper, and portable LLM Agent Skills will be added and
-validated separately.
+The durable initiative architecture, ownership boundaries, decisions, and
+live-gate roadmap are under [`docs/initiative`](docs/initiative/architecture.md).
 
 ## Requirements and build
 
 - Go 1.26 or newer
 - Standard library only; there are no production dependencies
 
-Build a development binary:
+Build the development binaries:
 
 ```sh
 go build -o dist/hextapctl ./cmd/hextapctl
+go build -o dist/brew-hextap ./cmd/brew-hextap
 ```
 
 Release builds inject a stable version and source commit:
@@ -33,13 +32,128 @@ go build \
 
 dist/hextapctl version
 # hextapctl 0.1.0 (commit abc1234)
+
+go build \
+  -ldflags '-s -w -X main.version=v0.1.0 -X main.commit=0123456789abcdef0123456789abcdef01234567' \
+  -o dist/brew-hextap \
+  ./cmd/brew-hextap
+
+dist/brew-hextap --version
+# brew-hextap v0.1.0 (commit 0123456789abcdef0123456789abcdef01234567)
 ```
+
+## Local onboarding
+
+Homebrew exposes `brew-hextap` as `brew hextap`. A stable installed build can
+use its linker-injected toolkit tag and full commit as the workflow pin;
+development builds must receive both values explicitly:
+
+```sh
+brew hextap onboard \
+  --project . \
+  --description "A narrow Go command" \
+  --license MIT \
+  --go-package . \
+  --toolkit-version v0.1.0 \
+  --toolkit-sha 0123456789abcdef0123456789abcdef01234567 \
+  --required-check test \
+  --required-check lint \
+  --linux=true
+```
+
+Use `--dry-run` to print the complete `CREATE` / `UNCHANGED` / `VALIDATED`
+plan without writing. Onboarding preflights every target before its first
+write and never replaces an existing managed file or valid custom adapter.
+It creates the strict manifest, fixed Go build adapter, pinned reusable
+workflow caller, exact tap-registration payload, two reviewable ruleset API
+bodies, and `.hextap/SETUP.md` with the remaining owner-controlled steps.
+An authoritative existing manifest is preserved byte-for-byte, including a
+valid document without a trailing newline, and a custom adapter may contain
+arbitrary executable bytes. Final-newline checks apply only to
+toolkit-generated managed text. All decoded manifest string metadata is
+credential-scanned before planning or copying the exact tap payload; custom
+adapter bytes are deliberately exempt because they are neither copied nor
+published as metadata.
+
+Apply mode pins the project root before preparation, snapshots every existing
+managed target and parent, acquires an exclusive create-only onboarding lock,
+and revalidates before publication and success. All file content is prepared
+and synced under a private staging directory before create-only hard-link
+publication. A noncooperative publication race preserves the competing path
+and reports any already-published lexical prefix instead of attempting an
+unsafe rollback.
+
+Local validation is read-only unless the explicit build smoke is selected:
+
+```sh
+brew hextap validate --project .
+brew hextap validate --project . --build
+brew hextap doctor --project .
+brew hextap doctor --project . --online
+```
+
+Default doctor never executes the project adapter and never calls GitHub.
+Online doctor adds bounded, read-only `gh` queries for authentication, `main`,
+immutable releases, the required secret name, owned active rulesets, stable
+toolkit provenance, and the paired tap registration plus Formula. Rulesets
+must be active repository-owned objects whose fetched bodies exactly match the
+local normalized policies. Toolkit provenance starts from the exact tag ref
+and peels annotated tag objects with bounded cycle/type checks; it never uses
+an ambiguous branch-or-tag commit-ish lookup. Doctor never reads a secret
+value or repairs remote state. Remote Formula validation fails closed: after
+an optional blank/comment/block-comment prelude, the first semantic Ruby line
+must be the exact registered top-level Formula class declaration.
+Every `gh` call is explicitly pinned to `github.com`; `GH_HOST` cannot redirect
+doctor or the generated setup commands. Readiness also requires the entire
+Formula to equal the deterministic manifest rendering for its validated
+current stable URLs and SHA-256 metadata, not merely a matching class line.
+
+## Managed reusable workflow
+
+Generated callers pin the full commit SHA of an exact stable toolkit release;
+they never call mutable `@main`. Within the called workflow, all five toolkit
+checkouts use GitHub's server-resolved `job.workflow_sha` so YAML, Go code, and
+publisher scripts come from one commit.
+
+The validate job resolves and detaches the requested source tag before reading
+the tracked manifest. That exact validated file is uploaded once, identified by
+artifact ID, and bound to an explicit content SHA-256. Build, native verify,
+release, and Homebrew jobs download and recheck the same bytes. Source quality
+is a hard publication dependency, `release.linux` controls the native matrix,
+and per-repository release runs use a non-canceling queued concurrency group.
+
+Full mode accepts stable and prerelease tags and produces an exact immutable
+GitHub release. Only stable releases may enter Homebrew. `homebrew-only` is a
+stable recovery mode for an existing immutable verified release only while the
+requested tag's manifest remains fully semantically equal to the current tap
+registration. It is deliberately not an all-historical-tags recovery promise:
+there are no field exceptions or versioned registry snapshots in schema 1.
+The Homebrew job is the only place the explicitly mapped
+`OP_SERVICE_ACCOUNT_TOKEN` is visible; it loads the tap credential from
+1Password, requires that equality, changes only Formula URL/SHA metadata, and
+verifies tap CI at the exact direct-push commit. An out-of-window attempt fails
+explicitly with `tap/source manifest mismatch` before Formula mutation.
+
+The existing `claude-rc-proxy v0.1.0` tag is outside that recovery window after
+the XDG-aware caveat evolution. Recovery will be proven with the next stable
+tag whose source manifest is aligned with the current tap registration.
+
+For the first toolkit `v0.1.0`, the one-executable archive contains
+`brew-hextap` only. The future Formula installs that binary to expose
+`brew hextap`; `hextapctl` stays source-built inside the pinned reusable
+workflow. The toolkit's own self-release manifest/caller and paired tap
+bootstrap are the immediate coordinator-owned P0 before tagging, not part of
+this PR.
 
 ## Project manifest schema
 
 Every project is described by one strict JSON document. The current schema is
-`1`; unknown fields, missing required fields, multiple JSON documents, unsafe
-paths, and values that could escape generated Ruby are rejected.
+`1`; duplicate object keys at any nesting level, mis-cased/case-fold aliases,
+invalid or lossy Unicode, unknown fields, missing required fields, multiple
+JSON documents, unsafe paths, and values that could escape generated Ruby are
+rejected. Filesystem basenames/components are limited to 255 ASCII bytes,
+relative paths to 1024 bytes, and formula names reserve enough room for every
+generated Darwin/Linux archive and tap-registration suffix.
 
 The canonical example is
 [`examples/claude-rc-proxy.json`](examples/claude-rc-proxy.json). The checked-in
@@ -48,12 +162,13 @@ machine-readable contract for editors and other tooling without adding a
 runtime dependency. The checked-in standard-library conformance suite runs one
 shared valid/invalid corpus through both the schema evaluator and
 `manifest.Parse`, and rejects schema keywords the evaluator does not implement.
-The Go validator remains authoritative. JSON Schema cannot express four
+The Go validator remains authoritative. JSON Schema cannot express five
 schema-1/input checks exactly: `formula.class` derived from `formula.name`,
 distinct arm64/amd64 asset values, the caveats rule that only `{{home}}` and
 `{{var}}` placeholders are accepted, and the raw-input requirement that a file
-contain exactly one JSON document with no trailing value. Call `hextapctl
-manifest validate` before rendering or publishing even when an editor reports
+contain no duplicate object keys and exactly one JSON document with no
+trailing value. Call `hextapctl manifest validate` before rendering or
+publishing even when an editor reports
 that the JSON Schema is valid. The schema has this stable shape:
 
 ```json
@@ -264,10 +379,11 @@ hextapctl release verify \
 ```
 
 The verification runner executes from a private temporary working directory
-with a minimal environment and bounded file-backed stdout/stderr captures.
-Release binaries must not daemonize or intentionally retain the runner's
-descriptor handles; the runner terminates and reaps only the direct process,
-while the surrounding release runner owns any descendant cleanup policy.
+with a minimal environment. Stdout and stderr are bounded live in memory to
+16 KiB each; overflow cancels execution before output can fill disk. On Unix,
+the binary runs in a dedicated process group and timeout or overflow kills and
+reaps that group, including ordinary descendants. Other platforms retain the
+same live memory bounds and terminate the direct process.
 
 #### Build-adapter contract
 
@@ -367,5 +483,16 @@ test -z "$(gofmt -l .)"
 go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
-go build -trimpath ./cmd/hextapctl
+go build -trimpath ./...
+bash -n scripts/*.sh
+shellcheck scripts/*.sh
+scripts/check-actionlint.sh
 ```
+
+GitHub currently documents `concurrency.queue: max` and the reusable-job
+`job.workflow_sha` identity fields. Actionlint 1.7.12 predates both. The checker
+script does not suppress diagnostics broadly: for the pinned 1.7.12 version it
+requires a nonzero result containing exactly the reviewed one queue plus five
+workflow-SHA schema-lag diagnostics, and fails on a clean/no-op, missing,
+additional, changed, or differently versioned result. A future Actionlint
+upgrade must update that expectation explicitly.

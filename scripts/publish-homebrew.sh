@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-if [[ $# -ne 6 ]]; then
-  echo "usage: publish-homebrew.sh <source-repository> <tag> <version> <formula> <asset-directory> <hextapctl>" >&2
+if [[ $# -ne 7 ]]; then
+  echo "usage: publish-homebrew.sh <source-repository> <tag> <version> <formula> <source-manifest> <asset-directory> <hextapctl>" >&2
   exit 64
 fi
 
@@ -11,22 +11,18 @@ source_repository="$1"
 tag="$2"
 version="$3"
 formula="$4"
-asset_dir="$(cd -- "$5" && pwd)"
-hextapctl="$6"
+source_manifest="$5"
+asset_dir="$(cd -- "$6" && pwd)"
+hextapctl="$7"
 tap_repository="SijanC147/homebrew-hextap"
 
 [[ "$source_repository" =~ ^SijanC147/[A-Za-z0-9_.-]+$ ]]
 [[ "$tag" == "v$version" ]]
 [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 [[ "$formula" =~ ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$ ]]
+[[ -f "$source_manifest" && ! -L "$source_manifest" ]]
 [[ -x "$hextapctl" ]]
 [[ -n "${GH_TOKEN:-}" ]]
-
-arm64_asset="$formula-darwin-arm64.tar.gz"
-amd64_asset="$formula-darwin-amd64.tar.gz"
-arm64_sha="$(awk -v file="$arm64_asset" '$2 == file { print $1 }' "$asset_dir/SHA256SUMS")"
-amd64_sha="$(awk -v file="$amd64_asset" '$2 == file { print $1 }' "$asset_dir/SHA256SUMS")"
-[[ "$arm64_sha" =~ ^[0-9a-f]{64}$ && "$amd64_sha" =~ ^[0-9a-f]{64}$ ]]
 
 workspace="$(mktemp -d)"
 trap 'find "$workspace" -depth -delete' EXIT
@@ -34,21 +30,49 @@ gh auth setup-git >/dev/null
 
 status=""
 tap_commit=""
+last_push_output=""
 for attempt in 1 2 3; do
   attempt_dir="$workspace/attempt-$attempt"
   gh repo clone "$tap_repository" "$attempt_dir" -- --branch main --depth 1 >/dev/null
   manifest="$attempt_dir/Projects/$formula.json"
   formula_path="$attempt_dir/Formula/$formula.rb"
-  [[ -f "$manifest" ]] || {
+  [[ -f "$manifest" && ! -L "$manifest" ]] || {
     echo "tap project is not registered: Projects/$formula.json" >&2
     exit 1
   }
+
+  ruby -rjson -e '
+    source=JSON.parse(File.read(ARGV.fetch(0)))
+    registered=JSON.parse(File.read(ARGV.fetch(1)))
+    abort "tap/source manifest mismatch" unless source == registered
+  ' "$source_manifest" "$manifest"
 
   registered_repo="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV[0])); puts "#{j.dig("formula","repository","owner")}/#{j.dig("formula","repository","name")}"' "$manifest")"
   [[ "$registered_repo" == "$source_repository" ]] || {
     echo "tap registration repository mismatch" >&2
     exit 1
   }
+  registered_formula="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("formula").fetch("name")' "$manifest")"
+  [[ "$registered_formula" == "$formula" ]] || {
+    echo "tap registration formula mismatch" >&2
+    exit 1
+  }
+
+  IFS=$'\t' read -r arm64_asset amd64_asset <<< "$(ruby -rjson -e '
+    assets=JSON.parse(File.read(ARGV.fetch(0))).fetch("formula").fetch("assets")
+    puts [assets.fetch("darwin_arm64"), assets.fetch("darwin_amd64")].join("\t")
+  ' "$manifest")"
+  [[ "$arm64_asset" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.tar\.gz$ ]]
+  [[ "$amd64_asset" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.tar\.gz$ ]]
+  [[ "$(basename -- "$arm64_asset")" == "$arm64_asset" ]]
+  [[ "$(basename -- "$amd64_asset")" == "$amd64_asset" ]]
+  [[ "$arm64_asset" != "$amd64_asset" ]]
+
+  checksums="$asset_dir/SHA256SUMS"
+  [[ -f "$checksums" && ! -L "$checksums" ]]
+  arm64_sha="$(awk -v file="$arm64_asset" '$2 == file { print $1 }' "$checksums")"
+  amd64_sha="$(awk -v file="$amd64_asset" '$2 == file { print $1 }' "$checksums")"
+  [[ "$arm64_sha" =~ ^[0-9a-f]{64}$ && "$amd64_sha" =~ ^[0-9a-f]{64}$ ]]
 
   if [[ -f "$formula_path" ]]; then
     "$hextapctl" formula update --manifest "$manifest" --formula "$formula_path" \
@@ -62,8 +86,7 @@ for attempt in 1 2 3; do
   git -C "$attempt_dir" add "Formula/$formula.rb"
   if git -C "$attempt_dir" diff --cached --quiet; then
     status="already-current"
-    tap_commit="$(git -C "$attempt_dir" log -1 --format=%H -- "Formula/$formula.rb")"
-    [[ -n "$tap_commit" ]] || tap_commit="$(git -C "$attempt_dir" rev-parse HEAD)"
+    tap_commit="$(git -C "$attempt_dir" rev-parse HEAD)"
     break
   fi
 
@@ -73,15 +96,31 @@ for attempt in 1 2 3; do
   git -C "$attempt_dir" config user.email "actions@github.com"
   git -C "$attempt_dir" commit -m "Update $formula to $version" >/dev/null
   tap_commit="$(git -C "$attempt_dir" rev-parse HEAD)"
-  if git -C "$attempt_dir" push origin HEAD:main >/dev/null 2>&1; then
+  if push_output="$(git -C "$attempt_dir" push origin HEAD:main 2>&1)"; then
     status="published"
     break
+  else
+    push_status=$?
   fi
+  push_diagnostic="${push_output,,}"
+  case "$push_diagnostic" in
+    *"fetch first"* | *"non-fast-forward"*)
+      last_push_output="$push_output"
+      ;;
+    *)
+      printf '%s\n' "$push_output" >&2
+      exit "$push_status"
+      ;;
+  esac
   tap_commit=""
+  if (( attempt < 3 )); then
+    sleep "$attempt"
+  fi
 done
 
 [[ -n "$tap_commit" ]] || {
   echo "tap main moved during all publication attempts" >&2
+  [[ -z "$last_push_output" ]] || printf '%s\n' "$last_push_output" >&2
   exit 1
 }
 

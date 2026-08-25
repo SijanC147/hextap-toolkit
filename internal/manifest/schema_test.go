@@ -90,6 +90,17 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 	assertDefinitionPattern(t, definitions, "relativePath", relativePathPattern.String())
 	assertDefinitionPattern(t, definitions, "environmentKey", environmentPattern.String())
 	assertDefinitionPattern(t, definitions, "argument", argumentPattern.String())
+	for name, expected := range map[string]int{
+		"formulaName":  maxFormulaNameBytes,
+		"className":    maxPathComponentBytes,
+		"fileName":     maxPathComponentBytes,
+		"assetName":    maxPathComponentBytes,
+		"relativePath": maxRelativePathBytes,
+	} {
+		if got := nestedNumber(t, definitions, name, "maxLength"); got != expected {
+			t.Fatalf("$defs.%s.maxLength = %d, want %d", name, got, expected)
+		}
+	}
 }
 
 func TestExampleFixtureConformsToGoAndMachineSchema(t *testing.T) {
@@ -138,11 +149,20 @@ func TestManifestConformanceCorpus(t *testing.T) {
 		{name: "invalid schema const", mutate: func(value map[string]any) { value["schema"] = float64(2) }},
 		{name: "invalid missing release", mutate: func(value map[string]any) { delete(value, "release") }},
 		{name: "invalid root property", mutate: func(value map[string]any) { value["unknown"] = true }},
+		{name: "invalid case-fold alias", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["Name"] = "claude-rc-proxy"
+		}},
 		{name: "invalid macos false", mutate: func(value map[string]any) {
 			object(t, value["homebrew"], "homebrew")["macos_only"] = false
 		}},
 		{name: "invalid formula name pattern", mutate: func(value map[string]any) {
 			object(t, value["formula"], "formula")["name"] = "2tool"
+		}},
+		{name: "invalid formula generated suffix length", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["name"] = strings.Repeat("a", maxFormulaNameBytes+1)
+		}},
+		{name: "invalid binary component length", mutate: func(value map[string]any) {
+			object(t, value["formula"], "formula")["binary"] = strings.Repeat("a", maxPathComponentBytes+1)
 		}},
 		{name: "invalid owner maximum", mutate: func(value map[string]any) {
 			formula := object(t, value["formula"], "formula")
@@ -175,6 +195,10 @@ func TestManifestConformanceCorpus(t *testing.T) {
 		}},
 		{name: "invalid build path", mutate: func(value map[string]any) {
 			object(t, value["release"], "release")["build_script"] = "../build"
+		}},
+		{name: "invalid build path total length", mutate: func(value map[string]any) {
+			part := strings.Repeat("a", 250)
+			object(t, value["release"], "release")["build_script"] = strings.Join([]string{part, part, part, part, part}, "/")
 		}},
 		{name: "invalid boolean type", mutate: func(value map[string]any) {
 			object(t, value["release"], "release")["linux"] = "yes"

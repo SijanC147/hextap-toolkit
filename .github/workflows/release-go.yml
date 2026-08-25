@@ -16,6 +16,11 @@ on:
       op_service_account_token:
         required: true
 
+concurrency:
+  group: hextap-release-${{ github.repository }}
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   validate:
     name: Validate release
@@ -30,11 +35,16 @@ jobs:
       mode: ${{ steps.metadata.outputs.mode }}
       sha: ${{ steps.source.outputs.sha }}
       formula: ${{ steps.manifest.outputs.formula }}
+      linux: ${{ steps.manifest.outputs.linux }}
+      native_matrix: ${{ steps.native-matrix.outputs.matrix }}
+      manifest_artifact_id: ${{ steps.manifest-artifact.outputs.artifact-id }}
+      manifest_sha256: ${{ steps.manifest.outputs.sha256 }}
     steps:
       - name: Check out caller source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          fetch-tags: true
           path: source
           persist-credentials: false
 
@@ -42,7 +52,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit
-          ref: main
+          ref: ${{ job.workflow_sha }}
           path: toolkit
           persist-credentials: false
 
@@ -58,34 +68,89 @@ jobs:
 
       - name: Normalize release metadata
         id: metadata
-        run: >-
-          "$RUNNER_TEMP/hextapctl" release metadata
-          --tag "${{ inputs.tag }}"
-          --mode "${{ inputs.mode }}"
-          --github-output "$GITHUB_OUTPUT"
+        env:
+          RAW_RELEASE_TAG: ${{ inputs.tag }}
+          RAW_RELEASE_MODE: ${{ inputs.mode }}
+        run: |
+          "$RUNNER_TEMP/hextapctl" release metadata \
+            --tag "$RAW_RELEASE_TAG" \
+            --mode "$RAW_RELEASE_MODE" \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Export caller manifest
-        id: manifest
-        run: >-
-          "$RUNNER_TEMP/hextapctl" manifest export
-          --file "source/${{ inputs.manifest_path }}"
-          --repository "$GITHUB_REPOSITORY"
-          --github-output "$GITHUB_OUTPUT"
-
-      - name: Require tag on canonical main
+      - name: Resolve and detach tagged source
         id: source
         env:
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
           RELEASE_MODE: ${{ steps.metadata.outputs.mode }}
         run: |
-          git -C source fetch origin refs/heads/main:refs/remotes/origin/main --tags
+          git -C source show-ref --verify --quiet refs/remotes/origin/main
           sha="$(git -C source rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+          [[ "$sha" =~ ^[0-9a-f]{40,64}$ ]]
           git -C source merge-base --is-ancestor "$sha" origin/main
           if [[ "$RELEASE_MODE" == full ]]; then
             [[ "$GITHUB_REF" == "refs/tags/$RELEASE_TAG" ]]
             [[ "$GITHUB_SHA" == "$sha" ]]
           fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          git -C source checkout --detach "$sha"
+          [[ "$(git -C source rev-parse HEAD)" == "$sha" ]]
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Validate and seal caller manifest
+        id: manifest
+        env:
+          CALLER_MANIFEST_PATH: ${{ inputs.manifest_path }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+        run: |
+          [[ -n "$CALLER_MANIFEST_PATH" ]]
+          [[ "$CALLER_MANIFEST_PATH" != /* ]]
+          [[ "$CALLER_MANIFEST_PATH" != *$'\n'* && "$CALLER_MANIFEST_PATH" != *$'\r'* ]]
+
+          source_root="$(realpath -e "$GITHUB_WORKSPACE/source")"
+          candidate="$source_root/$CALLER_MANIFEST_PATH"
+          resolved_manifest="$(realpath -e -- "$candidate")"
+          [[ "$resolved_manifest" == "$candidate" ]]
+          [[ "$resolved_manifest" == "$source_root/"* ]]
+          [[ -f "$resolved_manifest" && ! -L "$resolved_manifest" ]]
+
+          pathspec=":(top,literal)$CALLER_MANIFEST_PATH"
+          index_entry="$(git -C "$source_root" ls-files --error-unmatch --stage -- "$pathspec")"
+          read -r tracked_mode tracked_oid tracked_stage tracked_path <<< "$index_entry"
+          [[ "$tracked_mode" == 100644 || "$tracked_mode" == 100755 ]]
+          [[ "$tracked_oid" =~ ^[0-9a-f]{40,64}$ ]]
+          [[ "$tracked_stage" == 0 && -n "$tracked_path" ]]
+
+          validated_manifest="$RUNNER_TEMP/project-manifest.json"
+          [[ ! -e "$validated_manifest" && ! -L "$validated_manifest" ]]
+          umask 077
+          cp -- "$resolved_manifest" "$validated_manifest"
+          chmod 600 "$validated_manifest"
+          [[ -f "$validated_manifest" && ! -L "$validated_manifest" ]]
+          copied_oid="$(git -C "$source_root" hash-object --no-filters "$validated_manifest")"
+          [[ "$copied_oid" == "$tracked_oid" ]]
+
+          "$RUNNER_TEMP/hextapctl" manifest export \
+            --file "$validated_manifest" \
+            --repository "$CALLER_REPOSITORY" \
+            --github-output "$GITHUB_OUTPUT"
+          manifest_sha256="$(sha256sum "$validated_manifest" | cut -d ' ' -f 1)"
+          [[ "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf 'sha256=%s\n' "$manifest_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Select native verification matrix
+        id: native-matrix
+        env:
+          RELEASE_LINUX: ${{ steps.manifest.outputs.linux }}
+        run: |
+          darwin_matrix='{"include":[{"runner":"macos-15","target":"darwin-arm64"},{"runner":"macos-15-intel","target":"darwin-amd64"}]}'
+          if [[ "$RELEASE_LINUX" == true ]]; then
+            matrix='{"include":[{"runner":"ubuntu-24.04","target":"linux-amd64"},{"runner":"ubuntu-24.04-arm","target":"linux-arm64"},{"runner":"macos-15","target":"darwin-arm64"},{"runner":"macos-15-intel","target":"darwin-amd64"}]}'
+          elif [[ "$RELEASE_LINUX" != false ]]; then
+            echo "invalid validated release.linux value" >&2
+            exit 1
+          else
+            matrix="$darwin_matrix"
+          fi
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
       - name: Validate Homebrew-only release
         if: steps.metadata.outputs.mode == 'homebrew-only'
@@ -96,6 +161,16 @@ jobs:
           state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease --jq '[.isDraft,.isImmutable,.isPrerelease] | @tsv')"
           [[ "$state" == $'false\ttrue\tfalse' ]]
           gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+
+      - name: Upload validated manifest
+        id: manifest-artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: manifest-${{ github.run_id }}-${{ github.run_attempt }}-${{ job.check_run_id }}
+          path: ${{ runner.temp }}/project-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
 
   quality:
     name: Source quality
@@ -129,6 +204,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      release_assets_artifact_id: ${{ steps.release-assets.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -138,30 +215,62 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit
-          ref: main
+          ref: ${{ job.workflow_sha }}
           path: toolkit
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           cache: false
           go-version-file: toolkit/go.mod
+      - name: Download validated manifest by ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
+          path: ${{ runner.temp }}/validated-manifest
+          digest-mismatch: error
+          merge-multiple: true
+      - name: Verify and place validated manifest
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
+        run: |
+          downloaded_manifest="$RUNNER_TEMP/validated-manifest/project-manifest.json"
+          [[ -f "$downloaded_manifest" && ! -L "$downloaded_manifest" ]]
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          actual_sha256="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$downloaded_manifest")"
+          [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
+
+          umask 077
+          manifest_directory="$(mktemp -d "$GITHUB_WORKSPACE/source/.hextap-manifest.XXXXXX")"
+          [[ -d "$manifest_directory" && ! -L "$manifest_directory" ]]
+          chmod 700 "$manifest_directory"
+          installed_manifest="$manifest_directory/project-manifest.json"
+          install -m 600 "$downloaded_manifest" "$installed_manifest"
+          installed_sha256="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$installed_manifest")"
+          [[ "$installed_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
+          printf 'VALIDATED_MANIFEST=%s\n' "$installed_manifest" >> "$GITHUB_ENV"
       - name: Build toolkit and archives
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
         run: |
           go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
           mkdir "$RUNNER_TEMP/dist"
           "$RUNNER_TEMP/hextapctl" release build \
-            --manifest "$GITHUB_WORKSPACE/source/${{ inputs.manifest_path }}" \
-            --version "${{ needs.validate.outputs.version }}" \
-            --commit "${{ needs.validate.outputs.sha }}" \
+            --manifest "$VALIDATED_MANIFEST" \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_SHA" \
             --source "$GITHUB_WORKSPACE/source" \
             --output "$RUNNER_TEMP/dist"
         working-directory: toolkit
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Upload release assets
+        id: release-assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-assets-${{ github.run_id }}-${{ needs.validate.outputs.tag }}
+          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}-${{ job.check_run_id }}
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
+          overwrite: false
 
   native-verify:
     name: Native ${{ matrix.target }}
@@ -169,53 +278,63 @@ jobs:
     if: needs.validate.outputs.mode == 'full'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: linux-amd64
-          - runner: ubuntu-24.04-arm
-            target: linux-arm64
-          - runner: macos-15
-            target: darwin-arm64
-          - runner: macos-15-intel
-            target: darwin-amd64
+      matrix: ${{ fromJSON(needs.validate.outputs.native_matrix) }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.sha }}
-          path: source
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
           repository: SijanC147/hextap-toolkit
-          ref: main
+          ref: ${{ job.workflow_sha }}
           path: toolkit
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           cache: false
           go-version-file: toolkit/go.mod
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download validated manifest by ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-assets-${{ github.run_id }}-${{ needs.validate.outputs.tag }}
+          artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
+          path: ${{ runner.temp }}/validated-manifest
+          digest-mismatch: error
+          merge-multiple: true
+      - name: Verify validated manifest
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
+        run: |
+          validated_manifest="$RUNNER_TEMP/validated-manifest/project-manifest.json"
+          [[ -f "$validated_manifest" && ! -L "$validated_manifest" ]]
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          actual_sha256="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$validated_manifest")"
+          [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
+          printf 'VALIDATED_MANIFEST=%s\n' "$validated_manifest" >> "$GITHUB_ENV"
+      - name: Download release assets by ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.release_assets_artifact_id }}
           path: ${{ runner.temp }}/dist
+          digest-mismatch: error
+          merge-multiple: true
       - name: Verify and execute native binary
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          EXECUTE_TARGET: ${{ matrix.target }}
         run: |
           go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
           "$RUNNER_TEMP/hextapctl" release verify \
-            --manifest "$GITHUB_WORKSPACE/source/${{ inputs.manifest_path }}" \
-            --version "${{ needs.validate.outputs.version }}" \
-            --commit "${{ needs.validate.outputs.sha }}" \
+            --manifest "$VALIDATED_MANIFEST" \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_SHA" \
             --dir "$RUNNER_TEMP/dist" \
-            --execute-target "${{ matrix.target }}"
+            --execute-target "$EXECUTE_TARGET"
         working-directory: toolkit
 
   release:
     name: Publish GitHub release
-    needs: [validate, build, native-verify]
+    needs: [validate, quality, build, native-verify]
     if: needs.validate.outputs.mode == 'full'
     runs-on: ubuntu-latest
     permissions:
@@ -226,23 +345,46 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit
-          ref: main
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           cache: false
           go-version-file: go.mod
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download validated manifest by ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-assets-${{ github.run_id }}-${{ needs.validate.outputs.tag }}
+          artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
+          path: ${{ runner.temp }}/validated-manifest
+          digest-mismatch: error
+          merge-multiple: true
+      - name: Verify validated manifest
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
+        run: |
+          validated_manifest="$RUNNER_TEMP/validated-manifest/project-manifest.json"
+          [[ -f "$validated_manifest" && ! -L "$validated_manifest" ]]
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          actual_sha256="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$validated_manifest")"
+          [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
+          printf 'VALIDATED_MANIFEST=%s\n' "$validated_manifest" >> "$GITHUB_ENV"
+      - name: Download release assets by ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.release_assets_artifact_id }}
           path: ${{ runner.temp }}/dist
+          digest-mismatch: error
+          merge-multiple: true
       - name: Reverify assets
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
         run: |
           go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
           "$RUNNER_TEMP/hextapctl" release verify \
-            --manifest "examples/${{ needs.validate.outputs.formula }}.json" \
-            --version "${{ needs.validate.outputs.version }}" \
-            --commit "${{ needs.validate.outputs.sha }}" \
+            --manifest "$VALIDATED_MANIFEST" \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_SHA" \
             --dir "$RUNNER_TEMP/dist"
       - name: Attest assets
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -251,20 +393,24 @@ jobs:
       - name: Publish complete draft
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          scripts/publish-release.sh
-          "$GITHUB_REPOSITORY"
-          "${{ needs.validate.outputs.tag }}"
-          "$RUNNER_TEMP/dist"
-          "${{ needs.validate.outputs.prerelease }}"
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        run: |
+          scripts/publish-release.sh \
+            "$GITHUB_REPOSITORY" \
+            "$RELEASE_TAG" \
+            "$RUNNER_TEMP/dist" \
+            "$RELEASE_PRERELEASE"
       - name: Require immutable release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           for _ in {1..20}; do
-            state="$(gh release view "${{ needs.validate.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')"
-            if [[ "$state" == $'false\ttrue' ]] && gh release verify "${{ needs.validate.outputs.tag }}" --repo "$GITHUB_REPOSITORY"; then
-              exit 0
+            if state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')"; then
+              if [[ "$state" == $'false\ttrue' ]] && gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
+                exit 0
+              fi
             fi
             sleep 3
           done
@@ -291,23 +437,43 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit
-          ref: main
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           cache: false
           go-version-file: go.mod
+      - name: Download validated manifest by ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
+          path: ${{ runner.temp }}/validated-manifest
+          digest-mismatch: error
+          merge-multiple: true
+      - name: Verify validated manifest
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
+        run: |
+          validated_manifest="$RUNNER_TEMP/validated-manifest/project-manifest.json"
+          [[ -f "$validated_manifest" && ! -L "$validated_manifest" ]]
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          actual_sha256="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$validated_manifest")"
+          [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
+          printf 'VALIDATED_MANIFEST=%s\n' "$validated_manifest" >> "$GITHUB_ENV"
       - name: Download immutable release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
         run: |
           mkdir "$RUNNER_TEMP/dist"
-          gh release download "${{ needs.validate.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/dist"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/dist"
           go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
           "$RUNNER_TEMP/hextapctl" release verify \
-            --manifest "examples/${{ needs.validate.outputs.formula }}.json" \
-            --version "${{ needs.validate.outputs.version }}" \
-            --commit "${{ needs.validate.outputs.sha }}" \
+            --manifest "$VALIDATED_MANIFEST" \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_SHA" \
             --dir "$RUNNER_TEMP/dist"
       - name: Load the shared tap credential
         id: tap_secret
@@ -322,11 +488,15 @@ jobs:
         id: homebrew
         env:
           GH_TOKEN: ${{ steps.tap_secret.outputs.GH_PAT }}
-        run: >-
-          scripts/publish-homebrew.sh
-          "$GITHUB_REPOSITORY"
-          "${{ needs.validate.outputs.tag }}"
-          "${{ needs.validate.outputs.version }}"
-          "${{ needs.validate.outputs.formula }}"
-          "$RUNNER_TEMP/dist"
-          "$RUNNER_TEMP/hextapctl"
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_FORMULA: ${{ needs.validate.outputs.formula }}
+        run: |
+          scripts/publish-homebrew.sh \
+            "$GITHUB_REPOSITORY" \
+            "$RELEASE_TAG" \
+            "$RELEASE_VERSION" \
+            "$RELEASE_FORMULA" \
+            "$VALIDATED_MANIFEST" \
+            "$RUNNER_TEMP/dist" \
+            "$RUNNER_TEMP/hextapctl"

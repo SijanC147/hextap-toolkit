@@ -383,6 +383,18 @@ func TestExecuteTimeoutDoesNotWaitForDescendantOutputDescriptor(t *testing.T) {
 	}
 }
 
+func TestExecuteStopsAtLiveOutputLimit(t *testing.T) {
+	script := []byte("#!/bin/sh\nyes x | head -c 200000\nsleep 2\n")
+	started := time.Now()
+	err := executeVerifiedBinaryWithTimeout("tool", "1.2.3", testCommit, "tool.tar.gz", script, 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "output limit") {
+		t.Fatalf("output limit error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("live output overflow was not stopped promptly: %s", elapsed)
+	}
+}
+
 func archiveFileForVerify(header *tar.Header, data []byte) archiveFile {
 	copyHeader := *header
 	return archiveFile{header: &copyHeader, data: data}

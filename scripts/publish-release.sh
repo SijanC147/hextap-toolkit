@@ -36,16 +36,53 @@ if gh release view "$tag" --repo "$repository" >/dev/null 2>&1; then
   release_exists=true
 fi
 
+comparison_dir="$(mktemp -d)"
+trap 'find "$comparison_dir" -depth -delete' EXIT
+expected="$(printf '%s\n' "${expected_assets[@]}" | LC_ALL=C sort)"
+
 if [[ "$release_exists" == true ]]; then
-  state="$(gh release view "$tag" --repo "$repository" --json isDraft,isPrerelease --jq '[.isDraft,.isPrerelease] | @tsv')"
-  IFS=$'\t' read -r is_draft is_prerelease <<<"$state"
-  if [[ "$is_draft" != true ]]; then
-    echo "release $tag is already published; refusing to mutate it" >&2
+  state="$(gh release view "$tag" --repo "$repository" --json isDraft,isImmutable,isPrerelease --jq '[.isDraft,.isImmutable,.isPrerelease] | @tsv')"
+  IFS=$'\t' read -r is_draft is_immutable is_prerelease <<<"$state"
+  if [[ "$is_draft" != true && "$is_draft" != false ]] ||
+    [[ "$is_immutable" != true && "$is_immutable" != false ]] ||
+    [[ "$is_prerelease" != true && "$is_prerelease" != false ]]; then
+    echo "existing release state is invalid" >&2
     exit 1
   fi
   if [[ "$is_prerelease" != "$prerelease" ]]; then
-    echo "existing draft prerelease state does not match" >&2
+    if [[ "$is_draft" == true ]]; then
+      echo "existing draft prerelease state does not match" >&2
+    else
+      echo "published release prerelease state does not match" >&2
+    fi
     exit 1
+  fi
+  if [[ "$is_draft" != true ]]; then
+    if [[ "$is_immutable" != true ]]; then
+      echo "published release is not immutable" >&2
+      exit 1
+    fi
+    actual="$(gh release view "$tag" --repo "$repository" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
+    if [[ "$actual" != "$expected" ]]; then
+      echo "published release asset set mismatch" >&2
+      exit 1
+    fi
+    for name in "${expected_assets[@]}"; do
+      mkdir -p "$comparison_dir/$name"
+      gh release download "$tag" --repo "$repository" --pattern "$name" --dir "$comparison_dir/$name"
+      downloaded_asset="$comparison_dir/$name/$name"
+      if [[ ! -f "$downloaded_asset" || -L "$downloaded_asset" ]]; then
+        echo "published release asset is not a regular file: $name" >&2
+        exit 1
+      fi
+      cmp "$asset_dir/$name" "$downloaded_asset" || {
+        echo "published release asset differs: $name" >&2
+        exit 1
+      }
+    done
+    gh release verify "$tag" --repo "$repository"
+    echo "verified immutable $repository release $tag"
+    exit 0
   fi
 else
   args=("$tag" --repo "$repository" --verify-tag --draft --generate-notes)
@@ -53,8 +90,6 @@ else
   gh release create "${args[@]}"
 fi
 
-comparison_dir="$(mktemp -d)"
-trap 'find "$comparison_dir" -depth -delete' EXIT
 existing="$(gh release view "$tag" --repo "$repository" --json assets --jq '.assets[].name')"
 
 for name in "${expected_assets[@]}"; do
@@ -71,7 +106,6 @@ for name in "${expected_assets[@]}"; do
 done
 
 actual="$(gh release view "$tag" --repo "$repository" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
-expected="$(printf '%s\n' "${expected_assets[@]}" | LC_ALL=C sort)"
 if [[ "$actual" != "$expected" ]]; then
   echo "release asset set mismatch" >&2
   exit 1
