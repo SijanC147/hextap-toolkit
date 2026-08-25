@@ -7,8 +7,10 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -336,6 +338,95 @@ func TestBuildRejectsInvalidInputsBeforeAdapter(t *testing.T) {
 				t.Fatal("Build() unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestAcquireReleaseLockRejectsCompetingLock(t *testing.T) {
+	output := t.TempDir()
+	lockPath := filepath.Join(output, releaseLockName)
+	if err := os.WriteFile(lockPath, []byte("another build\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := acquireReleaseLock(output); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("acquireReleaseLock() error = %v, want an existing-lock error", err)
+	}
+	if got, err := os.ReadFile(lockPath); err != nil {
+		t.Fatal(err)
+	} else if string(got) != "another build\n" {
+		t.Fatalf("competing lock contents = %q, want it preserved", got)
+	}
+}
+
+func TestBuildCleanupPreservesReplacementOutput(t *testing.T) {
+	source, manifestPath := writeBuildFixture(t, false, successfulAdapter)
+	output := filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options := buildOptions(source, manifestPath, output)
+	var replacementPath string
+	_, err := build(options, buildHooks{
+		afterPublish: func(name, path string) error {
+			if replacementPath != "" {
+				return nil
+			}
+			replacementPath = path
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, []byte("replacement owned by another writer\n"), 0o600); err != nil {
+				return err
+			}
+			return errors.New("stop after replacement")
+		},
+	})
+	if err == nil {
+		t.Fatal("build() unexpectedly succeeded")
+	}
+	if replacementPath == "" {
+		t.Fatal("build hook did not publish an output")
+	}
+	if got, readErr := os.ReadFile(replacementPath); readErr != nil {
+		t.Fatalf("replacement output was removed: %v", readErr)
+	} else if string(got) != "replacement owned by another writer\n" {
+		t.Fatalf("replacement output = %q", got)
+	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := entryNames(entries); len(names) != 1 || names[0] != filepath.Base(replacementPath) {
+		t.Fatalf("failed build output entries = %v, want only the replacement", names)
+	}
+}
+
+func TestBuildRejectsAndPreservesExtraFinalOutput(t *testing.T) {
+	source, manifestPath := writeBuildFixture(t, false, successfulAdapter)
+	output := filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	extraPath := filepath.Join(output, "written-by-another-build")
+	_, err := build(buildOptions(source, manifestPath, output), buildHooks{
+		beforeOutputCommit: func(string) error {
+			return os.WriteFile(extraPath, []byte("do not remove\n"), 0o600)
+		},
+	})
+	if err == nil {
+		t.Fatal("build() unexpectedly succeeded with an extra final output")
+	}
+	if got, readErr := os.ReadFile(extraPath); readErr != nil {
+		t.Fatalf("extra output was removed: %v", readErr)
+	} else if string(got) != "do not remove\n" {
+		t.Fatalf("extra output = %q", got)
+	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := entryNames(entries); len(names) != 1 || names[0] != filepath.Base(extraPath) {
+		t.Fatalf("failed build output entries = %v, want only the extra output", names)
 	}
 }
 

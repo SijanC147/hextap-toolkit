@@ -262,6 +262,8 @@ must be a regular, non-symlink, single-link binary no larger than 256 MiB. The
 toolkit normalizes its archived mode to `0755`; the adapter must embed
 `HEXTAP_VERSION` and `HEXTAP_COMMIT` itself when the project exposes build
 metadata. Each adapter invocation has a 15-minute timeout.
+Adapters must not daemonize or intentionally leave child processes behind;
+they must finish all work before the adapter process exits.
 
 ### Render a new Formula
 

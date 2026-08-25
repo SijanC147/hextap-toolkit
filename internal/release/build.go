@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -29,6 +28,7 @@ const (
 	maxLicenseSize      = 1 << 20
 	maxReadmeSize       = 8 << 20
 	defaultBuildTimeout = 15 * time.Minute
+	releaseLockName     = ".hextap-release.lock"
 )
 
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
@@ -61,10 +61,25 @@ type archiveMember struct {
 	data []byte
 }
 
+type ownedOutput struct {
+	path string
+	info fs.FileInfo
+}
+
+type buildHooks struct {
+	afterPublish       func(name, path string) error
+	beforeOutputCommit func(outputDir string) error
+}
+
 // Build executes the project adapter exactly once per declared target and
 // creates canonical archives plus SHA256SUMS. OutputDir must already exist and
-// be empty. No output is retained after a failed build.
+// be empty. After a failed build, cleanup removes only output paths still
+// owned by that build.
 func Build(options BuildOptions) (result BuildResult, retErr error) {
+	return build(options, buildHooks{})
+}
+
+func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr error) {
 	if _, err := ParseVersion(options.Version); err != nil {
 		return BuildResult{}, fmt.Errorf("validate build version: %w", err)
 	}
@@ -80,6 +95,16 @@ func Build(options BuildOptions) (result BuildResult, retErr error) {
 	if err != nil {
 		return BuildResult{}, err
 	}
+	lock, err := acquireReleaseLock(outputDir)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	owned := map[string]ownedOutput{releaseLockName: lock}
+	defer func() {
+		if retErr != nil {
+			cleanupOwnedOutputs(owned)
+		}
+	}()
 	project, err := readManifestWithin(options.ManifestPath, sourceDir)
 	if err != nil {
 		return BuildResult{}, err
@@ -144,35 +169,142 @@ func Build(options BuildOptions) (result BuildResult, retErr error) {
 		return BuildResult{}, err
 	}
 
-	// Recheck immediately before publication so a concurrent writer cannot be
-	// silently overwritten. Any failure removes only files published by us.
-	if err := requireEmptyDirectory(outputDir); err != nil {
+	// The exclusive lock closes the race after the initial empty-directory
+	// check. Requiring that it remains our only entry also detects writers that
+	// do not honor the lock before publication begins.
+	if err := requireExactOwnedOutputs(outputDir, []string{releaseLockName}, owned); err != nil {
 		return BuildResult{}, err
 	}
-	published := make([]string, 0, len(assets)+1)
-	defer func() {
-		if retErr != nil {
-			for _, path := range published {
-				_ = os.Remove(path)
-			}
-		}
-	}()
 	files := append(append([]string(nil), assets...), "SHA256SUMS")
 	sort.Strings(files)
 	for _, name := range files {
+		source := filepath.Join(distDir, name)
 		destination := filepath.Join(outputDir, name)
-		if err := os.Link(filepath.Join(distDir, name), destination); err != nil {
+		sourceInfo, err := os.Lstat(source)
+		if err != nil {
+			return BuildResult{}, fmt.Errorf("inspect staged release output %q: %w", name, err)
+		}
+		if err := os.Link(source, destination); err != nil {
 			return BuildResult{}, fmt.Errorf("publish release output %q: %w", name, err)
 		}
-		published = append(published, destination)
-		if err := os.Remove(filepath.Join(distDir, name)); err != nil {
+		destinationInfo, err := os.Lstat(destination)
+		if err != nil {
+			return BuildResult{}, fmt.Errorf("inspect published release output %q: %w", name, err)
+		}
+		if !os.SameFile(sourceInfo, destinationInfo) {
+			return BuildResult{}, fmt.Errorf("published release output %q changed before ownership could be recorded", name)
+		}
+		owned[name] = ownedOutput{path: destination, info: destinationInfo}
+		if err := os.Remove(source); err != nil {
 			return BuildResult{}, fmt.Errorf("finalize staged release output %q: %w", name, err)
 		}
+		if hooks.afterPublish != nil {
+			if err := hooks.afterPublish(name, destination); err != nil {
+				return BuildResult{}, fmt.Errorf("after publishing release output %q: %w", name, err)
+			}
+		}
 	}
+	if hooks.beforeOutputCommit != nil {
+		if err := hooks.beforeOutputCommit(outputDir); err != nil {
+			return BuildResult{}, fmt.Errorf("before committing release output: %w", err)
+		}
+	}
+	withLock := append(append([]string(nil), files...), releaseLockName)
+	sort.Strings(withLock)
+	if err := requireExactOwnedOutputs(outputDir, withLock, owned); err != nil {
+		return BuildResult{}, err
+	}
+	if err := removeOwnedOutput(lock); err != nil {
+		return BuildResult{}, fmt.Errorf("remove release output lock: %w", err)
+	}
+	delete(owned, releaseLockName)
 	if err := syncDirectory(outputDir); err != nil {
 		return BuildResult{}, fmt.Errorf("sync release output directory: %w", err)
 	}
+	if err := requireExactOwnedOutputs(outputDir, files, owned); err != nil {
+		return BuildResult{}, err
+	}
 	return BuildResult{Formula: project.Formula.Name, Version: options.Version, Assets: assets}, nil
+}
+
+func acquireReleaseLock(outputDir string) (ownedOutput, error) {
+	path := filepath.Join(outputDir, releaseLockName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return ownedOutput{}, fmt.Errorf("acquire release output lock: %w", err)
+	}
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return ownedOutput{}, fmt.Errorf("inspect release output lock: %w", statErr)
+	}
+	lock := ownedOutput{path: path, info: info}
+	if closeErr != nil {
+		_ = removeOwnedOutput(lock)
+		return ownedOutput{}, fmt.Errorf("close release output lock: %w", closeErr)
+	}
+	return lock, nil
+}
+
+func cleanupOwnedOutputs(owned map[string]ownedOutput) {
+	names := make([]string, 0, len(owned))
+	for name := range owned {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		_ = removeOwnedOutput(owned[name])
+	}
+}
+
+func removeOwnedOutput(owned ownedOutput) error {
+	current, err := os.Lstat(owned.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(current, owned.info) {
+		return fmt.Errorf("output path %q is no longer owned by this build", owned.path)
+	}
+	return os.Remove(owned.path)
+}
+
+func requireExactOwnedOutputs(outputDir string, expected []string, owned map[string]ownedOutput) error {
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		return fmt.Errorf("read output directory %q: %w", outputDir, err)
+	}
+	actual := directoryEntryNames(entries)
+	sort.Strings(actual)
+	want := append([]string(nil), expected...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(actual, want) {
+		return fmt.Errorf("release output directory changed during build: entries = %v, want %v", actual, want)
+	}
+	for _, name := range want {
+		record, exists := owned[name]
+		if !exists {
+			return fmt.Errorf("release output %q has no ownership record", name)
+		}
+		current, err := os.Lstat(filepath.Join(outputDir, name))
+		if err != nil {
+			return fmt.Errorf("inspect release output %q: %w", name, err)
+		}
+		if !os.SameFile(current, record.info) {
+			return fmt.Errorf("release output %q is no longer owned by this build", name)
+		}
+	}
+	return nil
+}
+
+func directoryEntryNames(entries []os.DirEntry) []string {
+	result := make([]string, len(entries))
+	for index, entry := range entries {
+		result[index] = entry.Name()
+	}
+	return result
 }
 
 func validateDirectory(path, label string, requireEmpty bool) (string, error) {
@@ -290,8 +422,12 @@ func pathWithin(root, candidate string) bool {
 }
 
 func runAdapter(adapterPath, sourceDir, binaryPath string, buildTarget target, version, commit string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultBuildTimeout)
-	defer cancel()
+	timer := time.NewTimer(defaultBuildTimeout)
+	defer timer.Stop()
+	return runAdapterWithControl(adapterPath, sourceDir, binaryPath, buildTarget, version, commit, timer.C, terminateProcessTree)
+}
+
+func runAdapterWithControl(adapterPath, sourceDir, binaryPath string, buildTarget target, version, commit string, timeout <-chan time.Time, terminate func(*exec.Cmd)) error {
 	command := exec.Command(adapterPath)
 	command.Dir = sourceDir
 	command.Env = buildEnvironment(buildTarget, binaryPath, version, commit)
@@ -308,13 +444,23 @@ func runAdapter(adapterPath, sourceDir, binaryPath string, buildTarget target, v
 	}()
 	select {
 	case err := <-wait:
-		terminateProcessTree(command)
 		if err != nil {
 			return fmt.Errorf("build adapter failed for %s-%s: %w", buildTarget.OS, buildTarget.Arch, err)
 		}
 		return nil
-	case <-ctx.Done():
-		terminateProcessTree(command)
+	case <-timeout:
+		// Prefer a completed Wait if timeout and exit became ready together.
+		// terminateProcessTree additionally verifies that the leader has not
+		// already been reaped before signaling its process group.
+		select {
+		case err := <-wait:
+			if err != nil {
+				return fmt.Errorf("build adapter failed for %s-%s: %w", buildTarget.OS, buildTarget.Arch, err)
+			}
+			return nil
+		default:
+		}
+		terminate(command)
 		<-wait
 		return fmt.Errorf("build adapter timed out for %s-%s", buildTarget.OS, buildTarget.Arch)
 	}
