@@ -2,10 +2,15 @@ package onboard
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -101,6 +106,65 @@ func TestExistingCustomAdapterIsPreservedAndValidated(t *testing.T) {
 	}
 }
 
+func TestAuthoritativeManifestWithoutNewlineAndBinaryCustomAdapterArePreserved(t *testing.T) {
+	project := writeGoProject(t)
+	options := validOptions(project)
+	if _, err := Onboard(options); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(project, ".hextap.json")
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData = bytes.Replace(manifestData, []byte("A deterministic example CLI"), []byte("github_pat_1234567890authoritative"), 1)
+	manifestData = bytes.TrimSuffix(manifestData, []byte("\n"))
+	if err := os.WriteFile(manifestPath, manifestData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{
+		".github/workflows/hextap-release.yml",
+		".hextap/tap-registration.json",
+		".hextap/rulesets/main.json",
+		".hextap/rulesets/release-tags.json",
+		".hextap/SETUP.md",
+	} {
+		if err := os.Remove(filepath.Join(project, filepath.FromSlash(relative))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	custom := []byte("\x00\xffbinary custom adapter ghp_1234567890secret")
+	adapterPath := filepath.Join(project, "scripts", "hextap-build")
+	if err := os.WriteFile(adapterPath, custom, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options.Description = ""
+	result, err := Onboard(options)
+	if err != nil {
+		t.Fatalf("Onboard(authoritative no-LF/custom binary) = %v", err)
+	}
+	for _, entry := range result.Entries {
+		if entry.Path == "scripts/hextap-build" && entry.Action != ActionValidated {
+			t.Fatalf("custom binary action = %s", entry.Action)
+		}
+	}
+	gotManifest, err := os.ReadFile(manifestPath)
+	if err != nil || !bytes.Equal(gotManifest, manifestData) {
+		t.Fatalf("authoritative manifest changed: %v, %q", err, gotManifest)
+	}
+	tap, err := os.ReadFile(filepath.Join(project, ".hextap", "tap-registration.json"))
+	if err != nil || !bytes.Equal(tap, manifestData) {
+		t.Fatalf("tap is not exact no-LF manifest bytes: %v, %q", err, tap)
+	}
+	gotAdapter, err := os.ReadFile(adapterPath)
+	if err != nil || !bytes.Equal(gotAdapter, custom) {
+		t.Fatalf("custom binary adapter changed: %v, %q", err, gotAdapter)
+	}
+	if _, err := Validate(ValidateOptions{Project: project}); err != nil {
+		t.Fatalf("Validate(authoritative no-LF/custom binary) = %v", err)
+	}
+}
+
 func TestManagedConflictsCauseZeroWrites(t *testing.T) {
 	tests := map[string]func(*testing.T, string){
 		"different managed file": func(t *testing.T, root string) {
@@ -166,6 +230,121 @@ func TestManagedConflictsCauseZeroWrites(t *testing.T) {
 	}
 }
 
+func TestEveryManagedTargetConflictLeavesWholeProjectUnchanged(t *testing.T) {
+	paths := []string{
+		manifestPath,
+		workflowPath,
+		tapPath,
+		mainRulesetPath,
+		tagRulesetPath,
+		setupPath,
+		defaultAdapterPath,
+	}
+	classes := []string{"different", "symlink", "hard-link", "mode", "directory", "special-mode"}
+	for _, relative := range paths {
+		for _, class := range classes {
+			if relative == defaultAdapterPath && class == "different" {
+				continue // Different executable adapter bytes are the documented custom-adapter exception.
+			}
+			t.Run(strings.ReplaceAll(relative, "/", "_")+"/"+class, func(t *testing.T) {
+				root := writeGoProject(t)
+				item := expectedArtifact(t, root, relative)
+				target := filepath.Join(root, filepath.FromSlash(relative))
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				mode := item.mode.Perm()
+				switch class {
+				case "different":
+					if err := os.WriteFile(target, []byte("conflicting sentinel\n"), mode); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink":
+					if err := os.Symlink(filepath.Join(root, "README.md"), target); err != nil {
+						t.Fatal(err)
+					}
+				case "hard-link":
+					source := filepath.Join(root, "hard-link-source")
+					if err := os.WriteFile(source, item.data, mode); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Link(source, target); err != nil {
+						t.Fatal(err)
+					}
+				case "mode":
+					wrongMode := os.FileMode(0o600)
+					if mode == wrongMode {
+						wrongMode = 0o644
+					}
+					if err := os.WriteFile(target, item.data, wrongMode); err != nil {
+						t.Fatal(err)
+					}
+				case "directory":
+					if err := os.Mkdir(target, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				case "special-mode":
+					if err := os.WriteFile(target, item.data, mode); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(target, mode|os.ModeSetuid); err != nil {
+						t.Fatal(err)
+					}
+					info, err := os.Lstat(target)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if info.Mode()&os.ModeSetuid == 0 {
+						t.Skip("filesystem did not retain setuid mode for test fixture")
+					}
+				}
+				before := snapshotProjectTree(t, root)
+				if _, err := Onboard(validOptions(root)); err == nil {
+					t.Fatal("Onboard() unexpectedly succeeded")
+				}
+				after := snapshotProjectTree(t, root)
+				if !reflect.DeepEqual(after, before) {
+					t.Fatalf("project changed after %s conflict at %s\nbefore=%v\nafter=%v", class, relative, before, after)
+				}
+			})
+		}
+	}
+}
+
+func TestEveryManagedParentConflictLeavesProjectAndExternalTreeUnchanged(t *testing.T) {
+	parents := []string{".github", ".github/workflows", ".hextap", ".hextap/rulesets", "scripts"}
+	for _, relative := range parents {
+		for _, class := range []string{"symlink", "regular-file"} {
+			t.Run(strings.ReplaceAll(relative, "/", "_")+"/"+class, func(t *testing.T) {
+				root := writeGoProject(t)
+				external := t.TempDir()
+				parent := filepath.Join(root, filepath.FromSlash(relative))
+				if err := os.MkdirAll(filepath.Dir(parent), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if class == "symlink" {
+					if err := os.Symlink(external, parent); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(parent, []byte("unsafe parent\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				before := snapshotProjectTree(t, root)
+				externalBefore := snapshotProjectTree(t, external)
+				if _, err := Onboard(validOptions(root)); err == nil {
+					t.Fatal("Onboard() unexpectedly succeeded")
+				}
+				if after := snapshotProjectTree(t, root); !reflect.DeepEqual(after, before) {
+					t.Fatalf("project changed after unsafe parent conflict\nbefore=%v\nafter=%v", before, after)
+				}
+				if after := snapshotProjectTree(t, external); !reflect.DeepEqual(after, externalBefore) {
+					t.Fatalf("external tree changed after unsafe parent conflict\nbefore=%v\nafter=%v", externalBefore, after)
+				}
+			})
+		}
+	}
+}
+
 func TestApplyFailureRemovesOnlyInvocationOwnedFiles(t *testing.T) {
 	root := t.TempDir()
 	external := t.TempDir()
@@ -201,6 +380,54 @@ func TestArtifactsContainNoCredentialValues(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(filepath.Join(project, ".hextap.json")); !os.IsNotExist(statErr) {
 		t.Fatalf("credential rejection wrote a manifest: %v", statErr)
+	}
+}
+
+func TestWholeGeneratedTreeAndPlanContainOnlyAllowedSecretNameAndNoCredentialValue(t *testing.T) {
+	root := writeGoProject(t)
+	const credential = "ops_1234567890suppliedcredential"
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", credential)
+	result, err := Onboard(validOptions(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretNamePattern := regexp.MustCompile(`[A-Z][A-Z0-9_]*(?:SECRET|TOKEN)[A-Z0-9_]*`)
+	allowed := map[string]bool{"OP_SERVICE_ACCOUNT_TOKEN": true}
+	for _, entry := range result.Entries {
+		planLine := fmt.Sprintf("%s %s", entry.Action, entry.Path)
+		if strings.Contains(planLine, credential) {
+			t.Fatalf("plan leaked supplied credential: %q", planLine)
+		}
+	}
+	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if relative == ".git" {
+			return filepath.SkipDir
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(data, []byte(credential)) {
+			return fmt.Errorf("%s contains supplied credential", relative)
+		}
+		for _, name := range secretNamePattern.FindAllString(string(data), -1) {
+			if !allowed[name] {
+				return fmt.Errorf("%s contains unapproved secret name %q", relative, name)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -275,6 +502,64 @@ func validOptions(project string) Options {
 		RequiredChecks: []string{"test", "lint", "test"},
 		Linux:          true,
 	}
+}
+
+func snapshotProjectTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	result := make(map[string]string)
+	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if relative == ".git" {
+			return filepath.SkipDir
+		}
+		if relative == "." {
+			return nil
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		description := fmt.Sprintf("%v:%o:%d", info.Mode().Type(), info.Mode(), info.Size())
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			description += ":link=" + target
+		} else if info.Mode().IsRegular() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			description += fmt.Sprintf(":sha256=%x", sha256.Sum256(data))
+		}
+		result[filepath.ToSlash(relative)] = description
+		return nil
+	}); err != nil {
+		t.Fatalf("snapshot project: %v", err)
+	}
+	return result
+}
+
+func expectedArtifact(t *testing.T, root, relative string) artifact {
+	t.Helper()
+	state, err := prepareOnboarding(validOptions(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range state.artifacts {
+		if item.path == relative {
+			return item
+		}
+	}
+	t.Fatalf("artifact %s not found", relative)
+	return artifact{}
 }
 
 func TestOnboardFreshProjectValidateAndRerun(t *testing.T) {

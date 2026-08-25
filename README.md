@@ -64,6 +64,10 @@ write and never replaces an existing managed file or valid custom adapter.
 It creates the strict manifest, fixed Go build adapter, pinned reusable
 workflow caller, exact tap-registration payload, two reviewable ruleset API
 bodies, and `.hextap/SETUP.md` with the remaining owner-controlled steps.
+An authoritative existing manifest is preserved byte-for-byte, including a
+valid document without a trailing newline, and a custom adapter may contain
+arbitrary executable bytes. Final-newline and credential-shaped text checks
+apply only to toolkit-generated managed text.
 
 Local validation is read-only unless the explicit build smoke is selected:
 
@@ -77,8 +81,12 @@ brew hextap doctor --project . --online
 Default doctor never executes the project adapter and never calls GitHub.
 Online doctor adds bounded, read-only `gh` queries for authentication, `main`,
 immutable releases, the required secret name, owned active rulesets, stable
-toolkit provenance, and the paired tap registration plus Formula. It never
-reads a secret value or repairs remote state.
+toolkit provenance, and the paired tap registration plus Formula. Rulesets
+must be active repository-owned objects whose fetched bodies exactly match the
+local normalized policies. Toolkit provenance starts from the exact tag ref
+and peels annotated tag objects with bounded cycle/type checks; it never uses
+an ambiguous branch-or-tag commit-ish lookup. Doctor never reads a secret
+value or repairs remote state.
 
 ## Project manifest schema
 

@@ -61,13 +61,6 @@ func Validate(options ValidateOptions) (ValidateResult, error) {
 	if err != nil {
 		return ValidateResult{}, err
 	}
-	canonicalManifest, err := manifestBytes(project)
-	if err != nil {
-		return ValidateResult{}, err
-	}
-	if containsCredentialLike(string(canonicalManifest)) {
-		return ValidateResult{}, errors.New("manifest metadata appears to contain a credential and was rejected")
-	}
 	if project.RepositorySlug() != repository {
 		return ValidateResult{}, fmt.Errorf("manifest repository %q does not match Git remote origin identity %q", project.RepositorySlug(), repository)
 	}
@@ -168,11 +161,8 @@ func validateAdapter(root, relative string) error {
 		return err
 	}
 	path := filepath.Join(root, filepath.FromSlash(relative))
-	data, info, err := readLocalFile(path, "build adapter", maximumLocalFile, true)
+	_, info, err := readLocalFile(path, "build adapter", maximumLocalFile, true)
 	if err != nil {
-		return err
-	}
-	if err := ensureFinalNewline(data, "build adapter"); err != nil {
 		return err
 	}
 	if info.Mode().Perm()&0o111 == 0 || hasSpecialFileMode(info) {
@@ -196,9 +186,6 @@ func readManagedArtifact(root, relative string) ([]byte, os.FileInfo, error) {
 	data, info, err := readLocalFile(filepath.Join(root, filepath.FromSlash(relative)), "managed artifact", maximumLocalFile, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("validate %s: %w", relative, err)
-	}
-	if err := ensureFinalNewline(data, relative); err != nil {
-		return nil, nil, err
 	}
 	return data, info, nil
 }

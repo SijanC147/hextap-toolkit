@@ -33,6 +33,8 @@ func TestStableBuildDefaultsOnboardPinAndValidate(t *testing.T) {
 		}
 	}
 	const commit = "0123456789abcdef0123456789abcdef01234567"
+	const credential = "ops_1234567890clioutputsecret"
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", credential)
 	code, stdout, stderr := execute("v1.2.3", commit,
 		"onboard", "--project", project,
 		"--description", "CLI fixture", "--license", "MIT", "--go-package", ".",
@@ -40,6 +42,9 @@ func TestStableBuildDefaultsOnboardPinAndValidate(t *testing.T) {
 	)
 	if code != 0 || stderr != "" || !strings.Contains(stdout, "CREATE .hextap.json\n") {
 		t.Fatalf("Run(onboard) = %d, %q, %q", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, credential) || strings.Contains(stderr, credential) {
+		t.Fatalf("Run(onboard) leaked credential: stdout=%q stderr=%q", stdout, stderr)
 	}
 	workflow, err := os.ReadFile(filepath.Join(project, ".github", "workflows", "hextap-release.yml"))
 	if err != nil || !bytes.Contains(workflow, []byte("@"+commit+" # v1.2.3")) {

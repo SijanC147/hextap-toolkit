@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ type artifact struct {
 	data          []byte
 	mode          fs.FileMode
 	customAdapter bool
+	generatedText bool
 }
 
 type onboardingState struct {
@@ -27,14 +29,33 @@ type onboardingState struct {
 
 type ownedCreatedFile struct {
 	path string
+	file *os.File
 	info fs.FileInfo
-	data []byte
-	mode fs.FileMode
 }
 
 type ownedCreatedDirectory struct {
-	path string
-	info fs.FileInfo
+	path      string
+	directory *os.File
+	info      fs.FileInfo
+}
+
+type applyHooks struct {
+	openFile             func(*os.Root, string, int, fs.FileMode) (*os.File, error)
+	afterFileOpen        func(string, *os.File) error
+	fileStat             func(*os.File) (fs.FileInfo, error)
+	fileChmod            func(*os.File, fs.FileMode) error
+	fileWrite            func(*os.File, []byte) (int, error)
+	fileSync             func(*os.File) error
+	fileClose            func(*os.File) error
+	verifyFile           func(*os.Root, string, int64) ([]byte, fs.FileInfo, error)
+	mkdir                func(*os.Root, string, fs.FileMode) error
+	openDirectory        func(*os.Root, string) (*os.File, error)
+	afterDirectoryCreate func(string, *os.File) error
+	directoryStat        func(*os.File) (fs.FileInfo, error)
+	directoryChmod       func(*os.File, fs.FileMode) error
+	directorySync        func(*os.File) error
+	directoryClose       func(*os.File) error
+	syncDirectory        func(*os.Root, string) error
 }
 
 // Onboard preflights every local artifact, then either reports a dry-run plan
@@ -98,16 +119,18 @@ func prepareOnboarding(options Options) (onboardingState, error) {
 	}
 
 	manifestFile := filepath.Join(root, manifestPath)
-	manifestData, project, err := resolveManifest(manifestFile, repository, repositoryName, options)
+	manifestData, project, generatedManifest, err := resolveManifest(manifestFile, repository, repositoryName, options)
 	if err != nil {
 		return onboardingState{}, err
 	}
-	canonicalManifest, err := manifestBytes(project)
-	if err != nil {
-		return onboardingState{}, err
-	}
-	if containsCredentialLike(string(canonicalManifest)) {
-		return onboardingState{}, errors.New("manifest metadata appears to contain a credential and was rejected")
+	if generatedManifest {
+		canonicalManifest, encodeErr := manifestBytes(project)
+		if encodeErr != nil {
+			return onboardingState{}, encodeErr
+		}
+		if containsCredentialLike(string(canonicalManifest)) {
+			return onboardingState{}, errors.New("manifest metadata appears to contain a credential and was rejected")
+		}
 	}
 	adapterArtifact, err := resolveAdapter(root, project, options)
 	if err != nil {
@@ -123,52 +146,52 @@ func prepareOnboarding(options Options) (onboardingState, error) {
 		return onboardingState{}, err
 	}
 	artifacts := []artifact{
-		{path: manifestPath, data: manifestData, mode: 0o644},
+		{path: manifestPath, data: manifestData, mode: 0o644, generatedText: generatedManifest},
 		adapterArtifact,
-		{path: workflowPath, data: workflow, mode: 0o644},
-		{path: tapPath, data: append([]byte(nil), manifestData...), mode: 0o644},
-		{path: mainRulesetPath, data: mainRuleset, mode: 0o644},
-		{path: tagRulesetPath, data: tagRuleset, mode: 0o644},
-		{path: setupPath, data: setupDocument(repository, project.Formula.Name, options.ToolkitVersion, options.ToolkitSHA), mode: 0o644},
+		{path: workflowPath, data: workflow, mode: 0o644, generatedText: true},
+		{path: tapPath, data: append([]byte(nil), manifestData...), mode: 0o644, generatedText: generatedManifest},
+		{path: mainRulesetPath, data: mainRuleset, mode: 0o644, generatedText: true},
+		{path: tagRulesetPath, data: tagRuleset, mode: 0o644, generatedText: true},
+		{path: setupPath, data: setupDocument(repository, project.Formula.Name, options.ToolkitVersion, options.ToolkitSHA), mode: 0o644, generatedText: true},
 	}
 	for _, item := range artifacts {
 		if len(item.data) > maximumLocalFile {
 			return onboardingState{}, fmt.Errorf("generated artifact %s exceeds %d bytes", item.path, maximumLocalFile)
 		}
-		if len(item.data) != 0 {
+		if item.generatedText && len(item.data) != 0 {
 			if err := ensureFinalNewline(item.data, item.path); err != nil {
 				return onboardingState{}, err
 			}
-		}
-		if containsCredentialLike(string(item.data)) {
-			return onboardingState{}, errors.New("a generated artifact appears to contain a credential and was rejected")
+			if containsCredentialLike(string(item.data)) {
+				return onboardingState{}, errors.New("a generated artifact appears to contain a credential and was rejected")
+			}
 		}
 	}
 	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].path < artifacts[j].path })
 	return onboardingState{root: root, artifacts: artifacts}, nil
 }
 
-func resolveManifest(path, repository, repositoryName string, options Options) ([]byte, manifest.Manifest, error) {
+func resolveManifest(path, repository, repositoryName string, options Options) ([]byte, manifest.Manifest, bool, error) {
 	_, err := os.Lstat(path)
 	if err == nil {
 		data, _, readErr := readLocalFile(path, "manifest", maximumLocalFile, true)
 		if readErr != nil {
-			return nil, manifest.Manifest{}, readErr
+			return nil, manifest.Manifest{}, false, readErr
 		}
 		project, parseErr := parseManifestBytes(data)
 		if parseErr != nil {
-			return nil, manifest.Manifest{}, parseErr
+			return nil, manifest.Manifest{}, false, parseErr
 		}
 		if project.RepositorySlug() != repository {
-			return nil, manifest.Manifest{}, fmt.Errorf("manifest repository %q does not match Git remote origin identity %q", project.RepositorySlug(), repository)
+			return nil, manifest.Manifest{}, false, fmt.Errorf("manifest repository %q does not match Git remote origin identity %q", project.RepositorySlug(), repository)
 		}
 		if err := generationFlagsAgree(project, options); err != nil {
-			return nil, manifest.Manifest{}, err
+			return nil, manifest.Manifest{}, false, err
 		}
-		return data, project, nil
+		return data, project, false, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, manifest.Manifest{}, fmt.Errorf("inspect manifest %q: %w", path, err)
+		return nil, manifest.Manifest{}, false, fmt.Errorf("inspect manifest %q: %w", path, err)
 	}
 	formula := options.Formula
 	if formula == "" {
@@ -179,10 +202,10 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 		binary = repositoryName
 	}
 	if options.Description == "" {
-		return nil, manifest.Manifest{}, errors.New("--description is required when .hextap.json is absent")
+		return nil, manifest.Manifest{}, false, errors.New("--description is required when .hextap.json is absent")
 	}
 	if options.License == "" {
-		return nil, manifest.Manifest{}, errors.New("--license is required when .hextap.json is absent")
+		return nil, manifest.Manifest{}, false, errors.New("--license is required when .hextap.json is absent")
 	}
 	owner, name, _ := parseRepository(repository)
 	project := manifest.Manifest{
@@ -209,13 +232,13 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 		},
 	}
 	if err := project.Validate(); err != nil {
-		return nil, manifest.Manifest{}, err
+		return nil, manifest.Manifest{}, false, err
 	}
 	data, err := manifestBytes(project)
 	if err != nil {
-		return nil, manifest.Manifest{}, err
+		return nil, manifest.Manifest{}, false, err
 	}
-	return data, project, nil
+	return data, project, true, nil
 }
 
 func generationFlagsAgree(project manifest.Manifest, options Options) error {
@@ -286,13 +309,10 @@ func resolveAdapter(root string, project manifest.Manifest, options Options) (ar
 		expected = adapterBytes(goPackage, versionSymbol, commitSymbol)
 	}
 	if !exists {
-		return artifact{path: relative, data: expected, mode: 0o755}, nil
+		return artifact{path: relative, data: expected, mode: 0o755, generatedText: true}, nil
 	}
 	data, info, err := readLocalFile(path, "build adapter", maximumLocalFile, true)
 	if err != nil {
-		return artifact{}, err
-	}
-	if err := ensureFinalNewline(data, "existing build adapter"); err != nil {
 		return artifact{}, err
 	}
 	if info.Mode().Perm()&0o111 == 0 {
@@ -376,7 +396,38 @@ func inspectArtifactParents(root, relative string) error {
 	return nil
 }
 
-func applyArtifacts(rootPath string, artifacts []artifact, entries []Entry) (retErr error) {
+func defaultApplyHooks() applyHooks {
+	return applyHooks{
+		openFile: func(root *os.Root, name string, flag int, mode fs.FileMode) (*os.File, error) {
+			return root.OpenFile(filepath.FromSlash(name), flag, mode)
+		},
+		afterFileOpen: func(string, *os.File) error { return nil },
+		fileStat:      func(file *os.File) (fs.FileInfo, error) { return file.Stat() },
+		fileChmod:     func(file *os.File, mode fs.FileMode) error { return file.Chmod(mode) },
+		fileWrite:     func(file *os.File, data []byte) (int, error) { return file.Write(data) },
+		fileSync:      func(file *os.File) error { return file.Sync() },
+		fileClose:     func(file *os.File) error { return file.Close() },
+		verifyFile:    readRootFile,
+		mkdir: func(root *os.Root, name string, mode fs.FileMode) error {
+			return root.Mkdir(filepath.FromSlash(name), mode)
+		},
+		openDirectory: func(root *os.Root, name string) (*os.File, error) {
+			return root.Open(filepath.FromSlash(name))
+		},
+		afterDirectoryCreate: func(string, *os.File) error { return nil },
+		directoryStat:        func(directory *os.File) (fs.FileInfo, error) { return directory.Stat() },
+		directoryChmod:       func(directory *os.File, mode fs.FileMode) error { return directory.Chmod(mode) },
+		directorySync:        func(directory *os.File) error { return directory.Sync() },
+		directoryClose:       func(directory *os.File) error { return directory.Close() },
+		syncDirectory:        syncRootDirectory,
+	}
+}
+
+func applyArtifacts(rootPath string, artifacts []artifact, entries []Entry) error {
+	return applyArtifactsWithHooks(rootPath, artifacts, entries, defaultApplyHooks())
+}
+
+func applyArtifactsWithHooks(rootPath string, artifacts []artifact, entries []Entry, hooks applyHooks) (retErr error) {
 	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		return fmt.Errorf("open project root: %w", err)
@@ -385,7 +436,7 @@ func applyArtifacts(rootPath string, artifacts []artifact, entries []Entry) (ret
 	createdDirectories := make([]ownedCreatedDirectory, 0)
 	defer func() {
 		if retErr != nil {
-			cleanupCreated(rootPath, root, createdFiles, createdDirectories)
+			cleanupCreated(root, createdFiles, createdDirectories)
 		}
 		_ = root.Close()
 	}()
@@ -397,55 +448,66 @@ func applyArtifacts(rootPath string, artifacts []artifact, entries []Entry) (ret
 		if actions[item.path] != ActionCreate {
 			continue
 		}
-		if err := createArtifactParents(rootPath, root, item.path, &createdDirectories); err != nil {
+		if err := createArtifactParents(rootPath, root, item.path, &createdDirectories, hooks); err != nil {
 			return err
 		}
 		if err := inspectArtifactParents(rootPath, item.path); err != nil {
 			return err
 		}
-		file, err := root.OpenFile(filepath.FromSlash(item.path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, item.mode.Perm())
+		file, err := hooks.openFile(root, item.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, item.mode.Perm())
 		if err != nil {
 			return fmt.Errorf("create %s: %w", item.path, err)
 		}
-		info, statErr := file.Stat()
+		createdFiles = append(createdFiles, ownedCreatedFile{path: item.path, file: file})
+		ownedIndex := len(createdFiles) - 1
+		identity, identityErr := file.Stat()
+		if identityErr != nil {
+			return fmt.Errorf("capture ownership for %s: %w", item.path, identityErr)
+		}
+		createdFiles[ownedIndex].info = identity
+		if !identity.Mode().IsRegular() || identity.Mode()&os.ModeSymlink != 0 || hardLinked(identity) {
+			return fmt.Errorf("capture ownership for %s: file is not a regular single-link file", item.path)
+		}
+		if err := hooks.afterFileOpen(item.path, file); err != nil {
+			return fmt.Errorf("after creating %s: %w", item.path, err)
+		}
+		info, statErr := hooks.fileStat(file)
 		if statErr != nil {
-			_ = file.Close()
 			return fmt.Errorf("inspect created %s: %w", item.path, statErr)
 		}
-		createdFiles = append(createdFiles, ownedCreatedFile{path: item.path, info: info, data: item.data, mode: item.mode})
-		if err := file.Chmod(item.mode.Perm()); err != nil {
-			_ = file.Close()
+		if !os.SameFile(identity, info) || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || hardLinked(info) {
+			return fmt.Errorf("inspect created %s: file is not a regular single-link file", item.path)
+		}
+		if err := hooks.fileChmod(file, item.mode.Perm()); err != nil {
 			return fmt.Errorf("set mode for %s: %w", item.path, err)
 		}
-		if err := writeAll(file, item.data); err != nil {
-			_ = file.Close()
+		if err := writeAllWith(file, item.data, hooks.fileWrite); err != nil {
 			return fmt.Errorf("write %s: %w", item.path, err)
 		}
-		if err := file.Sync(); err != nil {
-			_ = file.Close()
+		if err := hooks.fileSync(file); err != nil {
 			return fmt.Errorf("sync %s: %w", item.path, err)
 		}
-		if err := file.Close(); err != nil {
+		if err := hooks.fileClose(file); err != nil {
 			return fmt.Errorf("close %s: %w", item.path, err)
 		}
 		if err := inspectArtifactParents(rootPath, item.path); err != nil {
 			return err
 		}
-		data, finalInfo, err := readRootFile(root, item.path, maximumLocalFile)
+		data, finalInfo, err := hooks.verifyFile(root, item.path, maximumLocalFile)
 		if err != nil || !os.SameFile(info, finalInfo) || !bytes.Equal(data, item.data) || !exactFileMode(finalInfo, item.mode) {
 			if err != nil {
 				return fmt.Errorf("verify created %s: %w", item.path, err)
 			}
 			return fmt.Errorf("verify created %s: file identity, bytes, or mode changed", item.path)
 		}
-		if err := syncRootDirectory(root, filepath.ToSlash(filepath.Dir(filepath.FromSlash(item.path)))); err != nil {
+		if err := hooks.syncDirectory(root, filepath.ToSlash(filepath.Dir(filepath.FromSlash(item.path)))); err != nil {
 			return fmt.Errorf("sync parent for %s: %w", item.path, err)
 		}
 	}
 	return nil
 }
 
-func createArtifactParents(rootPath string, root *os.Root, relative string, owned *[]ownedCreatedDirectory) error {
+func createArtifactParents(rootPath string, root *os.Root, relative string, owned *[]ownedCreatedDirectory, hooks applyHooks) error {
 	directory := filepath.ToSlash(filepath.Dir(filepath.FromSlash(relative)))
 	if directory == "." {
 		return nil
@@ -463,75 +525,116 @@ func createArtifactParents(rootPath string, root *os.Root, relative string, owne
 		if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("inspect parent %s: %w", prefix, err)
 		}
-		if err := root.Mkdir(filepath.FromSlash(prefix), 0o755); err != nil {
+		if err := hooks.mkdir(root, prefix, 0o755); err != nil {
 			return fmt.Errorf("create parent %s: %w", prefix, err)
 		}
-		directory, err := root.Open(filepath.FromSlash(prefix))
+		*owned = append(*owned, ownedCreatedDirectory{path: prefix})
+		ownedIndex := len(*owned) - 1
+		identity, identityErr := root.Lstat(filepath.FromSlash(prefix))
+		if identityErr != nil {
+			return fmt.Errorf("capture ownership for created parent %s: %w", prefix, identityErr)
+		}
+		(*owned)[ownedIndex].info = identity
+		if !identity.IsDir() || identity.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("capture ownership for created parent %s: not a real directory", prefix)
+		}
+		directory, err := hooks.openDirectory(root, prefix)
 		if err != nil {
 			return fmt.Errorf("open created parent %s: %w", prefix, err)
 		}
-		if err := directory.Chmod(0o755); err != nil {
-			_ = directory.Close()
+		(*owned)[ownedIndex].directory = directory
+		openedIdentity, identityErr := directory.Stat()
+		if identityErr != nil || !os.SameFile(identity, openedIdentity) {
+			return fmt.Errorf("open created parent %s: identity changed", prefix)
+		}
+		if err := hooks.afterDirectoryCreate(prefix, directory); err != nil {
+			return fmt.Errorf("after creating parent %s: %w", prefix, err)
+		}
+		createdInfo, err := hooks.directoryStat(directory)
+		if err != nil {
+			return fmt.Errorf("inspect created parent %s: %w", prefix, err)
+		}
+		if !os.SameFile(identity, createdInfo) || !createdInfo.IsDir() || createdInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("verify created parent %s: not a real directory", prefix)
+		}
+		if err := hooks.directoryChmod(directory, 0o755); err != nil {
 			return fmt.Errorf("set mode for created parent %s: %w", prefix, err)
 		}
-		if err := directory.Sync(); err != nil {
-			_ = directory.Close()
+		if err := hooks.directorySync(directory); err != nil {
 			return fmt.Errorf("sync created parent %s: %w", prefix, err)
 		}
-		createdInfo, err := directory.Stat()
-		closeErr := directory.Close()
-		if err != nil || closeErr != nil || !createdInfo.IsDir() || createdInfo.Mode()&os.ModeSymlink != 0 || createdInfo.Mode().Perm() != 0o755 {
-			return fmt.Errorf("verify created parent %s", prefix)
+		if err := hooks.directoryClose(directory); err != nil {
+			return fmt.Errorf("close created parent %s: %w", prefix, err)
 		}
 		currentInfo, err := root.Lstat(filepath.FromSlash(prefix))
-		if err != nil || currentInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(createdInfo, currentInfo) {
-			return fmt.Errorf("created parent %s changed before ownership was recorded", prefix)
+		if err != nil || currentInfo.Mode()&os.ModeSymlink != 0 || !currentInfo.IsDir() || !os.SameFile(createdInfo, currentInfo) || currentInfo.Mode().Perm() != 0o755 {
+			return fmt.Errorf("created parent %s changed after creation", prefix)
 		}
-		*owned = append(*owned, ownedCreatedDirectory{path: prefix, info: createdInfo})
 		parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(prefix)))
-		if err := syncRootDirectory(root, parent); err != nil {
+		if err := hooks.syncDirectory(root, parent); err != nil {
 			return fmt.Errorf("sync parent for directory %s: %w", prefix, err)
 		}
 	}
 	return nil
 }
 
-func writeAll(file *os.File, data []byte) error {
-	for len(data) != 0 {
-		written, err := file.Write(data)
-		if err != nil {
-			return err
-		}
-		if written == 0 {
-			return errors.New("short write")
-		}
-		data = data[written:]
+func writeAllWith(file *os.File, data []byte, write func(*os.File, []byte) (int, error)) error {
+	if len(data) == 0 {
+		return nil
+	}
+	written, err := write(file, data)
+	if written < 0 || written > len(data) {
+		return errors.New("invalid write count")
+	}
+	if err != nil {
+		return err
+	}
+	if written != len(data) {
+		return io.ErrShortWrite
 	}
 	return nil
 }
 
-func cleanupCreated(rootPath string, root *os.Root, files []ownedCreatedFile, directories []ownedCreatedDirectory) {
+func cleanupCreated(root *os.Root, files []ownedCreatedFile, directories []ownedCreatedDirectory) {
 	for index := len(files) - 1; index >= 0; index-- {
 		owned := files[index]
-		if inspectArtifactParents(rootPath, owned.path) != nil {
-			continue
+		pinned := owned.info
+		if owned.file != nil {
+			if currentPinned, err := owned.file.Stat(); err == nil {
+				pinned = currentPinned
+			}
 		}
-		data, info, err := readRootFile(root, owned.path, maximumLocalFile)
-		if err != nil || hardLinked(info) || !os.SameFile(owned.info, info) || !bytes.Equal(data, owned.data) || !exactFileMode(info, owned.mode) {
-			continue
+		current, err := root.Lstat(filepath.FromSlash(owned.path))
+		remove := err == nil && pinned != nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() && os.SameFile(pinned, current)
+		if owned.file != nil {
+			_ = owned.file.Close()
 		}
-		_ = root.Remove(filepath.FromSlash(owned.path))
+		if remove {
+			current, err = root.Lstat(filepath.FromSlash(owned.path))
+			if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() && os.SameFile(pinned, current) {
+				_ = root.Remove(filepath.FromSlash(owned.path))
+			}
+		}
 	}
 	for index := len(directories) - 1; index >= 0; index-- {
 		owned := directories[index]
-		if inspectArtifactParents(rootPath, owned.path+"/ownership-check") != nil {
-			continue
+		pinned := owned.info
+		if owned.directory != nil {
+			if currentPinned, err := owned.directory.Stat(); err == nil {
+				pinned = currentPinned
+			}
 		}
-		info, err := root.Lstat(filepath.FromSlash(owned.path))
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !os.SameFile(owned.info, info) {
-			continue
+		current, err := root.Lstat(filepath.FromSlash(owned.path))
+		remove := err == nil && pinned != nil && current.IsDir() && current.Mode()&os.ModeSymlink == 0 && os.SameFile(pinned, current)
+		if owned.directory != nil {
+			_ = owned.directory.Close()
 		}
-		_ = root.Remove(filepath.FromSlash(owned.path))
+		if remove {
+			current, err = root.Lstat(filepath.FromSlash(owned.path))
+			if err == nil && current.IsDir() && current.Mode()&os.ModeSymlink == 0 && os.SameFile(pinned, current) {
+				_ = root.Remove(filepath.FromSlash(owned.path))
+			}
+		}
 	}
 }
 

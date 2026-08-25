@@ -1,19 +1,77 @@
 package onboard
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os/exec"
 	"path"
 	"reflect"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/SijanC147/hextap-toolkit/internal/manifest"
 )
 
-const onlineCommandTimeout = 15 * time.Second
+const (
+	onlineCommandTimeout = 15 * time.Second
+	maximumTagPeelDepth  = 8
+)
+
+type remoteRulesetSummary struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Target      string `json:"target"`
+	SourceType  string `json:"source_type"`
+	Source      string `json:"source"`
+	Enforcement string `json:"enforcement"`
+}
+
+type remoteRulesetDetail struct {
+	ID           int64           `json:"id"`
+	Name         string          `json:"name"`
+	Target       string          `json:"target"`
+	SourceType   string          `json:"source_type"`
+	Source       string          `json:"source"`
+	Enforcement  string          `json:"enforcement"`
+	BypassActors json.RawMessage `json:"bypass_actors"`
+	Conditions   json.RawMessage `json:"conditions"`
+	Rules        json.RawMessage `json:"rules"`
+}
+
+type normalizedBypassActor struct {
+	ActorID    int64  `json:"actor_id"`
+	ActorType  string `json:"actor_type"`
+	BypassMode string `json:"bypass_mode"`
+}
+
+type normalizedRuleset struct {
+	Name         string
+	Target       string
+	Enforcement  string
+	BypassActors []normalizedBypassActor
+	Conditions   any
+	Rules        any
+}
+
+type gitObject struct {
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+}
+
+type gitRefResponse struct {
+	Ref    string    `json:"ref"`
+	Object gitObject `json:"object"`
+}
+
+type gitTagResponse struct {
+	Tag    string    `json:"tag"`
+	Object gitObject `json:"object"`
+}
 
 // Doctor verifies required local tools and the complete local contract. With
 // Online set, it adds only bounded read-only GitHub queries.
@@ -58,18 +116,11 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 	if err != nil || !lineSet(secretNames)["OP_SERVICE_ACCOUNT_TOKEN"] {
 		return nil, errors.New("online doctor: required Actions secret name OP_SERVICE_ACCOUNT_TOKEN is missing")
 	}
-	rulesetNames, err := ghRead(64<<10, "api", "--paginate", "repos/"+repository+"/rulesets", "--jq", `.[] | select(.enforcement == "active") | .name`)
-	if err != nil {
-		return nil, errors.New("online doctor: active repository rulesets could not be read")
+	if err := validateOnlineRulesets(repository, validated.RequiredChecks); err != nil {
+		return nil, err
 	}
-	rulesets := lineSet(rulesetNames)
-	for _, name := range []string{"hextap/main", "hextap/release-tags"} {
-		if !rulesets[name] {
-			return nil, fmt.Errorf("online doctor: active owned ruleset %q is missing", name)
-		}
-	}
-	resolved, err := ghRead(16<<10, "api", "repos/SijanC147/hextap-toolkit/commits/"+validated.ToolkitVersion, "--jq", ".sha")
-	if err != nil || strings.TrimSpace(resolved) != validated.ToolkitSHA {
+	resolved, err := resolveStableToolkitTag(validated.ToolkitVersion)
+	if err != nil || resolved != validated.ToolkitSHA {
 		return nil, errors.New("online doctor: stable toolkit tag does not resolve to the caller workflow SHA")
 	}
 	tapDestination := canonicalTapPath(validated.Manifest.Formula.Name)
@@ -86,8 +137,7 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("online doctor: canonical tap Formula %s is missing", formulaDestination)
 	}
-	classLine := regexp.MustCompile(`(?m)^class ` + regexp.QuoteMeta(validated.Manifest.Formula.Class) + ` < Formula$`)
-	if !classLine.MatchString(formulaData) {
+	if err := validateFormulaClass([]byte(formulaData), validated.Manifest.Formula.Class); err != nil {
 		return nil, errors.New("online doctor: canonical tap Formula does not declare the registered class")
 	}
 	return []string{
@@ -95,10 +145,184 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		"default branch main",
 		"immutable releases",
 		"Actions secret name",
-		"owned active rulesets",
+		"owned active ruleset bodies",
 		"stable toolkit provenance",
 		"canonical tap registration and Formula",
 	}, nil
+}
+
+func validateOnlineRulesets(repository string, checks []string) error {
+	data, err := ghRead(maximumLocalFile, "api", "--paginate", "--slurp", "repos/"+repository+"/rulesets?per_page=100")
+	if err != nil {
+		return errors.New("online doctor: repository rulesets could not be read")
+	}
+	var pages [][]remoteRulesetSummary
+	if err := decodeJSON([]byte(data), &pages); err != nil {
+		return errors.New("online doctor: repository ruleset listing is malformed")
+	}
+	wanted := map[string]remoteRulesetSummary{}
+	for _, page := range pages {
+		for _, summary := range page {
+			if summary.Name != "hextap/main" && summary.Name != "hextap/release-tags" {
+				continue
+			}
+			if summary.SourceType != "Repository" || summary.Source != repository || summary.Enforcement != "active" {
+				continue
+			}
+			if summary.ID <= 0 || summary.Target == "" {
+				return fmt.Errorf("online doctor: owned ruleset %q has malformed identity", summary.Name)
+			}
+			if _, duplicate := wanted[summary.Name]; duplicate {
+				return fmt.Errorf("online doctor: owned ruleset %q is ambiguous", summary.Name)
+			}
+			wanted[summary.Name] = summary
+		}
+	}
+	mainBytes, err := mainRulesetBytes(checks)
+	if err != nil {
+		return err
+	}
+	tagBytes, err := tagRulesetBytes()
+	if err != nil {
+		return err
+	}
+	expected := map[string][]byte{
+		"hextap/main":         mainBytes,
+		"hextap/release-tags": tagBytes,
+	}
+	for _, name := range []string{"hextap/main", "hextap/release-tags"} {
+		summary, exists := wanted[name]
+		if !exists {
+			return fmt.Errorf("online doctor: exact active repository-owned ruleset %q is missing", name)
+		}
+		detailData, err := ghRead(maximumLocalFile, "api", "repos/"+repository+"/rulesets/"+strconv.FormatInt(summary.ID, 10))
+		if err != nil {
+			return fmt.Errorf("online doctor: owned ruleset %q body could not be read", name)
+		}
+		if err := compareRemoteRuleset([]byte(detailData), expected[name], repository, summary); err != nil {
+			return fmt.Errorf("online doctor: owned ruleset %q drifted: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func compareRemoteRuleset(remoteData, expectedData []byte, repository string, summary remoteRulesetSummary) error {
+	var remote remoteRulesetDetail
+	if err := decodeJSON(remoteData, &remote); err != nil {
+		return errors.New("malformed remote body")
+	}
+	if remote.ID != summary.ID || remote.Name != summary.Name || remote.Target != summary.Target || remote.SourceType != "Repository" || remote.Source != repository || remote.Enforcement != "active" {
+		return errors.New("identity, source, target, or enforcement mismatch")
+	}
+	if len(remote.BypassActors) == 0 || bytes.Equal(bytes.TrimSpace(remote.BypassActors), []byte("null")) {
+		return errors.New("bypass actors were not returned")
+	}
+	var remoteActors []normalizedBypassActor
+	if err := decodeJSON(remote.BypassActors, &remoteActors); err != nil {
+		return errors.New("malformed bypass actors")
+	}
+	if remoteActors == nil {
+		return errors.New("bypass actors must be an explicit array")
+	}
+	var expectedBody remoteRulesetDetail
+	if err := decodeJSON(expectedData, &expectedBody); err != nil {
+		return fmt.Errorf("decode local ruleset: %w", err)
+	}
+	remoteNormalized, err := normalizeRuleset(remote, remoteActors)
+	if err != nil {
+		return err
+	}
+	expectedNormalized, err := normalizeRuleset(expectedBody, []normalizedBypassActor{})
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(remoteNormalized, expectedNormalized) {
+		return errors.New("bypass actors, conditions, or rules mismatch")
+	}
+	return nil
+}
+
+func normalizeRuleset(body remoteRulesetDetail, actors []normalizedBypassActor) (normalizedRuleset, error) {
+	var conditions any
+	if err := decodeJSON(body.Conditions, &conditions); err != nil {
+		return normalizedRuleset{}, errors.New("malformed ruleset conditions")
+	}
+	var rules any
+	if err := decodeJSON(body.Rules, &rules); err != nil {
+		return normalizedRuleset{}, errors.New("malformed ruleset rules")
+	}
+	if actors == nil {
+		actors = []normalizedBypassActor{}
+	}
+	return normalizedRuleset{
+		Name:         body.Name,
+		Target:       body.Target,
+		Enforcement:  body.Enforcement,
+		BypassActors: actors,
+		Conditions:   conditions,
+		Rules:        rules,
+	}, nil
+}
+
+func resolveStableToolkitTag(version string) (string, error) {
+	encoded := url.PathEscape(version)
+	data, err := ghRead(16<<10, "api", "repos/SijanC147/hextap-toolkit/git/ref/tags/"+encoded)
+	if err != nil {
+		return "", errors.New("stable toolkit tag reference is missing")
+	}
+	var reference gitRefResponse
+	if err := decodeJSON([]byte(data), &reference); err != nil || reference.Ref != "refs/tags/"+version {
+		return "", errors.New("stable toolkit tag reference is malformed")
+	}
+	object := reference.Object
+	seen := make(map[string]struct{})
+	for depth := 0; ; depth++ {
+		if !fullCommitPattern.MatchString(object.SHA) {
+			return "", errors.New("stable toolkit tag object has an invalid SHA")
+		}
+		switch object.Type {
+		case "commit":
+			return object.SHA, nil
+		case "tag":
+			if depth >= maximumTagPeelDepth {
+				return "", errors.New("stable toolkit annotated tag exceeds peel depth")
+			}
+			if _, duplicate := seen[object.SHA]; duplicate {
+				return "", errors.New("stable toolkit annotated tag contains a cycle")
+			}
+			seen[object.SHA] = struct{}{}
+			data, err := ghRead(16<<10, "api", "repos/SijanC147/hextap-toolkit/git/tags/"+object.SHA)
+			if err != nil {
+				return "", errors.New("stable toolkit annotated tag object is missing")
+			}
+			var tag gitTagResponse
+			if err := decodeJSON([]byte(data), &tag); err != nil || tag.Tag == "" || len(tag.Tag) > 256 || strings.ContainsAny(tag.Tag, "\r\n\x00") {
+				return "", errors.New("stable toolkit annotated tag object is malformed")
+			}
+			if depth == 0 && tag.Tag != version {
+				return "", errors.New("stable toolkit annotated tag name mismatches the exact ref")
+			}
+			object = tag.Object
+		default:
+			return "", errors.New("stable toolkit tag does not peel to a commit")
+		}
+	}
+}
+
+func decodeJSON(data []byte, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func ghRead(maximum int, args ...string) (string, error) {

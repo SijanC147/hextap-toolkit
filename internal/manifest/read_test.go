@@ -12,6 +12,9 @@ func TestLoadRejectsSymlinkAndOversizedManifest(t *testing.T) {
 	if err := os.WriteFile(target, []byte(validManifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := Load(target); err != nil {
+		t.Fatalf("Load(valid manifest without final newline) = %v", err)
+	}
 	link := filepath.Join(directory, "link.json")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)

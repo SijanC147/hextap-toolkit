@@ -306,9 +306,6 @@ func hasGoMainPackage(directory string) bool {
 }
 
 func parseManifestBytes(data []byte) (manifest.Manifest, error) {
-	if err := ensureFinalNewline(data, "manifest"); err != nil {
-		return manifest.Manifest{}, err
-	}
 	project, err := manifest.Parse(data)
 	if err != nil {
 		return manifest.Manifest{}, err
