@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 
@@ -358,15 +357,7 @@ func missingFlags(values []namedValue) []string {
 }
 
 func readManifest(path string) (manifest.Manifest, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return manifest.Manifest{}, fmt.Errorf("read %q: %w", path, err)
-	}
-	project, err := manifest.Parse(data)
-	if err != nil {
-		return manifest.Manifest{}, err
-	}
-	return project, nil
+	return manifest.Load(path)
 }
 
 func newFlagSet(name string) *flag.FlagSet {

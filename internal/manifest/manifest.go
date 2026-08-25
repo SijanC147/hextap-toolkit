@@ -90,6 +90,9 @@ type KeepAlive struct {
 // Parse decodes exactly one manifest, rejects unknown fields, requires the
 // documented schema keys, and validates all values before returning.
 func Parse(data []byte) (Manifest, error) {
+	if err := rejectDuplicateObjectKeys(data); err != nil {
+		return Manifest{}, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 
@@ -107,6 +110,70 @@ func Parse(data []byte) (Manifest, error) {
 		return Manifest{}, err
 	}
 	return result, nil
+}
+
+func rejectDuplicateObjectKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := inspectJSONValue(decoder); err != nil {
+		return fmt.Errorf("decode manifest: %w", err)
+	}
+	return nil
+}
+
+func inspectJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object key is not a string")
+			}
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("duplicate object key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := inspectJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim('}') {
+			return errors.New("object has invalid closing delimiter")
+		}
+	case '[':
+		for decoder.More() {
+			if err := inspectJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim(']') {
+			return errors.New("array has invalid closing delimiter")
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
+	return nil
 }
 
 func rejectTrailingJSON(decoder *json.Decoder) error {

@@ -78,6 +78,24 @@ func TestParseRejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestParseRejectsDuplicateObjectKeysAtEveryNestingLevel(t *testing.T) {
+	tests := map[string]string{
+		"root":         strings.Replace(validManifest, `"schema": 1,`, `"schema": 1, "schema": 1,`, 1),
+		"escaped root": strings.Replace(validManifest, `"schema": 1,`, `"schema": 1, "\u0073chema": 1,`, 1),
+		"formula":      strings.Replace(validManifest, `"name": "claude-rc-proxy",`, `"name": "claude-rc-proxy", "name": "other",`, 1),
+		"repository":   strings.Replace(validManifest, `"owner": "SijanC147",`, `"owner": "SijanC147", "owner": "other",`, 1),
+		"service":      strings.Replace(validManifest, `"crashed": true`, `"crashed": true, "crashed": false`, 1),
+		"array item":   strings.Replace(validManifest, `"test_args": ["--version"]`, `"test_args": [{"value": 1, "value": 2}]`, 1),
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(input)); err == nil || !strings.Contains(err.Error(), "duplicate object key") {
+				t.Fatalf("Parse() error = %v, want duplicate object key rejection", err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsHighRiskStrings(t *testing.T) {
 	tests := map[string]func(*Manifest){
 		"schema":                    func(m *Manifest) { m.Schema = 2 },

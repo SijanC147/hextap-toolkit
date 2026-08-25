@@ -1,26 +1,22 @@
 # hextap-toolkit
 
-`hextap-toolkit` is the deterministic, dependency-free core for reusable
-release automation targeting the private Hextap Homebrew tap. Its
-`hextapctl` command validates versioned project manifests and renders or
-metadata-updates Homebrew Formulae without allowing project input to inject
-Ruby or shell code.
-
-This repository currently contains **toolkit core only**. It does not yet
-contain the complete release stack: reusable GitHub Actions workflows, secret
-loading, repository onboarding/mutation, direct tap publication, CI polling,
-the `brew hextap` wrapper, and portable LLM Agent Skills will be added and
-validated separately.
+`hextap-toolkit` is the deterministic, dependency-free release and onboarding
+toolkit for the private Hextap Homebrew tap. `hextapctl` remains the workflow
+engine that validates manifests, builds and verifies archives, and renders or
+updates Formulae. The separately installable `brew-hextap` executable is the
+human-facing `brew hextap` command for conflict-safe local onboarding,
+validation, and read-only doctor checks.
 
 ## Requirements and build
 
 - Go 1.26 or newer
 - Standard library only; there are no production dependencies
 
-Build a development binary:
+Build the development binaries:
 
 ```sh
 go build -o dist/hextapctl ./cmd/hextapctl
+go build -o dist/brew-hextap ./cmd/brew-hextap
 ```
 
 Release builds inject a stable version and source commit:
@@ -33,13 +29,63 @@ go build \
 
 dist/hextapctl version
 # hextapctl 0.1.0 (commit abc1234)
+
+go build \
+  -ldflags '-s -w -X main.version=v0.1.0 -X main.commit=0123456789abcdef0123456789abcdef01234567' \
+  -o dist/brew-hextap \
+  ./cmd/brew-hextap
+
+dist/brew-hextap --version
+# brew-hextap v0.1.0 (commit 0123456789abcdef0123456789abcdef01234567)
 ```
+
+## Local onboarding
+
+Homebrew exposes `brew-hextap` as `brew hextap`. A stable installed build can
+use its linker-injected toolkit tag and full commit as the workflow pin;
+development builds must receive both values explicitly:
+
+```sh
+brew hextap onboard \
+  --project . \
+  --description "A narrow Go command" \
+  --license MIT \
+  --go-package . \
+  --toolkit-version v0.1.0 \
+  --toolkit-sha 0123456789abcdef0123456789abcdef01234567 \
+  --required-check test \
+  --required-check lint \
+  --linux=true
+```
+
+Use `--dry-run` to print the complete `CREATE` / `UNCHANGED` / `VALIDATED`
+plan without writing. Onboarding preflights every target before its first
+write and never replaces an existing managed file or valid custom adapter.
+It creates the strict manifest, fixed Go build adapter, pinned reusable
+workflow caller, exact tap-registration payload, two reviewable ruleset API
+bodies, and `.hextap/SETUP.md` with the remaining owner-controlled steps.
+
+Local validation is read-only unless the explicit build smoke is selected:
+
+```sh
+brew hextap validate --project .
+brew hextap validate --project . --build
+brew hextap doctor --project .
+brew hextap doctor --project . --online
+```
+
+Default doctor never executes the project adapter and never calls GitHub.
+Online doctor adds bounded, read-only `gh` queries for authentication, `main`,
+immutable releases, the required secret name, owned active rulesets, stable
+toolkit provenance, and the paired tap registration plus Formula. It never
+reads a secret value or repairs remote state.
 
 ## Project manifest schema
 
 Every project is described by one strict JSON document. The current schema is
-`1`; unknown fields, missing required fields, multiple JSON documents, unsafe
-paths, and values that could escape generated Ruby are rejected.
+`1`; duplicate object keys at any nesting level, unknown fields, missing
+required fields, multiple JSON documents, unsafe paths, and values that could
+escape generated Ruby are rejected.
 
 The canonical example is
 [`examples/claude-rc-proxy.json`](examples/claude-rc-proxy.json). The checked-in
@@ -48,12 +94,13 @@ machine-readable contract for editors and other tooling without adding a
 runtime dependency. The checked-in standard-library conformance suite runs one
 shared valid/invalid corpus through both the schema evaluator and
 `manifest.Parse`, and rejects schema keywords the evaluator does not implement.
-The Go validator remains authoritative. JSON Schema cannot express four
+The Go validator remains authoritative. JSON Schema cannot express five
 schema-1/input checks exactly: `formula.class` derived from `formula.name`,
 distinct arm64/amd64 asset values, the caveats rule that only `{{home}}` and
 `{{var}}` placeholders are accepted, and the raw-input requirement that a file
-contain exactly one JSON document with no trailing value. Call `hextapctl
-manifest validate` before rendering or publishing even when an editor reports
+contain no duplicate object keys and exactly one JSON document with no
+trailing value. Call `hextapctl manifest validate` before rendering or
+publishing even when an editor reports
 that the JSON Schema is valid. The schema has this stable shape:
 
 ```json
