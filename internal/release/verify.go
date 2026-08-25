@@ -259,6 +259,9 @@ func readBoundedVerifyFile(path string, maximum int64) ([]byte, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("release file %q must be a regular non-symlink file", path)
 	}
+	if err := verifyOuterFileLayout(info); err != nil {
+		return nil, err
+	}
 	if info.Size() < 0 || info.Size() > maximum {
 		return nil, fmt.Errorf("release file %q exceeds %d bytes", path, maximum)
 	}
@@ -295,6 +298,9 @@ func verifyArchive(path, binaryName, targetOS, targetArch string) ([]byte, error
 		return nil, fmt.Errorf("read gzip: %w", err)
 	}
 	gzipReader.Multistream(false)
+	if len(raw) < 10 || !bytes.Equal(raw[:10], []byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff}) {
+		return nil, errors.New("gzip header is not canonical")
+	}
 	if !gzipReader.Header.ModTime.IsZero() || gzipReader.Header.Name != "" || gzipReader.Header.Comment != "" || len(gzipReader.Header.Extra) != 0 || gzipReader.Header.OS != 255 {
 		return nil, errors.New("gzip header is not canonical")
 	}
@@ -355,7 +361,7 @@ func verifyTarHeader(header *tar.Header, expected string, index int) error {
 	if header.Name != expected || filepath.Base(header.Name) != header.Name || filepath.Clean(header.Name) != header.Name || strings.Contains(header.Name, "\\") {
 		return fmt.Errorf("tar member %d has unsafe or unexpected name %q", index+1, header.Name)
 	}
-	if header.Typeflag != tar.TypeReg || header.Format != tar.FormatUSTAR || header.PAXRecords != nil || header.Xattrs != nil {
+	if header.Typeflag != tar.TypeReg || header.Linkname != "" || header.Format != tar.FormatUSTAR || header.PAXRecords != nil || header.Xattrs != nil {
 		return fmt.Errorf("tar member %q has unsupported type or format", header.Name)
 	}
 	wantMode := int64(0o644)
@@ -398,7 +404,11 @@ func verifyExecutable(data []byte, targetOS, targetArch string) error {
 		if targetArch == "arm64" {
 			want = macho.CpuArm64
 		}
-		if file.Cpu != want {
+		wantSubCPU := uint32(3) // CPU_SUBTYPE_X86_64_ALL.
+		if targetArch == "arm64" {
+			wantSubCPU = 0 // CPU_SUBTYPE_ARM64_ALL.
+		}
+		if file.Cpu != want || file.SubCpu != wantSubCPU {
 			return fmt.Errorf("Mach-O architecture is %s, want %s", file.Cpu, want)
 		}
 		return nil
@@ -411,8 +421,8 @@ func verifyExecutable(data []byte, targetOS, targetArch string) error {
 		return fmt.Errorf("invalid ELF binary: %w", err)
 	}
 	defer file.Close()
-	if file.Class != elf.ELFCLASS64 || file.Type != elf.ET_EXEC && file.Type != elf.ET_DYN {
-		return errors.New("ELF binary is not a 64-bit executable")
+	if file.Class != elf.ELFCLASS64 || file.Type != elf.ET_EXEC {
+		return errors.New("ELF binary is not a 64-bit ET_EXEC executable")
 	}
 	want := elf.EM_X86_64
 	if targetArch == "arm64" {

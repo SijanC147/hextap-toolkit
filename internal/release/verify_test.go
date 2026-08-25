@@ -1,11 +1,16 @@
 package release
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeRealVerifyFixture(t *testing.T, linux bool) (source, manifestPath string) {
@@ -134,5 +139,162 @@ func TestVerifyExecuteTargetMismatchBeforeExtraction(t *testing.T) {
 	_, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output, ExecuteTarget: other})
 	if err == nil || !strings.Contains(err.Error(), "does not match runtime") {
 		t.Fatalf("Verify(mismatched execute target) error = %v", err)
+	}
+}
+
+func TestVerifyRejectsNoncanonicalTarLinkname(t *testing.T) {
+	manifestPath, output := buildRealVerifyFixture(t, false)
+	asset := "claude-rc-proxy-darwin-arm64.tar.gz"
+	archive := readArchive(t, filepath.Join(output, asset))
+	archive["claude-rc-proxy"].header.Linkname = "unexpected"
+	writeVerifyArchive(t, filepath.Join(output, asset), archive)
+	updateVerifyChecksum(t, output, asset)
+	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted tar Linkname")
+	}
+}
+
+func TestVerifyRejectsNoncanonicalGzipHeader(t *testing.T) {
+	manifestPath, output := buildRealVerifyFixture(t, false)
+	asset := "claude-rc-proxy-darwin-arm64.tar.gz"
+	path := filepath.Join(output, asset)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[8] = 0
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updateVerifyChecksum(t, output, asset)
+	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted noncanonical gzip XFL")
+	}
+}
+
+func TestVerifyRejectsETDynAndMachOSubtypes(t *testing.T) {
+	manifestPath, output := buildRealVerifyFixture(t, true)
+	linuxAsset := "claude-rc-proxy-linux-amd64.tar.gz"
+	linuxArchive := readArchive(t, filepath.Join(output, linuxAsset))
+	linuxBinary := linuxArchive["claude-rc-proxy"].data
+	linuxBinary[16] = 3 // ELF e_type = ET_DYN, little endian.
+	linuxArchive["claude-rc-proxy"] = archiveFileForVerify(linuxArchive["claude-rc-proxy"].header, linuxBinary)
+	writeVerifyArchive(t, filepath.Join(output, linuxAsset), linuxArchive)
+	updateVerifyChecksum(t, output, linuxAsset)
+	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted ET_DYN ELF")
+	}
+
+	// Restore the Linux archive, then mutate the Darwin arm64 subtype to arm64e.
+	_, output = buildRealVerifyFixture(t, false)
+	asset := "claude-rc-proxy-darwin-arm64.tar.gz"
+	archive := readArchive(t, filepath.Join(output, asset))
+	binary := archive["claude-rc-proxy"].data
+	if len(binary) >= 12 && binary[0] == 0xcf && binary[1] == 0xfa {
+		binary[8] = 2
+		binary[9], binary[10], binary[11] = 0, 0, 0
+	}
+	archive["claude-rc-proxy"] = archiveFileForVerify(archive["claude-rc-proxy"].header, binary)
+	writeVerifyArchive(t, filepath.Join(output, asset), archive)
+	updateVerifyChecksum(t, output, asset)
+	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted arm64e Mach-O")
+	}
+}
+
+func TestVerifyRejectsHardlinkedAndSparseOuterFiles(t *testing.T) {
+	manifestPath, output := buildRealVerifyFixture(t, false)
+	asset := "claude-rc-proxy-darwin-arm64.tar.gz"
+	assetPath := filepath.Join(output, asset)
+	backup := filepath.Join(t.TempDir(), "archive")
+	if err := os.Link(assetPath, backup); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	updateVerifyChecksum(t, output, asset)
+	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted hardlinked outer archive")
+	}
+
+	manifestPath, output = buildRealVerifyFixture(t, false)
+	assetPath = filepath.Join(output, asset)
+	file, err := os.OpenFile(assetPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(16 << 20); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	updateVerifyChecksum(t, output, asset)
+	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted sparse outer archive")
+	}
+}
+
+func archiveFileForVerify(header *tar.Header, data []byte) archiveFile {
+	copyHeader := *header
+	return archiveFile{header: &copyHeader, data: data}
+}
+
+func writeVerifyArchive(t *testing.T, path string, files map[string]archiveFile) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter, err := gzip.NewWriterLevel(file, gzip.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter.Header.ModTime = time.Time{}
+	gzipWriter.Header.OS = 255
+	tarWriter := tar.NewWriter(gzipWriter)
+	for _, name := range []string{"claude-rc-proxy", "LICENSE", "README.md"} {
+		header := *files[name].header
+		if err := tarWriter.WriteHeader(&header); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tarWriter.Write(files[name].data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func updateVerifyChecksum(t *testing.T, output, asset string) {
+	t.Helper()
+	path := filepath.Join(output, asset)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	checksumsPath := filepath.Join(output, "SHA256SUMS")
+	checksums, err := os.ReadFile(checksumsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(checksums), "\n")
+	for i, line := range lines {
+		if strings.HasSuffix(line, "  "+asset) {
+			lines[i] = hex.EncodeToString(sum[:]) + "  " + asset
+		}
+	}
+	if err := os.WriteFile(checksumsPath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
