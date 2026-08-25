@@ -1,0 +1,332 @@
+name: Managed Go release
+
+on:
+  workflow_call:
+    inputs:
+      manifest_path:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      mode:
+        required: true
+        type: string
+    secrets:
+      op_service_account_token:
+        required: true
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+      stable: ${{ steps.metadata.outputs.stable }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      mode: ${{ steps.metadata.outputs.mode }}
+      sha: ${{ steps.source.outputs.sha }}
+      formula: ${{ steps.manifest.outputs.formula }}
+    steps:
+      - name: Check out caller source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - name: Check out trusted toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SijanC147/hextap-toolkit
+          ref: main
+          path: toolkit
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: toolkit/go.mod
+
+      - name: Build toolkit
+        run: go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
+        working-directory: toolkit
+
+      - name: Normalize release metadata
+        id: metadata
+        run: >-
+          "$RUNNER_TEMP/hextapctl" release metadata
+          --tag "${{ inputs.tag }}"
+          --mode "${{ inputs.mode }}"
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Export caller manifest
+        id: manifest
+        run: >-
+          "$RUNNER_TEMP/hextapctl" manifest export
+          --file "source/${{ inputs.manifest_path }}"
+          --repository "$GITHUB_REPOSITORY"
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Require tag on canonical main
+        id: source
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_MODE: ${{ steps.metadata.outputs.mode }}
+        run: |
+          git -C source fetch origin refs/heads/main:refs/remotes/origin/main --tags
+          sha="$(git -C source rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+          git -C source merge-base --is-ancestor "$sha" origin/main
+          if [[ "$RELEASE_MODE" == full ]]; then
+            [[ "$GITHUB_REF" == "refs/tags/$RELEASE_TAG" ]]
+            [[ "$GITHUB_SHA" == "$sha" ]]
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Homebrew-only release
+        if: steps.metadata.outputs.mode == 'homebrew-only'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease --jq '[.isDraft,.isImmutable,.isPrerelease] | @tsv')"
+          [[ "$state" == $'false\ttrue\tfalse' ]]
+          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+
+  quality:
+    name: Source quality
+    needs: validate
+    if: needs.validate.outputs.mode == 'full'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: go.mod
+      - name: Test tagged source
+        run: |
+          test -z "$(gofmt -l .)"
+          go test -count=1 ./...
+          go test -race -count=1 ./...
+          go vet ./...
+          go build -trimpath ./...
+          git diff --exit-code
+
+  build:
+    name: Build release assets
+    needs: validate
+    if: needs.validate.outputs.mode == 'full'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SijanC147/hextap-toolkit
+          ref: main
+          path: toolkit
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: toolkit/go.mod
+      - name: Build toolkit and archives
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
+          mkdir "$RUNNER_TEMP/dist"
+          "$RUNNER_TEMP/hextapctl" release build \
+            --manifest "$GITHUB_WORKSPACE/source/${{ inputs.manifest_path }}" \
+            --version "${{ needs.validate.outputs.version }}" \
+            --commit "${{ needs.validate.outputs.sha }}" \
+            --source "$GITHUB_WORKSPACE/source" \
+            --output "$RUNNER_TEMP/dist"
+        working-directory: toolkit
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ github.run_id }}-${{ needs.validate.outputs.tag }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  native-verify:
+    name: Native ${{ matrix.target }}
+    needs: [validate, build]
+    if: needs.validate.outputs.mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-amd64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-amd64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SijanC147/hextap-toolkit
+          ref: main
+          path: toolkit
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: toolkit/go.mod
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets-${{ github.run_id }}-${{ needs.validate.outputs.tag }}
+          path: ${{ runner.temp }}/dist
+      - name: Verify and execute native binary
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
+          "$RUNNER_TEMP/hextapctl" release verify \
+            --manifest "$GITHUB_WORKSPACE/source/${{ inputs.manifest_path }}" \
+            --version "${{ needs.validate.outputs.version }}" \
+            --commit "${{ needs.validate.outputs.sha }}" \
+            --dir "$RUNNER_TEMP/dist" \
+            --execute-target "${{ matrix.target }}"
+        working-directory: toolkit
+
+  release:
+    name: Publish GitHub release
+    needs: [validate, build, native-verify]
+    if: needs.validate.outputs.mode == 'full'
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SijanC147/hextap-toolkit
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: go.mod
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets-${{ github.run_id }}-${{ needs.validate.outputs.tag }}
+          path: ${{ runner.temp }}/dist
+      - name: Reverify assets
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
+          "$RUNNER_TEMP/hextapctl" release verify \
+            --manifest "examples/${{ needs.validate.outputs.formula }}.json" \
+            --version "${{ needs.validate.outputs.version }}" \
+            --commit "${{ needs.validate.outputs.sha }}" \
+            --dir "$RUNNER_TEMP/dist"
+      - name: Attest assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/*
+      - name: Publish complete draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          scripts/publish-release.sh
+          "$GITHUB_REPOSITORY"
+          "${{ needs.validate.outputs.tag }}"
+          "$RUNNER_TEMP/dist"
+          "${{ needs.validate.outputs.prerelease }}"
+      - name: Require immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in {1..20}; do
+            state="$(gh release view "${{ needs.validate.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')"
+            if [[ "$state" == $'false\ttrue' ]] && gh release verify "${{ needs.validate.outputs.tag }}" --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            sleep 3
+          done
+          exit 1
+
+  homebrew:
+    name: Publish Homebrew Formula
+    needs: [validate, release]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.validate.result == 'success' &&
+        needs.validate.outputs.stable == 'true' &&
+        (
+          (needs.validate.outputs.mode == 'full' && needs.release.result == 'success') ||
+          (needs.validate.outputs.mode == 'homebrew-only' && needs.release.result == 'skipped')
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SijanC147/hextap-toolkit
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: go.mod
+      - name: Download immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/dist"
+          gh release download "${{ needs.validate.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/dist"
+          go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
+          "$RUNNER_TEMP/hextapctl" release verify \
+            --manifest "examples/${{ needs.validate.outputs.formula }}.json" \
+            --version "${{ needs.validate.outputs.version }}" \
+            --commit "${{ needs.validate.outputs.sha }}" \
+            --dir "$RUNNER_TEMP/dist"
+      - name: Load the shared tap credential
+        id: tap_secret
+        uses: 1Password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: false
+          version: 2.39.0
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.op_service_account_token }}
+          GH_PAT: op://CICD/GH_PAT/credential
+      - name: Publish Formula and wait for tap CI
+        id: homebrew
+        env:
+          GH_TOKEN: ${{ steps.tap_secret.outputs.GH_PAT }}
+        run: >-
+          scripts/publish-homebrew.sh
+          "$GITHUB_REPOSITORY"
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.version }}"
+          "${{ needs.validate.outputs.formula }}"
+          "$RUNNER_TEMP/dist"
+          "$RUNNER_TEMP/hextapctl"
