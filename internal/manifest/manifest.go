@@ -18,16 +18,17 @@ import (
 const CurrentSchema = 1
 
 var (
-	formulaNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
-	classNamePattern   = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
-	repositoryPattern  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
-	ownerPattern       = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
-	fileNamePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
-	pathPartPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
-	environmentPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-	argumentPattern    = regexp.MustCompile(`^[-A-Za-z0-9_./:=+,%@]+$`)
-	stableVersionRE    = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
-	placeholderRE      = regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	formulaNamePattern  = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	classNamePattern    = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
+	repositoryPattern   = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+	ownerPattern        = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+	fileNamePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	pathPartPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	relativePathPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*(?:/[A-Za-z0-9][A-Za-z0-9._+-]*)*$`)
+	environmentPattern  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	argumentPattern     = regexp.MustCompile(`^[-A-Za-z0-9_./:=+,%@]+$`)
+	stableVersionRE     = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	placeholderRE       = regexp.MustCompile(`\{\{[^{}]*\}\}`)
 )
 
 // Manifest is the schema=1 declarative contract shared by release and tap tooling.
@@ -312,7 +313,11 @@ func validateRubyLine(field, value string) error {
 }
 
 func containsRubyInjection(value string) bool {
-	return strings.ContainsAny(value, `"\\`) || strings.Contains(value, "#{")
+	return strings.ContainsAny(value, `"\\`) || containsRubyInterpolation(value)
+}
+
+func containsRubyInterpolation(value string) bool {
+	return strings.Contains(value, "#{") || strings.Contains(value, "#@") || strings.Contains(value, "#$")
 }
 
 func validateHomepage(value string) error {
@@ -334,7 +339,7 @@ func validateAsset(field, value string) error {
 }
 
 func validateRelativePath(field, value string) error {
-	if value == "" || strings.Contains(value, "\\") || path.IsAbs(value) || path.Clean(value) != value || value == "." || strings.HasPrefix(value, "../") {
+	if value == "" || !relativePathPattern.MatchString(value) || strings.Contains(value, "\\") || path.IsAbs(value) || path.Clean(value) != value || value == "." || strings.HasPrefix(value, "../") {
 		return fmt.Errorf("validate manifest: %s must be a clean relative path", field)
 	}
 	for _, part := range strings.Split(value, "/") {
@@ -346,7 +351,7 @@ func validateRelativePath(field, value string) error {
 }
 
 func validateCaveats(value string) error {
-	if !utf8.ValidString(value) || strings.ContainsAny(value, "\r\x00") || strings.Contains(value, "#{") {
+	if !utf8.ValidString(value) || strings.ContainsAny(value, "\r\x00") || containsRubyInterpolation(value) {
 		return errors.New("validate manifest: homebrew.caveats contains unsafe Ruby heredoc content")
 	}
 	for _, line := range strings.Split(value, "\n") {

@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SijanC147/hextap-toolkit/schema/project-manifest.schema.json",
+  "title": "Hextap project manifest",
+  "description": "Declarative project metadata consumed by hextapctl. Go validation remains authoritative for cross-field constraints such as distinct architecture assets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "formula",
+    "release",
+    "homebrew"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "formula": {
+      "$ref": "#/$defs/formula"
+    },
+    "release": {
+      "$ref": "#/$defs/release"
+    },
+    "homebrew": {
+      "$ref": "#/$defs/homebrew"
+    }
+  },
+  "$defs": {
+    "formulaName": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "className": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]*$"
+    },
+    "repositoryName": {
+      "type": "string",
+      "maxLength": 100,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+    },
+    "repositoryOwner": {
+      "type": "string",
+      "maxLength": 39,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"
+    },
+    "fileName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
+    },
+    "assetName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.tar\\.gz$"
+    },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*(?:/[A-Za-z0-9][A-Za-z0-9._+-]*)*$"
+    },
+    "environmentKey": {
+      "type": "string",
+      "pattern": "^[A-Z_][A-Z0-9_]*$"
+    },
+    "argument": {
+      "type": "string",
+      "pattern": "^[-A-Za-z0-9_./:=+,%@]+$"
+    },
+    "rubyLine": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*(?:#\\{|#@|#\\$))[^\"\\\\\\u0000-\\u001F]+$"
+    },
+    "homepage": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://[^?#]+$"
+    },
+    "environmentValue": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*(?:#\\{|#@|#\\$))[^\"\\\\\\u0000\\r\\n]+$"
+    },
+    "caveats": {
+      "type": "string",
+      "pattern": "^(?![\\s\\S]*(?:#\\{|#@|#\\$))(?![\\s\\S]*\\r)(?![\\s\\S]*(?:^|\\n)[ \\t]*EOS[ \\t]*(?:\\n|$))[\\s\\S]*$"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "name"
+      ],
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/repositoryOwner"
+        },
+        "name": {
+          "$ref": "#/$defs/repositoryName"
+        }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "description": "Go validation additionally requires the two asset basenames to be different.",
+      "additionalProperties": false,
+      "required": [
+        "darwin_arm64",
+        "darwin_amd64"
+      ],
+      "properties": {
+        "darwin_arm64": {
+          "$ref": "#/$defs/assetName"
+        },
+        "darwin_amd64": {
+          "$ref": "#/$defs/assetName"
+        }
+      }
+    },
+    "formula": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "class",
+        "description",
+        "homepage",
+        "license",
+        "repository",
+        "binary",
+        "assets"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/formulaName"
+        },
+        "class": {
+          "$ref": "#/$defs/className"
+        },
+        "description": {
+          "$ref": "#/$defs/rubyLine"
+        },
+        "homepage": {
+          "$ref": "#/$defs/homepage"
+        },
+        "license": {
+          "$ref": "#/$defs/rubyLine"
+        },
+        "repository": {
+          "$ref": "#/$defs/repository"
+        },
+        "binary": {
+          "$ref": "#/$defs/fileName"
+        },
+        "assets": {
+          "$ref": "#/$defs/assets"
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build_script",
+        "linux"
+      ],
+      "properties": {
+        "build_script": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "linux": {
+          "type": "boolean"
+        }
+      }
+    },
+    "keepAliveSuccessfulExit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "successful_exit"
+      ],
+      "properties": {
+        "successful_exit": {
+          "type": "boolean"
+        }
+      }
+    },
+    "keepAliveCrashed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "crashed"
+      ],
+      "properties": {
+        "crashed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "keepAlive": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/keepAliveSuccessfulExit"
+        },
+        {
+          "$ref": "#/$defs/keepAliveCrashed"
+        }
+      ]
+    },
+    "serviceDisabled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "const": false
+        }
+      }
+    },
+    "serviceEnabled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "run_args",
+        "keep_alive",
+        "restart_delay",
+        "environment",
+        "log_path",
+        "error_log_path"
+      ],
+      "properties": {
+        "enabled": {
+          "const": true
+        },
+        "run_args": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/argument"
+          }
+        },
+        "keep_alive": {
+          "$ref": "#/$defs/keepAlive"
+        },
+        "restart_delay": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "environment": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/environmentKey"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/environmentValue"
+          }
+        },
+        "log_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "error_log_path": {
+          "$ref": "#/$defs/relativePath"
+        }
+      }
+    },
+    "service": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/serviceDisabled"
+        },
+        {
+          "$ref": "#/$defs/serviceEnabled"
+        }
+      ]
+    },
+    "homebrew": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "macos_only",
+        "test_args",
+        "caveats"
+      ],
+      "properties": {
+        "macos_only": {
+          "type": "boolean"
+        },
+        "test_args": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/argument"
+          }
+        },
+        "service": {
+          "$ref": "#/$defs/service"
+        },
+        "caveats": {
+          "$ref": "#/$defs/caveats"
+        }
+      }
+    }
+  }
+}

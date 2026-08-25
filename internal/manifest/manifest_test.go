@@ -140,6 +140,40 @@ func TestValidateRejectsHighRiskStrings(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsEveryRubyInterpolationIntroducer(t *testing.T) {
+	introducers := []string{"#{danger}", "#@danger", "#$danger"}
+	fields := map[string]func(*Manifest, string){
+		"description":      func(m *Manifest, value string) { m.Formula.Description = "prefix " + value },
+		"homepage":         func(m *Manifest, value string) { m.Formula.Homepage = "https://example.com/" + value },
+		"license":          func(m *Manifest, value string) { m.Formula.License = "MIT " + value },
+		"repository owner": func(m *Manifest, value string) { m.Formula.Repository.Owner = "owner" + value },
+		"repository name":  func(m *Manifest, value string) { m.Formula.Repository.Name = "repo" + value },
+		"binary":           func(m *Manifest, value string) { m.Formula.Binary = "binary" + value },
+		"arm64 asset":      func(m *Manifest, value string) { m.Formula.Assets.DarwinARM64 = "asset" + value + ".tar.gz" },
+		"amd64 asset":      func(m *Manifest, value string) { m.Formula.Assets.DarwinAMD64 = "asset" + value + ".tar.gz" },
+		"test argument":    func(m *Manifest, value string) { m.Homebrew.TestArgs = []string{"--version" + value} },
+		"service argument": func(m *Manifest, value string) { m.Homebrew.Service.RunArgs = []string{"--config" + value} },
+		"environment":      func(m *Manifest, value string) { m.Homebrew.Service.Environment["RUNTIME_MODE"] = "prefix " + value },
+		"log path":         func(m *Manifest, value string) { m.Homebrew.Service.LogPath = "log/output" + value },
+		"error log path":   func(m *Manifest, value string) { m.Homebrew.Service.ErrorLogPath = "log/error" + value },
+		"caveats":          func(m *Manifest, value string) { m.Homebrew.Caveats = "prefix " + value },
+	}
+	for _, introducer := range introducers {
+		for field, mutate := range fields {
+			t.Run(field+"/"+introducer[:2], func(t *testing.T) {
+				m, err := Parse([]byte(validManifest))
+				if err != nil {
+					t.Fatalf("valid fixture: %v", err)
+				}
+				mutate(&m, introducer)
+				if err := m.Validate(); err == nil {
+					t.Fatalf("Validate() accepted Ruby interpolation introducer %q in %s", introducer[:2], field)
+				}
+			})
+		}
+	}
+}
+
 func TestValidateAllowsDisabledServiceWithoutServiceFields(t *testing.T) {
 	m, err := Parse([]byte(validManifest))
 	if err != nil {

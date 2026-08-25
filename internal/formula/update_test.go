@@ -92,7 +92,10 @@ func TestUpdateRejectsDowngrade(t *testing.T) {
 func TestUpdateRejectsMalformedOrNoncanonicalFormula(t *testing.T) {
 	base := string(renderedFormula(t))
 	tests := map[string]string{
-		"explicit version":                   strings.Replace(base, `  license "MIT"`, "  version \"1.2.3\"\n  license \"MIT\"", 1),
+		"explicit version quoted":            strings.Replace(base, `  license "MIT"`, "  version \"1.2.3\"\n  license \"MIT\"", 1),
+		"explicit version parenthesized":     strings.Replace(base, `  license "MIT"`, "  version(\"1.2.3\")\n  license \"MIT\"", 1),
+		"explicit version trailing comment":  strings.Replace(base, `  license "MIT"`, "  version \"1.2.3\" # forbidden\n  license \"MIT\"", 1),
+		"explicit version call comment":      strings.Replace(base, `  license "MIT"`, "  version(\"1.2.3\") # forbidden\n  license \"MIT\"", 1),
 		"missing architecture conditional":   strings.Replace(base, "  if Hardware::CPU.arm?\n", "", 1),
 		"duplicate architecture conditional": strings.Replace(base, "  if Hardware::CPU.arm?\n", "  if Hardware::CPU.arm?\n  if Hardware::CPU.arm?\n", 1),
 		"missing else":                       strings.Replace(base, "  else\n", "", 1),
@@ -108,6 +111,27 @@ func TestUpdateRejectsMalformedOrNoncanonicalFormula(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, _, err := Update([]byte(input), loadManifest(t), "1.2.4", newArmSHA, newAmdSHA); err == nil {
 				t.Fatal("Update() unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestUpdateRejectsExtraURLOrSHADeclarationsAnywhereInFormulaCode(t *testing.T) {
+	base := string(renderedFormula(t))
+	insertBefore := "\n  def install\n"
+	tests := map[string]string{
+		"top-level URL":            `  url "https://example.invalid/extra.tar.gz"`,
+		"top-level SHA":            `  sha256 "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"`,
+		"differently-indented URL": `      url "https://example.invalid/extra.tar.gz"`,
+		"differently-indented SHA": `      sha256 "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"`,
+		"resource-block URL":       "  resource \"extra\" do\n    url \"https://example.invalid/extra.tar.gz\"\n  end",
+		"resource-block SHA":       "  resource \"extra\" do\n    sha256 \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n  end",
+	}
+	for name, declaration := range tests {
+		t.Run(name, func(t *testing.T) {
+			input := strings.Replace(base, insertBefore, "\n"+declaration+insertBefore, 1)
+			if _, _, err := Update([]byte(input), loadManifest(t), "1.2.4", newArmSHA, newAmdSHA); err == nil {
+				t.Fatal("Update() accepted an extra Formula-level release metadata declaration")
 			}
 		})
 	}

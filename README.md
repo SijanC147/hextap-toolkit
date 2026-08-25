@@ -42,9 +42,12 @@ Every project is described by one strict JSON document. The current schema is
 paths, and values that could escape generated Ruby are rejected.
 
 The canonical example is
-[`examples/claude-rc-proxy.json`](examples/claude-rc-proxy.json). The schema is
-represented by the Go types under `internal/manifest` and has this stable
-shape:
+[`examples/claude-rc-proxy.json`](examples/claude-rc-proxy.json). The checked-in
+[Draft 2020-12 JSON Schema](schema/project-manifest.schema.json) provides a
+machine-readable contract for editors and other tooling without adding a
+runtime dependency. Parity tests keep its objects, required fields, patterns,
+and example fixture aligned with the authoritative Go types and validator under
+`internal/manifest`. The schema has this stable shape:
 
 ```json
 {
@@ -97,9 +100,9 @@ shape:
 | `schema` | Must be exactly `1`. |
 | `formula.name` | Lowercase kebab-case Formula name. |
 | `formula.class` | One Ruby constant such as `ClaudeRcProxy`; namespaces and punctuation are rejected. |
-| `formula.description` | Required, one line, and safe for a Ruby string. |
+| `formula.description` | Required, one line, and safe for a Ruby string. All Ruby interpolation introducers (`#{`, `#@`, and `#$`) are rejected. |
 | `formula.homepage` | HTTPS URL with no credentials, query, or fragment. |
-| `formula.license` | Required, one line, and safe for a Ruby string. |
+| `formula.license` | Required, one line, and safe for a Ruby string. All Ruby interpolation introducers are rejected. |
 | `formula.repository` | Safe GitHub `owner` and repository `name`; this defines canonical release URLs. |
 | `formula.binary` | Safe executable basename installed by the Formula. |
 | `formula.assets` | Distinct safe `.tar.gz` basenames for Darwin arm64 and amd64. |
@@ -111,9 +114,9 @@ shape:
 | `service.run_args` | Required array for an enabled service; may be empty. |
 | `service.keep_alive` | Must select exactly one supported Homebrew policy: `successful_exit` or `crashed`. They are intentionally mutually exclusive because Homebrew prioritizes one when both are present. |
 | `service.restart_delay` | Integer from 1 through 3600 seconds. |
-| `service.environment` | Required object for an enabled service; keys must be uppercase environment identifiers and values must be single-line Ruby-safe strings. May be empty. Output is sorted by key. |
+| `service.environment` | Required object for an enabled service; keys must be uppercase environment identifiers and values must be single-line Ruby-safe strings with no `#{`, `#@`, or `#$` interpolation. May be empty. Output is sorted by key. |
 | `service.log_path` / `error_log_path` | Clean paths relative to Homebrew `var`; never absolute and never traversal paths. |
-| `homebrew.caveats` | Safe heredoc text. `{{home}}` renders as `#{Dir.home}` and `{{var}}` as `#{var}`. Other placeholders, Ruby interpolation, carriage returns, and an `EOS` terminator line are rejected. |
+| `homebrew.caveats` | Safe heredoc text. `{{home}}` and `{{var}}` are the only accepted placeholders and render to fixed toolkit-owned expressions. Other placeholders, literal `#{`/`#@`/`#$` interpolation, carriage returns, and an `EOS` terminator line are rejected. |
 
 Stable versions accepted by Formula commands are strict `X.Y.Z` SemVer:
 
@@ -180,10 +183,15 @@ hextapctl formula update \
   --amd64-sha dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 ```
 
-The updater fails closed unless the existing Formula has exactly the canonical
-seven-line architecture block and exactly two URL and SHA stanzas. Both URLs
-must target the manifest repository and expected architecture asset, use the
-same stable version, and have an immediately following lowercase SHA-256.
+The updater supports only the generated golden-path Formula and fails closed
+unless the existing file has exactly the canonical seven-line architecture
+block and exactly two `url` and two `sha256` declarations across all Formula
+code. Additional declarations at any indentation, including `resource` blocks,
+are unsupported and rejected. Text inside the generated caveats heredoc is not
+treated as Ruby code. Both release URLs must target the manifest repository and
+expected architecture asset, use the same stable version, and have an
+immediately following lowercase SHA-256. Any top-level `version` invocation is
+rejected, including quoted, parenthesized, and trailing-comment forms.
 
 It then changes only the two quoted URL values and two quoted SHA values. Every
 other byte and the file mode are preserved. Downgrades and explicit `version`

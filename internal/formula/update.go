@@ -14,9 +14,13 @@ import (
 )
 
 var (
-	architectureLine = regexp.MustCompile(`^([ \t]*)if Hardware::CPU\.arm\?$`)
-	urlLine          = regexp.MustCompile(`^[ \t]*url "([^"]+)"[ \t]*$`)
-	shaLine          = regexp.MustCompile(`^[ \t]*sha256 "([^"]+)"[ \t]*$`)
+	architectureLine   = regexp.MustCompile(`^([ \t]*)if Hardware::CPU\.arm\?$`)
+	heredocStart       = regexp.MustCompile(`<<[~-]?([A-Z][A-Z0-9_]*)\b`)
+	formulaVersionLine = regexp.MustCompile(`^[ \t]*version\b.*$`)
+	formulaURLLine     = regexp.MustCompile(`^[ \t]*url\b.*$`)
+	formulaSHALine     = regexp.MustCompile(`^[ \t]*sha256\b.*$`)
+	urlLine            = regexp.MustCompile(`^[ \t]*url "([^"]+)"[ \t]*$`)
+	shaLine            = regexp.MustCompile(`^[ \t]*sha256 "([^"]+)"[ \t]*$`)
 )
 
 // UpdateResult describes a validated Formula metadata transition.
@@ -125,8 +129,15 @@ func inspect(data []byte, project manifest.Manifest) (metadata, error) {
 	if len(lines) == 0 {
 		return metadata{}, errors.New("inspect Formula: file is empty")
 	}
+	codeLines, err := formulaCodeLines(lines)
+	if err != nil {
+		return metadata{}, err
+	}
 	architectureIndexes := make([]int, 0, 1)
 	for index, current := range lines {
+		if !codeLines[index] {
+			continue
+		}
 		if architectureLine.MatchString(current.body) {
 			architectureIndexes = append(architectureIndexes, index)
 		}
@@ -139,24 +150,24 @@ func inspect(data []byte, project manifest.Manifest) (metadata, error) {
 		return metadata{}, errors.New("inspect Formula: architecture metadata block is incomplete")
 	}
 	indent := architectureLine.FindStringSubmatch(lines[start].body)[1]
-	topLevelVersion := regexp.MustCompile(`^` + regexp.QuoteMeta(indent) + `version(?:[ \t]+|\()[^#]*$`)
-	branchURL := regexp.MustCompile(`^` + regexp.QuoteMeta(indent+"  ") + `url\b`)
-	branchSHA := regexp.MustCompile(`^` + regexp.QuoteMeta(indent+"  ") + `sha256\b`)
 	urlCount := 0
 	shaCount := 0
-	for _, current := range lines {
-		if topLevelVersion.MatchString(current.body) {
+	for index, current := range lines {
+		if !codeLines[index] {
+			continue
+		}
+		if formulaVersionLine.MatchString(current.body) {
 			return metadata{}, errors.New("inspect Formula: explicit version stanza is not allowed")
 		}
-		if branchURL.MatchString(current.body) {
+		if formulaURLLine.MatchString(current.body) {
 			urlCount++
 		}
-		if branchSHA.MatchString(current.body) {
+		if formulaSHALine.MatchString(current.body) {
 			shaCount++
 		}
 	}
 	if urlCount != 2 || shaCount != 2 {
-		return metadata{}, fmt.Errorf("inspect Formula: expected exactly two url and two sha256 lines, found %d and %d", urlCount, shaCount)
+		return metadata{}, fmt.Errorf("inspect Formula: expected exactly two url and two sha256 declarations, found %d and %d", urlCount, shaCount)
 	}
 	if lines[start+3].body != indent+"else" || lines[start+6].body != indent+"end" {
 		return metadata{}, errors.New("inspect Formula: architecture block must be if/url/sha256/else/url/sha256/end")
@@ -193,6 +204,31 @@ func inspect(data []byte, project manifest.Manifest) (metadata, error) {
 		return metadata{}, fmt.Errorf("inspect Formula: arm64 and amd64 URLs use different versions %s and %s", armVersion, amdVersion)
 	}
 	return metadata{version: armVersion, armURL: armURL, armSHA: armSHA, amdURL: amdURL, amdSHA: amdSHA}, nil
+}
+
+func formulaCodeLines(lines []line) ([]bool, error) {
+	result := make([]bool, len(lines))
+	inHeredoc := false
+	terminator := ""
+	for index, current := range lines {
+		if inHeredoc {
+			if strings.TrimSpace(current.body) == terminator {
+				inHeredoc = false
+				terminator = ""
+			}
+			continue
+		}
+		result[index] = true
+		match := heredocStart.FindStringSubmatch(current.body)
+		if match != nil {
+			inHeredoc = true
+			terminator = match[1]
+		}
+	}
+	if inHeredoc {
+		return nil, fmt.Errorf("inspect Formula: unterminated %s heredoc", terminator)
+	}
+	return result, nil
 }
 
 func splitLines(data []byte) []line {

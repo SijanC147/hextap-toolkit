@@ -10,7 +10,11 @@ import (
 
 // Write replaces path with data using a fully written and synced temporary
 // file in the destination directory. The caller supplies the final mode.
-func Write(path string, data []byte, mode fs.FileMode) (retErr error) {
+func Write(path string, data []byte, mode fs.FileMode) error {
+	return write(path, data, mode, os.Rename)
+}
+
+func write(path string, data []byte, mode fs.FileMode, rename func(string, string) error) (retErr error) {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 	temp, err := os.CreateTemp(dir, "."+base+".tmp-*")
@@ -43,7 +47,7 @@ func Write(path string, data []byte, mode fs.FileMode) (retErr error) {
 		return fmt.Errorf("close temporary file for %q: %w", path, err)
 	}
 	closed = true
-	if err := os.Rename(tempName, path); err != nil {
+	if err := rename(tempName, path); err != nil {
 		return fmt.Errorf("replace %q atomically: %w", path, err)
 	}
 	return nil
