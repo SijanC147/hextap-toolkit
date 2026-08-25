@@ -31,6 +31,7 @@ type ownedCreatedFile struct {
 	path string
 	file *os.File
 	info fs.FileInfo
+	data []byte
 }
 
 type ownedCreatedDirectory struct {
@@ -444,7 +445,7 @@ func applyArtifactsWithHooks(rootPath string, artifacts []artifact, entries []En
 		if err != nil {
 			return fmt.Errorf("create %s: %w", item.path, err)
 		}
-		createdFiles = append(createdFiles, ownedCreatedFile{path: item.path, file: file})
+		createdFiles = append(createdFiles, ownedCreatedFile{path: item.path, file: file, data: item.data})
 		ownedIndex := len(createdFiles) - 1
 		identity, identityErr := file.Stat()
 		if identityErr != nil {
@@ -586,13 +587,32 @@ func cleanupCreated(root *os.Root, files []ownedCreatedFile, directories []owned
 	for index := len(files) - 1; index >= 0; index-- {
 		owned := files[index]
 		pinned := owned.info
+		descriptorLive := false
 		if owned.file != nil {
 			if currentPinned, err := owned.file.Stat(); err == nil {
 				pinned = currentPinned
+				descriptorLive = true
 			}
 		}
 		current, err := root.Lstat(filepath.FromSlash(owned.path))
 		remove := err == nil && pinned != nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() && os.SameFile(pinned, current)
+		// A closed descriptor no longer pins the inode against immediate reuse.
+		// Linux filesystems can assign the same device/inode pair to a competing
+		// replacement, so require the invocation's expected bytes as a second
+		// ownership factor before unlinking that pathname.
+		if remove && !descriptorLive {
+			candidate, openErr := root.Open(filepath.FromSlash(owned.path))
+			if openErr != nil {
+				remove = false
+			} else {
+				candidateInfo, statErr := candidate.Stat()
+				candidateData, readErr := io.ReadAll(io.LimitReader(candidate, maximumLocalFile+1))
+				closeErr := candidate.Close()
+				remove = statErr == nil && readErr == nil && closeErr == nil &&
+					os.SameFile(pinned, candidateInfo) && int64(len(candidateData)) <= maximumLocalFile &&
+					bytes.Equal(candidateData, owned.data)
+			}
+		}
 		if owned.file != nil {
 			if err := owned.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 				cleanupErrors = append(cleanupErrors, fmt.Errorf("close owned file %s: %w", owned.path, err))

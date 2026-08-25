@@ -315,7 +315,7 @@ func stageAndPublish(rootPath string, root *os.Root, rootInfo fs.FileInfo, artif
 			return fmt.Errorf("create staged artifact %s: %w", item.path, err)
 		}
 		identity, err := file.Stat()
-		stagedFiles = append(stagedFiles, ownedCreatedFile{path: stagePath, file: file, info: identity})
+		stagedFiles = append(stagedFiles, ownedCreatedFile{path: stagePath, file: file, info: identity, data: item.data})
 		if err != nil || !identity.Mode().IsRegular() || hardLinked(identity) {
 			return fmt.Errorf("capture staged artifact %s identity", item.path)
 		}

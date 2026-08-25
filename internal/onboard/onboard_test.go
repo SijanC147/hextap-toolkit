@@ -263,6 +263,9 @@ func TestManifestCredentialScanRecursesThroughSlicesPointersAndMaps(t *testing.T
 }
 
 func TestCredentialClassifierUsesBoundedHighConfidenceFamilies(t *testing.T) {
+	awsAccessKey := "A" + "KIA" + strings.Repeat("A", 16)
+	awsSessionKey := "A" + "SIA" + strings.Repeat("B", 16)
+	awsShortKey := "A" + "KIA" + strings.Repeat("C", 15)
 	positives := []string{
 		"sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
 		"sk-svcacct-abcdefghijklmnopqrstuvwxyz0123456789",
@@ -270,8 +273,8 @@ func TestCredentialClassifierUsesBoundedHighConfidenceFamilies(t *testing.T) {
 		"sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
 		"github_pat_abcdefghijklmnopqrstuvwxyz0123456789",
 		"ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-		"AKIAABCDEFGHIJKLMNOP",
-		"ASIAABCDEFGHIJKLMNOP",
+		awsAccessKey,
+		awsSessionKey,
 		"ops_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
 		"token: sk-proj-abcdefghijklmnopqrstuvwxyz0123456789.",
 	}
@@ -286,7 +289,7 @@ func TestCredentialClassifierUsesBoundedHighConfidenceFamilies(t *testing.T) {
 		"prefixgithub_pat_abcdefghijklmnopqrstuvwxyz0123456789suffix",
 		"ghp_1234567890short",
 		"ops_short_configuration",
-		"AKIAABCDEFGHIJKLMNO",
+		awsShortKey,
 		"listen at 127.0.0.1:9801",
 	}
 	for _, value := range negatives {
