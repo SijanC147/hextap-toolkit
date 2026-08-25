@@ -21,11 +21,14 @@ func TestAppendPreservesExistingOutputAndOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	if err := Append(path, []Field{{Key: "mode", Value: "full"}}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "existing=value\ntag=v1.2.3\nstable=true\n"; got != want {
+	if got, want := string(data), "existing=value\ntag=v1.2.3\nstable=true\nmode=full\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 	info, err := os.Stat(path)
@@ -63,25 +66,52 @@ func TestAppendRejectsInjectionWithoutChangingFile(t *testing.T) {
 	}
 }
 
-func TestAppendWriterFailureLeavesOriginalUnchanged(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "github-output")
-	const sentinel = "existing=value\n"
-	if err := os.WriteFile(path, []byte(sentinel), 0o600); err != nil {
-		t.Fatal(err)
-	}
+func TestAppendReplacementFailuresLeaveOriginalUnchanged(t *testing.T) {
+	for _, failure := range []string{
+		"partial write",
+		"short write",
+		"temporary sync",
+		"temporary close",
+		"rename",
+	} {
+		t.Run(failure, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "github-output")
+			const sentinel = "existing=value\n"
+			if err := os.WriteFile(path, []byte(sentinel), 0o640); err != nil {
+				t.Fatal(err)
+			}
 
-	err := appendWithWriter(path, []Field{{Key: "tag", Value: "v1.2.3"}}, func(*os.File, []byte) (int, error) {
-		return 0, errors.New("injected atomic write failure")
-	})
-	if err == nil || !strings.Contains(err.Error(), "injected atomic write failure") {
-		t.Fatalf("appendWithWriter() error = %v", err)
-	}
-	data, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if string(data) != sentinel {
-		t.Fatalf("failed append changed output to %q", data)
+			injected := errors.New("injected " + failure + " failure")
+			err := appendWithReplace(path, []Field{{Key: "tag", Value: "v1.2.3"}}, func(target string, data []byte, mode os.FileMode) error {
+				if target != path {
+					t.Fatalf("replacement target = %q, want %q", target, path)
+				}
+				if got, want := string(data), sentinel+"tag=v1.2.3\n"; got != want {
+					t.Fatalf("replacement data = %q, want %q", got, want)
+				}
+				if mode.Perm() != 0o640 {
+					t.Fatalf("replacement mode = %#o, want 0640", mode.Perm())
+				}
+				return injected
+			})
+			if err == nil || !strings.Contains(err.Error(), injected.Error()) {
+				t.Fatalf("appendWithReplace() error = %v", err)
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(data) != sentinel {
+				t.Fatalf("failed append changed output to %q", data)
+			}
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				t.Fatal(statErr)
+			}
+			if info.Mode().Perm() != 0o640 {
+				t.Fatalf("original mode = %#o, want 0640", info.Mode().Perm())
+			}
+		})
 	}
 }
 

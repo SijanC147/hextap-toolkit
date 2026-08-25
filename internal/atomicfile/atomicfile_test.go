@@ -2,11 +2,128 @@ package atomicfile
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type faultTemporaryFile struct {
+	*os.File
+	writeFault func([]byte) (int, error)
+	syncFault  func() error
+	closeFault func() error
+}
+
+func (file *faultTemporaryFile) Write(data []byte) (int, error) {
+	if file.writeFault != nil {
+		return file.writeFault(data)
+	}
+	return file.File.Write(data)
+}
+
+func (file *faultTemporaryFile) Sync() error {
+	if file.syncFault != nil {
+		return file.syncFault()
+	}
+	return file.File.Sync()
+}
+
+func (file *faultTemporaryFile) Close() error {
+	if file.closeFault != nil {
+		return file.closeFault()
+	}
+	return file.File.Close()
+}
+
+func TestWritePreRenameFailuresPreserveOriginal(t *testing.T) {
+	tests := map[string]func(*faultTemporaryFile){
+		"partial write": func(file *faultTemporaryFile) {
+			file.writeFault = func(data []byte) (int, error) {
+				written, err := file.File.Write(data[:len(data)/2])
+				if err != nil {
+					return written, err
+				}
+				return written, errors.New("injected partial write failure")
+			}
+		},
+		"short write": func(file *faultTemporaryFile) {
+			file.writeFault = func(data []byte) (int, error) {
+				return file.File.Write(data[:len(data)/2])
+			}
+		},
+		"sync": func(file *faultTemporaryFile) {
+			file.syncFault = func() error {
+				return errors.New("injected temporary sync failure")
+			}
+		},
+		"close": func(file *faultTemporaryFile) {
+			file.closeFault = func() error {
+				if err := file.File.Close(); err != nil {
+					return err
+				}
+				return errors.New("injected temporary close failure")
+			}
+		},
+	}
+	for name, inject := range tests {
+		t.Run(name, func(t *testing.T) {
+			directory := t.TempDir()
+			destination := filepath.Join(directory, "github-output")
+			original := []byte("existing=value\n")
+			replacement := []byte("existing=value\ntag=v1.2.3\n")
+			if err := os.WriteFile(destination, original, 0o640); err != nil {
+				t.Fatal(err)
+			}
+
+			createTemp := func(directory, pattern string) (temporaryFile, error) {
+				created, err := os.CreateTemp(directory, pattern)
+				if err != nil {
+					return nil, err
+				}
+				wrapped := &faultTemporaryFile{File: created}
+				inject(wrapped)
+				return wrapped, nil
+			}
+			renameCalled := false
+			err := writeWithTemporary(destination, replacement, fs.FileMode(0o640), createTemp, func(string, string) error {
+				renameCalled = true
+				return nil
+			}, func(string) error {
+				t.Fatal("directory sync called before a successful rename")
+				return nil
+			})
+			if err == nil {
+				t.Fatal("writeWithTemporary() unexpectedly succeeded")
+			}
+			if renameCalled {
+				t.Fatal("rename ran after a pre-rename temporary-file failure")
+			}
+			got, readErr := os.ReadFile(destination)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(got) != string(original) {
+				t.Fatalf("destination changed to %q", got)
+			}
+			info, statErr := os.Stat(destination)
+			if statErr != nil {
+				t.Fatal(statErr)
+			}
+			if gotMode := info.Mode().Perm(); gotMode != 0o640 {
+				t.Fatalf("destination mode = %#o, want 0640", gotMode)
+			}
+			temporaryFiles, globErr := filepath.Glob(filepath.Join(directory, ".github-output.tmp-*"))
+			if globErr != nil {
+				t.Fatal(globErr)
+			}
+			if len(temporaryFiles) != 0 {
+				t.Fatalf("temporary files remain: %v", temporaryFiles)
+			}
+		})
+	}
+}
 
 func TestWriteRenameFailurePreservesOriginalAndRemovesTemporaryFile(t *testing.T) {
 	directory := t.TempDir()

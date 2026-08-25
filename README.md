@@ -187,6 +187,13 @@ the GitHub Actions runner. Existing newline-terminated outputs are preserved.
 The command rejects duplicate, multiline, control-character, oversized, or
 otherwise unsafe output records before appending anything.
 
+The append is a same-directory atomic replacement: the complete existing file
+and new records are written, mode-preserved, synced, and closed before rename.
+Any failure before rename leaves the original byte-for-byte unchanged and
+removes the temporary file. As with Formula writes, a parent-directory sync
+failure occurs after rename; the command reports that crash durability was not
+confirmed, but the complete replacement may already be visible.
+
 ### Normalize release metadata
 
 ```sh

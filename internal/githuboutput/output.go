@@ -5,10 +5,14 @@ package githuboutput
 import (
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/SijanC147/hextap-toolkit/internal/atomicfile"
 )
 
 const maxExistingOutputSize = 1 << 20
@@ -27,15 +31,17 @@ type Field struct {
 	Value string
 }
 
-// Append atomically appends fields to path with one O_APPEND write after every
-// new byte has been validated. The runner-created file must already exist.
+// Append atomically replaces path with its existing contents plus fields after
+// every new byte has been validated. The runner-created file must already
+// exist. A parent-directory sync failure can occur after the complete
+// replacement becomes visible.
 func Append(path string, fields []Field) error {
-	return appendWithWriter(path, fields, func(file *os.File, data []byte) (int, error) {
-		return file.Write(data)
-	})
+	return appendWithReplace(path, fields, atomicfile.Write)
 }
 
-func appendWithWriter(path string, fields []Field, write func(*os.File, []byte) (int, error)) (retErr error) {
+type replaceFile func(string, []byte, fs.FileMode) error
+
+func appendWithReplace(path string, fields []Field, replace replaceFile) error {
 	if path == "" {
 		return errors.New("GitHub output path must not be empty")
 	}
@@ -81,9 +87,23 @@ func appendWithWriter(path string, fields []Field, write func(*os.File, []byte) 
 	if result.Len() > maxAppendRecordSize {
 		return fmt.Errorf("GitHub output append exceeds %d bytes", maxAppendRecordSize)
 	}
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0)
+	existing, mode, err := readExisting(path, info)
 	if err != nil {
-		return fmt.Errorf("open GitHub output %q for append: %w", path, err)
+		return err
+	}
+	combined := make([]byte, 0, len(existing)+result.Len())
+	combined = append(combined, existing...)
+	combined = append(combined, result.String()...)
+	if err := replace(path, combined, mode); err != nil {
+		return fmt.Errorf("replace GitHub output %q atomically: %w", path, err)
+	}
+	return nil
+}
+
+func readExisting(path string, info fs.FileInfo) (data []byte, mode fs.FileMode, retErr error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open GitHub output %q: %w", path, err)
 	}
 	closed := false
 	defer func() {
@@ -95,39 +115,29 @@ func appendWithWriter(path string, fields []Field, write func(*os.File, []byte) 
 	}()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("inspect opened GitHub output %q: %w", path, err)
+		return nil, 0, fmt.Errorf("inspect opened GitHub output %q: %w", path, err)
 	}
 	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
-		return fmt.Errorf("GitHub output %q changed while opening", path)
+		return nil, 0, fmt.Errorf("GitHub output %q changed while opening", path)
 	}
 	if openedInfo.Size() > maxExistingOutputSize {
-		return fmt.Errorf("GitHub output %q exceeds %d bytes", path, maxExistingOutputSize)
+		return nil, 0, fmt.Errorf("GitHub output %q exceeds %d bytes", path, maxExistingOutputSize)
 	}
-	if openedInfo.Size() != 0 {
-		last := []byte{0}
-		if _, err := file.ReadAt(last, openedInfo.Size()-1); err != nil {
-			return fmt.Errorf("read final byte of GitHub output %q: %w", path, err)
-		}
-		if last[0] != '\n' {
-			return fmt.Errorf("GitHub output %q does not end with a newline", path)
-		}
-	}
-	data := []byte(result.String())
-	written, err := write(file, data)
+	data, err = io.ReadAll(io.LimitReader(file, maxExistingOutputSize+1))
 	if err != nil {
-		return fmt.Errorf("append GitHub output %q atomically: %w", path, err)
+		return nil, 0, fmt.Errorf("read GitHub output %q: %w", path, err)
 	}
-	if written != len(data) {
-		return fmt.Errorf("append GitHub output %q atomically: short write %d of %d bytes", path, written, len(data))
+	if len(data) > maxExistingOutputSize || int64(len(data)) != openedInfo.Size() {
+		return nil, 0, fmt.Errorf("GitHub output %q changed size while reading", path)
 	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("sync GitHub output %q: %w", path, err)
+	if len(data) != 0 && data[len(data)-1] != '\n' {
+		return nil, 0, fmt.Errorf("GitHub output %q does not end with a newline", path)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("close GitHub output %q: %w", path, err)
+		return nil, 0, fmt.Errorf("close GitHub output %q: %w", path, err)
 	}
 	closed = true
-	return nil
+	return data, openedInfo.Mode().Perm(), nil
 }
 
 func validateValue(key, value string) error {
