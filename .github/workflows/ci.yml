@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Toolkit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: go.mod
+
+      - name: Verify toolkit
+        run: |
+          test -z "$(gofmt -l .)"
+          go test -count=1 ./...
+          go vet ./...
+          go build -trimpath ./...
+          bash -n scripts/*.sh
+          git diff --exit-code
+

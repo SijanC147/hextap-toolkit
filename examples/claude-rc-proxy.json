@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "formula": {
+    "name": "claude-rc-proxy",
+    "class": "ClaudeRcProxy",
+    "description": "Selective Anthropic proxy preserving Claude Code Remote Control",
+    "homepage": "https://github.com/SijanC147/claude-rc-proxy",
+    "license": "MIT",
+    "repository": {
+      "owner": "SijanC147",
+      "name": "claude-rc-proxy"
+    },
+    "binary": "claude-rc-proxy",
+    "assets": {
+      "darwin_arm64": "claude-rc-proxy-darwin-arm64.tar.gz",
+      "darwin_amd64": "claude-rc-proxy-darwin-amd64.tar.gz"
+    }
+  },
+  "release": {
+    "build_script": "scripts/hextap-build",
+    "linux": true
+  },
+  "homebrew": {
+    "macos_only": true,
+    "test_args": [
+      "--version"
+    ],
+    "service": {
+      "enabled": true,
+      "run_args": [],
+      "keep_alive": {
+        "crashed": true
+      },
+      "restart_delay": 5,
+      "environment": {
+        "CLAUDE_RC_PROXY_LISTEN": "127.0.0.1:9801"
+      },
+      "log_path": "log/claude-rc-proxy/launchd.log",
+      "error_log_path": "log/claude-rc-proxy/launchd.log"
+    },
+    "caveats": "Create {{home}}/.homebrew/services/claude-rc-proxy.env before starting the service.\nLogs are written below {{var}}/log/claude-rc-proxy."
+  }
+}

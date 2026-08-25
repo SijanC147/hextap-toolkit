@@ -1,0 +1,40 @@
+class ClaudeRcProxy < Formula
+  desc "Selective Anthropic proxy preserving Claude Code Remote Control"
+  homepage "https://github.com/SijanC147/claude-rc-proxy"
+  # Homebrew derives the version from the release URLs.
+  license "MIT"
+
+  if Hardware::CPU.arm?
+    url "https://github.com/SijanC147/claude-rc-proxy/releases/download/v0.1.0/claude-rc-proxy-darwin-arm64.tar.gz"
+    sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  else
+    url "https://github.com/SijanC147/claude-rc-proxy/releases/download/v0.1.0/claude-rc-proxy-darwin-amd64.tar.gz"
+    sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  end
+
+  depends_on :macos
+
+  def install
+    bin.install "claude-rc-proxy"
+  end
+
+  service do
+    run opt_bin/"claude-rc-proxy"
+    keep_alive crashed: true
+    restart_delay 5
+    environment_variables CLAUDE_RC_PROXY_LISTEN: "127.0.0.1:9801"
+    log_path var/"log/claude-rc-proxy/launchd.log"
+    error_log_path var/"log/claude-rc-proxy/launchd.log"
+  end
+
+  def caveats
+    <<~EOS
+      Create #{Dir.home}/.homebrew/services/claude-rc-proxy.env before starting the service.
+      Logs are written below #{var}/log/claude-rc-proxy.
+    EOS
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/claude-rc-proxy --version")
+  end
+end
