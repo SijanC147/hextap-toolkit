@@ -64,6 +64,7 @@ type archiveMember struct {
 type ownedOutput struct {
 	path string
 	info fs.FileInfo
+	file *os.File
 }
 
 type buildHooks struct {
@@ -100,6 +101,7 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 		return BuildResult{}, err
 	}
 	owned := map[string]ownedOutput{releaseLockName: lock}
+	defer closeOwnedOutputs(owned)
 	defer func() {
 		if retErr != nil {
 			cleanupOwnedOutputs(owned)
@@ -187,14 +189,20 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 		if err := os.Link(source, destination); err != nil {
 			return BuildResult{}, fmt.Errorf("publish release output %q: %w", name, err)
 		}
-		destinationInfo, err := os.Lstat(destination)
+		destinationFile, err := os.Open(destination)
 		if err != nil {
 			return BuildResult{}, fmt.Errorf("inspect published release output %q: %w", name, err)
 		}
+		destinationInfo, err := destinationFile.Stat()
+		if err != nil {
+			destinationFile.Close()
+			return BuildResult{}, fmt.Errorf("inspect published release output %q: %w", name, err)
+		}
 		if !os.SameFile(sourceInfo, destinationInfo) {
+			destinationFile.Close()
 			return BuildResult{}, fmt.Errorf("published release output %q changed before ownership could be recorded", name)
 		}
-		owned[name] = ownedOutput{path: destination, info: destinationInfo}
+		owned[name] = ownedOutput{path: destination, info: destinationInfo, file: destinationFile}
 		if err := os.Remove(source); err != nil {
 			return BuildResult{}, fmt.Errorf("finalize staged release output %q: %w", name, err)
 		}
@@ -234,16 +242,19 @@ func acquireReleaseLock(outputDir string) (ownedOutput, error) {
 		return ownedOutput{}, fmt.Errorf("acquire release output lock: %w", err)
 	}
 	info, statErr := file.Stat()
-	closeErr := file.Close()
 	if statErr != nil {
+		file.Close()
 		return ownedOutput{}, fmt.Errorf("inspect release output lock: %w", statErr)
 	}
-	lock := ownedOutput{path: path, info: info}
-	if closeErr != nil {
-		_ = removeOwnedOutput(lock)
-		return ownedOutput{}, fmt.Errorf("close release output lock: %w", closeErr)
+	return ownedOutput{path: path, info: info, file: file}, nil
+}
+
+func closeOwnedOutputs(owned map[string]ownedOutput) {
+	for _, output := range owned {
+		if output.file != nil {
+			_ = output.file.Close()
+		}
 	}
-	return lock, nil
 }
 
 func cleanupOwnedOutputs(owned map[string]ownedOutput) {
@@ -265,7 +276,15 @@ func removeOwnedOutput(owned ownedOutput) error {
 	if err != nil {
 		return err
 	}
-	if !os.SameFile(current, owned.info) {
+	pinned := owned.info
+	if owned.file != nil {
+		var err error
+		pinned, err = owned.file.Stat()
+		if err != nil {
+			return err
+		}
+	}
+	if !os.SameFile(current, pinned) {
 		return fmt.Errorf("output path %q is no longer owned by this build", owned.path)
 	}
 	return os.Remove(owned.path)
@@ -292,7 +311,14 @@ func requireExactOwnedOutputs(outputDir string, expected []string, owned map[str
 		if err != nil {
 			return fmt.Errorf("inspect release output %q: %w", name, err)
 		}
-		if !os.SameFile(current, record.info) {
+		pinned := record.info
+		if record.file != nil {
+			pinned, err = record.file.Stat()
+			if err != nil {
+				return fmt.Errorf("inspect pinned release output %q: %w", name, err)
+			}
+		}
+		if !os.SameFile(current, pinned) {
 			return fmt.Errorf("release output %q is no longer owned by this build", name)
 		}
 	}
