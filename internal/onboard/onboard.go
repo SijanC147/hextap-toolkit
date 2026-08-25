@@ -61,25 +61,18 @@ type applyHooks struct {
 // Onboard preflights every local artifact, then either reports a dry-run plan
 // or creates only absent files with create-only semantics.
 func Onboard(options Options) (Result, error) {
-	state, err := prepareOnboarding(options)
-	if err != nil {
-		return Result{}, err
-	}
-	entries, err := preflightArtifacts(state.root, state.artifacts)
-	if err != nil {
-		return Result{}, err
-	}
-	result := Result{Project: state.root, Entries: entries, DryRun: options.DryRun}
-	if options.DryRun {
-		return result, nil
-	}
-	if err := applyArtifacts(state.root, state.artifacts, entries); err != nil {
-		return Result{}, err
-	}
-	return result, nil
+	return onboardWithTransactionHooks(options, defaultTransactionHooks())
 }
 
 func prepareOnboarding(options Options) (onboardingState, error) {
+	root, originRepository, err := resolveProject(options.Project)
+	if err != nil {
+		return onboardingState{}, err
+	}
+	return prepareOnboardingResolved(options, root, originRepository)
+}
+
+func prepareOnboardingResolved(options Options, root, originRepository string) (onboardingState, error) {
 	for _, value := range append([]string{
 		options.Repository, options.Formula, options.Binary, options.Description,
 		options.License, options.GoPackage, options.VersionSymbol,
@@ -88,10 +81,6 @@ func prepareOnboarding(options Options) (onboardingState, error) {
 		if containsCredentialLike(value) {
 			return onboardingState{}, errors.New("onboarding input appears to contain a credential and was rejected")
 		}
-	}
-	root, originRepository, err := resolveProject(options.Project)
-	if err != nil {
-		return onboardingState{}, err
 	}
 	repository := originRepository
 	if options.Repository != "" {
@@ -433,9 +422,9 @@ func applyArtifactsWithHooks(rootPath string, artifacts []artifact, entries []En
 	createdDirectories := make([]ownedCreatedDirectory, 0)
 	defer func() {
 		if retErr != nil {
-			cleanupCreated(root, createdFiles, createdDirectories)
+			retErr = errors.Join(retErr, cleanupCreated(root, createdFiles, createdDirectories))
 		}
-		_ = root.Close()
+		retErr = errors.Join(retErr, root.Close())
 	}()
 	actions := make(map[string]Action, len(entries))
 	for _, entry := range entries {
@@ -592,7 +581,8 @@ func writeAllWith(file *os.File, data []byte, write func(*os.File, []byte) (int,
 	return nil
 }
 
-func cleanupCreated(root *os.Root, files []ownedCreatedFile, directories []ownedCreatedDirectory) {
+func cleanupCreated(root *os.Root, files []ownedCreatedFile, directories []ownedCreatedDirectory) error {
+	var cleanupErrors []error
 	for index := len(files) - 1; index >= 0; index-- {
 		owned := files[index]
 		pinned := owned.info
@@ -604,12 +594,16 @@ func cleanupCreated(root *os.Root, files []ownedCreatedFile, directories []owned
 		current, err := root.Lstat(filepath.FromSlash(owned.path))
 		remove := err == nil && pinned != nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() && os.SameFile(pinned, current)
 		if owned.file != nil {
-			_ = owned.file.Close()
+			if err := owned.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("close owned file %s: %w", owned.path, err))
+			}
 		}
 		if remove {
 			current, err = root.Lstat(filepath.FromSlash(owned.path))
 			if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() && os.SameFile(pinned, current) {
-				_ = root.Remove(filepath.FromSlash(owned.path))
+				if err := root.Remove(filepath.FromSlash(owned.path)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("remove owned file %s: %w", owned.path, err))
+				}
 			}
 		}
 	}
@@ -624,15 +618,20 @@ func cleanupCreated(root *os.Root, files []ownedCreatedFile, directories []owned
 		current, err := root.Lstat(filepath.FromSlash(owned.path))
 		remove := err == nil && pinned != nil && current.IsDir() && current.Mode()&os.ModeSymlink == 0 && os.SameFile(pinned, current)
 		if owned.directory != nil {
-			_ = owned.directory.Close()
+			if err := owned.directory.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("close owned directory %s: %w", owned.path, err))
+			}
 		}
 		if remove {
 			current, err = root.Lstat(filepath.FromSlash(owned.path))
 			if err == nil && current.IsDir() && current.Mode()&os.ModeSymlink == 0 && os.SameFile(pinned, current) {
-				_ = root.Remove(filepath.FromSlash(owned.path))
+				if err := root.Remove(filepath.FromSlash(owned.path)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("remove owned directory %s: %w", owned.path, err))
+				}
 			}
 		}
 	}
+	return errors.Join(cleanupErrors...)
 }
 
 func readRootFile(root *os.Root, relative string, maximum int64) ([]byte, fs.FileInfo, error) {
@@ -647,16 +646,44 @@ func readRootFile(root *os.Root, relative string, maximum int64) ([]byte, fs.Fil
 	if err != nil {
 		return nil, nil, err
 	}
-	defer file.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
 	openedInfo, err := file.Stat()
-	if err != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || hardLinked(openedInfo) || openedInfo.Size() != info.Size() {
+	if err != nil || !stableLocalFileInfo(info, openedInfo) || !openedInfo.Mode().IsRegular() || hardLinked(openedInfo) {
 		return nil, nil, errors.New("rooted file changed while opening")
 	}
-	data := make([]byte, openedInfo.Size())
-	if _, err := file.ReadAt(data, 0); err != nil && len(data) != 0 {
+	first, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
 		return nil, nil, err
 	}
-	return data, openedInfo, nil
+	if int64(len(first)) != openedInfo.Size() || int64(len(first)) > maximum {
+		return nil, nil, errors.New("rooted file changed size during first read")
+	}
+	middleInfo, err := file.Stat()
+	if err != nil || !stableLocalFileInfo(openedInfo, middleInfo) {
+		return nil, nil, errors.New("rooted file changed after first read")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, nil, err
+	}
+	second, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	finalInfo, err := file.Stat()
+	pathInfo, pathErr := root.Lstat(filepath.FromSlash(relative))
+	if err != nil || pathErr != nil || !stableLocalFileInfo(middleInfo, finalInfo) || !stableLocalFileInfo(finalInfo, pathInfo) || !bytes.Equal(first, second) {
+		return nil, nil, errors.New("rooted file changed during stable read")
+	}
+	if err := file.Close(); err != nil {
+		return nil, nil, err
+	}
+	closed = true
+	return first, finalInfo, nil
 }
 
 func syncRootDirectory(root *os.Root, relative string) error {

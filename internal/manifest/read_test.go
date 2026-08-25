@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -36,5 +37,24 @@ func TestLoadRejectsSymlinkAndOversizedManifest(t *testing.T) {
 	}
 	if _, err := Load(oversized); err == nil {
 		t.Fatal("Load(oversized) unexpectedly succeeded")
+	}
+}
+
+func TestLoadRejectsSameSizeInPlaceRewriteDuringRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	original := []byte(validManifest)
+	replacement := bytes.Replace(original, []byte("Selective"), []byte("Different"), 1)
+	if len(replacement) != len(original) {
+		t.Fatal("test replacement changed size")
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadWithHook(path, func() {
+		if writeErr := os.WriteFile(path, replacement, 0o600); writeErr != nil {
+			t.Fatalf("rewrite manifest: %v", writeErr)
+		}
+	}); err == nil {
+		t.Fatal("Load() accepted a same-size in-place rewrite")
 	}
 }

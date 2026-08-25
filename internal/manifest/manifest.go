@@ -15,7 +15,12 @@ import (
 	"unicode/utf8"
 )
 
-const CurrentSchema = 1
+const (
+	CurrentSchema         = 1
+	maxPathComponentBytes = 255
+	maxRelativePathBytes  = 1024
+	maxFormulaNameBytes   = maxPathComponentBytes - len("-darwin-arm64.tar.gz")
+)
 
 var (
 	formulaNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$`)
@@ -90,7 +95,13 @@ type KeepAlive struct {
 // Parse decodes exactly one manifest, rejects unknown fields, requires the
 // documented schema keys, and validates all values before returning.
 func Parse(data []byte) (Manifest, error) {
+	if !utf8.Valid(data) {
+		return Manifest{}, errors.New("decode manifest: input is not valid UTF-8")
+	}
 	if err := rejectDuplicateObjectKeys(data); err != nil {
+		return Manifest{}, err
+	}
+	if err := validateRequiredFields(data); err != nil {
 		return Manifest{}, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -101,9 +112,6 @@ func Parse(data []byte) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("decode manifest: %w", err)
 	}
 	if err := rejectTrailingJSON(decoder); err != nil {
-		return Manifest{}, err
-	}
-	if err := validateRequiredFields(data); err != nil {
 		return Manifest{}, err
 	}
 	if err := result.Validate(); err != nil {
@@ -128,6 +136,9 @@ func inspectJSONValue(decoder *json.Decoder) error {
 	}
 	delimiter, isDelimiter := token.(json.Delim)
 	if !isDelimiter {
+		if value, ok := token.(string); ok && strings.ContainsRune(value, utf8.RuneError) {
+			return errors.New("string contains a replacement character or invalid surrogate")
+		}
 		return nil
 	}
 	switch delimiter {
@@ -144,6 +155,9 @@ func inspectJSONValue(decoder *json.Decoder) error {
 			}
 			if _, exists := seen[key]; exists {
 				return fmt.Errorf("duplicate object key %q", key)
+			}
+			if strings.ContainsRune(key, utf8.RuneError) {
+				return errors.New("object key contains a replacement character or invalid surrogate")
 			}
 			seen[key] = struct{}{}
 			if err := inspectJSONValue(decoder); err != nil {
@@ -191,42 +205,29 @@ func validateRequiredFields(data []byte) error {
 	if err := json.Unmarshal(data, &root); err != nil {
 		return fmt.Errorf("decode manifest: %w", err)
 	}
-	for _, key := range []string{"schema", "formula", "release", "homebrew"} {
-		if _, ok := root[key]; !ok {
-			return fmt.Errorf("validate manifest: required field %q is missing", key)
-		}
-	}
-	if err := requireObjectFields(root["formula"], "formula", "name", "class", "description", "homepage", "license", "repository", "binary", "assets"); err != nil {
+	if err := validateExactObjectFields(root, "root", []string{"schema", "formula", "release", "homebrew"}, nil); err != nil {
 		return err
 	}
-	if err := requireObjectFields(root["release"], "release", "build_script", "linux"); err != nil {
+	formula, err := requireExactObjectFields(root["formula"], "formula", []string{"name", "class", "description", "homepage", "license", "repository", "binary", "assets"}, nil)
+	if err != nil {
 		return err
 	}
-	if err := requireObjectFields(root["homebrew"], "homebrew", "macos_only", "test_args", "caveats"); err != nil {
+	if _, err := requireExactObjectFields(root["release"], "release", []string{"build_script", "linux"}, nil); err != nil {
 		return err
 	}
-
-	var formula map[string]json.RawMessage
-	if err := json.Unmarshal(root["formula"], &formula); err != nil {
-		return fmt.Errorf("validate manifest: formula must be an object")
-	}
-	if err := requireObjectFields(formula["repository"], "formula.repository", "owner", "name"); err != nil {
+	homebrew, err := requireExactObjectFields(root["homebrew"], "homebrew", []string{"macos_only", "test_args", "caveats"}, []string{"service"})
+	if err != nil {
 		return err
 	}
-	if err := requireObjectFields(formula["assets"], "formula.assets", "darwin_arm64", "darwin_amd64"); err != nil {
+	if _, err := requireExactObjectFields(formula["repository"], "formula.repository", []string{"owner", "name"}, nil); err != nil {
 		return err
 	}
-
-	var homebrew map[string]json.RawMessage
-	if err := json.Unmarshal(root["homebrew"], &homebrew); err != nil {
-		return fmt.Errorf("validate manifest: homebrew must be an object")
+	if _, err := requireExactObjectFields(formula["assets"], "formula.assets", []string{"darwin_arm64", "darwin_amd64"}, nil); err != nil {
+		return err
 	}
 	if serviceJSON, ok := homebrew["service"]; ok && !bytes.Equal(bytes.TrimSpace(serviceJSON), []byte("null")) {
-		var service map[string]json.RawMessage
-		if err := json.Unmarshal(serviceJSON, &service); err != nil {
-			return fmt.Errorf("validate manifest: homebrew.service must be an object or null")
-		}
-		if err := requireObjectFields(serviceJSON, "homebrew.service", "enabled"); err != nil {
+		service, err := requireExactObjectFields(serviceJSON, "homebrew.service", []string{"enabled"}, []string{"run_args", "keep_alive", "restart_delay", "environment", "log_path", "error_log_path"})
+		if err != nil {
 			return err
 		}
 		var enabled bool
@@ -234,10 +235,12 @@ func validateRequiredFields(data []byte) error {
 			return fmt.Errorf("validate manifest: homebrew.service.enabled must be a boolean")
 		}
 		if enabled {
-			if err := requireObjectFields(serviceJSON, "homebrew.service", "run_args", "keep_alive", "restart_delay", "environment", "log_path", "error_log_path"); err != nil {
-				return err
+			for _, field := range []string{"run_args", "keep_alive", "restart_delay", "environment", "log_path", "error_log_path"} {
+				if _, ok := service[field]; !ok {
+					return fmt.Errorf("validate manifest: required field %q is missing", "homebrew.service."+field)
+				}
 			}
-			if err := requireObjectFields(service["keep_alive"], "homebrew.service.keep_alive"); err != nil {
+			if _, err := requireExactObjectFields(service["keep_alive"], "homebrew.service.keep_alive", nil, []string{"successful_exit", "crashed"}); err != nil {
 				return err
 			}
 		} else if len(service) != 1 {
@@ -247,14 +250,34 @@ func validateRequiredFields(data []byte) error {
 	return nil
 }
 
-func requireObjectFields(data json.RawMessage, object string, fields ...string) error {
+func requireExactObjectFields(data json.RawMessage, object string, required, optional []string) (map[string]json.RawMessage, error) {
 	var values map[string]json.RawMessage
 	if len(data) == 0 || json.Unmarshal(data, &values) != nil || values == nil {
-		return fmt.Errorf("validate manifest: %s must be an object", object)
+		return nil, fmt.Errorf("validate manifest: %s must be an object", object)
 	}
-	for _, field := range fields {
+	if err := validateExactObjectFields(values, object, required, optional); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func validateExactObjectFields(values map[string]json.RawMessage, object string, required, optional []string) error {
+	allowed := make(map[string]struct{}, len(required)+len(optional))
+	for _, field := range append(append([]string(nil), required...), optional...) {
+		allowed[field] = struct{}{}
+	}
+	for field := range values {
+		if _, ok := allowed[field]; !ok {
+			return fmt.Errorf("validate manifest: %s contains an unknown field or mis-cased field", object)
+		}
+	}
+	for _, field := range required {
 		if _, ok := values[field]; !ok {
-			return fmt.Errorf("validate manifest: required field %q is missing", object+"."+field)
+			name := field
+			if object != "root" {
+				name = object + "." + field
+			}
+			return fmt.Errorf("validate manifest: required field %q is missing", name)
 		}
 	}
 	return nil
@@ -266,10 +289,10 @@ func (m Manifest) Validate() error {
 	if m.Schema != CurrentSchema {
 		return fmt.Errorf("validate manifest: schema must be %d", CurrentSchema)
 	}
-	if !formulaNamePattern.MatchString(m.Formula.Name) {
+	if len(m.Formula.Name) > maxFormulaNameBytes || !formulaNamePattern.MatchString(m.Formula.Name) {
 		return errors.New("validate manifest: formula.name must be lowercase kebab-case")
 	}
-	if !classNamePattern.MatchString(m.Formula.Class) {
+	if len(m.Formula.Class) > maxPathComponentBytes || !classNamePattern.MatchString(m.Formula.Class) {
 		return errors.New("validate manifest: formula.class must be a single Ruby constant")
 	}
 	if expected := formulaClassForName(m.Formula.Name); m.Formula.Class != expected {
@@ -290,7 +313,7 @@ func (m Manifest) Validate() error {
 	if !repositoryPattern.MatchString(m.Formula.Repository.Name) || m.Formula.Repository.Name == "." || m.Formula.Repository.Name == ".." || len(m.Formula.Repository.Name) > 100 {
 		return errors.New("validate manifest: formula.repository.name is not a safe GitHub repository name")
 	}
-	if !fileNamePattern.MatchString(m.Formula.Binary) || m.Formula.Binary == "." || m.Formula.Binary == ".." {
+	if len(m.Formula.Binary) > maxPathComponentBytes || !fileNamePattern.MatchString(m.Formula.Binary) || m.Formula.Binary == "." || m.Formula.Binary == ".." {
 		return errors.New("validate manifest: formula.binary must be a safe basename")
 	}
 	if err := validateAsset("formula.assets.darwin_arm64", m.Formula.Assets.DarwinARM64); err != nil {
@@ -424,18 +447,18 @@ func validateHomepage(value string) error {
 }
 
 func validateAsset(field, value string) error {
-	if !fileNamePattern.MatchString(value) || !strings.HasSuffix(value, ".tar.gz") || value == "." || value == ".." {
+	if len(value) > maxPathComponentBytes || !fileNamePattern.MatchString(value) || !strings.HasSuffix(value, ".tar.gz") || value == "." || value == ".." {
 		return fmt.Errorf("validate manifest: %s must be a safe .tar.gz basename", field)
 	}
 	return nil
 }
 
 func validateRelativePath(field, value string) error {
-	if value == "" || !relativePathPattern.MatchString(value) || strings.Contains(value, "\\") || path.IsAbs(value) || path.Clean(value) != value || value == "." || strings.HasPrefix(value, "../") {
+	if value == "" || len(value) > maxRelativePathBytes || !relativePathPattern.MatchString(value) || strings.Contains(value, "\\") || path.IsAbs(value) || path.Clean(value) != value || value == "." || strings.HasPrefix(value, "../") {
 		return fmt.Errorf("validate manifest: %s must be a clean relative path", field)
 	}
 	for _, part := range strings.Split(value, "/") {
-		if !pathPartPattern.MatchString(part) || part == "." || part == ".." {
+		if len(part) > maxPathComponentBytes || !pathPartPattern.MatchString(part) || part == "." || part == ".." {
 			return fmt.Errorf("validate manifest: %s contains an unsafe path component", field)
 		}
 	}

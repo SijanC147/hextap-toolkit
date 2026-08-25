@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	formulaengine "github.com/SijanC147/hextap-toolkit/internal/formula"
 	"github.com/SijanC147/hextap-toolkit/internal/manifest"
 )
 
@@ -101,7 +102,7 @@ func Doctor(options DoctorOptions) (DoctorResult, error) {
 
 func doctorOnline(validated ValidateResult) ([]string, error) {
 	repository := validated.Manifest.RepositorySlug()
-	if _, err := runCommandOutput(onlineCommandTimeout, 4<<10, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
+	if _, err := runCommandOutput(onlineCommandTimeout, 4<<10, "gh", "auth", "status", "--active", "--hostname", "github.com"); err != nil {
 		return nil, errors.New("online doctor: GitHub authentication check failed")
 	}
 	defaultBranch, err := ghRead(16<<10, "api", "repos/"+repository, "--jq", ".default_branch")
@@ -138,7 +139,10 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		return nil, fmt.Errorf("online doctor: canonical tap Formula %s is missing", formulaDestination)
 	}
 	if err := validateFormulaClass([]byte(formulaData), validated.Manifest.Formula.Class); err != nil {
-		return nil, errors.New("online doctor: canonical tap Formula does not declare the registered class")
+		return nil, errors.New("online doctor: tap Formula fails canonical class validation")
+	}
+	if _, err := formulaengine.ValidateCanonical([]byte(formulaData), validated.Manifest); err != nil {
+		return nil, errors.New("online doctor: tap Formula is not the canonical manifest rendering")
 	}
 	return []string{
 		"GitHub authentication",
@@ -147,7 +151,7 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		"Actions secret name",
 		"owned active ruleset bodies",
 		"stable toolkit provenance",
-		"canonical tap registration and Formula",
+		"canonical tap registration and Formula bytes",
 	}, nil
 }
 
@@ -326,7 +330,13 @@ func decodeJSON(data []byte, destination any) error {
 }
 
 func ghRead(maximum int, args ...string) (string, error) {
-	return runCommandOutput(onlineCommandTimeout, maximum, "gh", args...)
+	if len(args) == 0 || args[0] != "api" {
+		return "", errors.New("gh read requires the api command")
+	}
+	pinned := make([]string, 0, len(args)+2)
+	pinned = append(pinned, "api", "--hostname", "github.com")
+	pinned = append(pinned, args[1:]...)
+	return runCommandOutput(onlineCommandTimeout, maximum, "gh", pinned...)
 }
 
 func lineSet(value string) map[string]bool {

@@ -72,6 +72,14 @@ credential-scanned before planning or copying the exact tap payload; custom
 adapter bytes are deliberately exempt because they are neither copied nor
 published as metadata.
 
+Apply mode pins the project root before preparation, snapshots every existing
+managed target and parent, acquires an exclusive create-only onboarding lock,
+and revalidates before publication and success. All file content is prepared
+and synced under a private staging directory before create-only hard-link
+publication. A noncooperative publication race preserves the competing path
+and reports any already-published lexical prefix instead of attempting an
+unsafe rollback.
+
 Local validation is read-only unless the explicit build smoke is selected:
 
 ```sh
@@ -92,13 +100,20 @@ an ambiguous branch-or-tag commit-ish lookup. Doctor never reads a secret
 value or repairs remote state. Remote Formula validation fails closed: after
 an optional blank/comment/block-comment prelude, the first semantic Ruby line
 must be the exact registered top-level Formula class declaration.
+Every `gh` call is explicitly pinned to `github.com`; `GH_HOST` cannot redirect
+doctor or the generated setup commands. Readiness also requires the entire
+Formula to equal the deterministic manifest rendering for its validated
+current stable URLs and SHA-256 metadata, not merely a matching class line.
 
 ## Project manifest schema
 
 Every project is described by one strict JSON document. The current schema is
-`1`; duplicate object keys at any nesting level, unknown fields, missing
-required fields, multiple JSON documents, unsafe paths, and values that could
-escape generated Ruby are rejected.
+`1`; duplicate object keys at any nesting level, mis-cased/case-fold aliases,
+invalid or lossy Unicode, unknown fields, missing required fields, multiple
+JSON documents, unsafe paths, and values that could escape generated Ruby are
+rejected. Filesystem basenames/components are limited to 255 ASCII bytes,
+relative paths to 1024 bytes, and formula names reserve enough room for every
+generated Darwin/Linux archive and tap-registration suffix.
 
 The canonical example is
 [`examples/claude-rc-proxy.json`](examples/claude-rc-proxy.json). The checked-in
@@ -324,10 +339,11 @@ hextapctl release verify \
 ```
 
 The verification runner executes from a private temporary working directory
-with a minimal environment and bounded file-backed stdout/stderr captures.
-Release binaries must not daemonize or intentionally retain the runner's
-descriptor handles; the runner terminates and reaps only the direct process,
-while the surrounding release runner owns any descendant cleanup policy.
+with a minimal environment. Stdout and stderr are bounded live in memory to
+16 KiB each; overflow cancels execution before output can fill disk. On Unix,
+the binary runs in a dedicated process group and timeout or overflow kills and
+reaps that group, including ordinary descendants. Other platforms retain the
+same live memory bounds and terminate the direct process.
 
 #### Build-adapter contract
 

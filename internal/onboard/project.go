@@ -26,17 +26,26 @@ const (
 )
 
 var (
-	repositorySlugPattern = regexp.MustCompile(`^([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)$`)
-	httpsOriginPattern    = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\.git)?$`)
-	sshOriginPattern      = regexp.MustCompile(`^git@github\.com:([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\.git)?$`)
-	sshURLOriginPattern   = regexp.MustCompile(`^ssh://git@github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\.git)?$`)
-	stableTagPattern      = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
-	fullCommitPattern     = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	goPackagePattern      = regexp.MustCompile(`^(?:\.|(?:\./)?[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*)$`)
-	goSymbolPackage       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
-	goIdentifierPattern   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	statusCheckPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._/@:+()\-]{0,99}$`)
-	credentialLikePattern = regexp.MustCompile(`(?i)(github_pat_[A-Za-z0-9_]{10,}|gh[pousr]_[A-Za-z0-9]{10,}|ops_[A-Za-z0-9_-]{10,}|(^|[^A-Za-z0-9])sk-[A-Za-z0-9]{20,})`)
+	repositorySlugPattern  = regexp.MustCompile(`^([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)$`)
+	httpsOriginPattern     = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\.git)?$`)
+	sshOriginPattern       = regexp.MustCompile(`^git@github\.com:([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\.git)?$`)
+	sshURLOriginPattern    = regexp.MustCompile(`^ssh://git@github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\.git)?$`)
+	stableTagPattern       = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	fullCommitPattern      = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	goPackagePattern       = regexp.MustCompile(`^(?:\.|(?:\./)?[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*)$`)
+	goSymbolPackage        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	goIdentifierPattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	statusCheckPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._/@:+()\-]{0,99}$`)
+	credentialLikePatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(^|[^A-Za-z0-9_])sk-proj-[A-Za-z0-9_-]{20,512}($|[^A-Za-z0-9_-])`),
+		regexp.MustCompile(`(^|[^A-Za-z0-9_])sk-svcacct-[A-Za-z0-9_-]{20,512}($|[^A-Za-z0-9_-])`),
+		regexp.MustCompile(`(^|[^A-Za-z0-9_])sk-ant-(?:api[0-9]{2}-)?[A-Za-z0-9_-]{20,512}($|[^A-Za-z0-9_-])`),
+		regexp.MustCompile(`(^|[^A-Za-z0-9_])sk-[A-Za-z0-9]{20,256}($|[^A-Za-z0-9_])`),
+		regexp.MustCompile(`(^|[^A-Za-z0-9_])github_pat_[A-Za-z0-9_]{20,256}($|[^A-Za-z0-9_])`),
+		regexp.MustCompile(`(^|[^A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,128}($|[^A-Za-z0-9_])`),
+		regexp.MustCompile(`(^|[^A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}($|[^A-Za-z0-9_])`),
+		regexp.MustCompile(`(^|[^A-Za-z0-9_])ops_[A-Za-z0-9_-]{32,512}($|[^A-Za-z0-9_-])`),
+	}
 )
 
 var errCommandOutputLimit = errors.New("command output limit exceeded")
@@ -137,6 +146,10 @@ func runCommandOutput(timeout time.Duration, maximum int, name string, args ...s
 }
 
 func readLocalFile(path, label string, maximum int64, singleLink bool) ([]byte, fs.FileInfo, error) {
+	return readLocalFileWithHook(path, label, maximum, singleLink, nil)
+}
+
+func readLocalFileWithHook(path, label string, maximum int64, singleLink bool, afterFirstRead func()) ([]byte, fs.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("inspect %s %q: %w", label, path, err)
@@ -154,50 +167,114 @@ func readLocalFile(path, label string, maximum int64, singleLink bool) ([]byte, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("open %s %q: %w", label, path, err)
 	}
-	defer file.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
 	openedInfo, err := file.Stat()
 	if err != nil {
 		return nil, nil, fmt.Errorf("inspect opened %s %q: %w", label, path, err)
 	}
-	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Size() != info.Size() || singleLink && hardLinked(openedInfo) {
+	if !stableLocalFileInfo(info, openedInfo) || !openedInfo.Mode().IsRegular() || singleLink && hardLinked(openedInfo) {
 		return nil, nil, fmt.Errorf("%s %q changed while opening", label, path)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	first, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read %s %q: %w", label, path, err)
 	}
-	if int64(len(data)) > maximum || int64(len(data)) != openedInfo.Size() {
+	if int64(len(first)) > maximum || int64(len(first)) != openedInfo.Size() {
 		return nil, nil, fmt.Errorf("%s %q changed size while reading", label, path)
 	}
-	return data, openedInfo, nil
+	if afterFirstRead != nil {
+		afterFirstRead()
+	}
+	middleInfo, err := file.Stat()
+	if err != nil || !stableLocalFileInfo(openedInfo, middleInfo) || singleLink && hardLinked(middleInfo) {
+		return nil, nil, fmt.Errorf("%s %q changed after its first read", label, path)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, nil, fmt.Errorf("rewind %s %q: %w", label, path, err)
+	}
+	second, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("reread %s %q: %w", label, path, err)
+	}
+	finalInfo, err := file.Stat()
+	pathInfo, pathErr := os.Lstat(path)
+	if err != nil || pathErr != nil || !stableLocalFileInfo(middleInfo, finalInfo) || !stableLocalFileInfo(finalInfo, pathInfo) || singleLink && hardLinked(finalInfo) || !bytes.Equal(first, second) {
+		return nil, nil, fmt.Errorf("%s %q changed during stable read", label, path)
+	}
+	if err := file.Close(); err != nil {
+		return nil, nil, fmt.Errorf("close %s %q: %w", label, path, err)
+	}
+	closed = true
+	return first, finalInfo, nil
+}
+
+func stableLocalFileInfo(before, after fs.FileInfo) bool {
+	if before == nil || after == nil || !os.SameFile(before, after) || before.Mode() != after.Mode() || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return false
+	}
+	beforeLinks, beforeLinksOK := statLinkCount(before)
+	afterLinks, afterLinksOK := statLinkCount(after)
+	if beforeLinksOK != afterLinksOK || beforeLinksOK && beforeLinks != afterLinks {
+		return false
+	}
+	beforeChange, beforeChangeOK := statChangeTime(before)
+	afterChange, afterChangeOK := statChangeTime(after)
+	return beforeChangeOK == afterChangeOK && (!beforeChangeOK || beforeChange == afterChange)
+
+}
+
+func statLinkCount(info fs.FileInfo) (uint64, bool) {
+	value := statInfoStruct(info)
+	if !value.IsValid() {
+		return 0, false
+	}
+	field := value.FieldByName("Nlink")
+	if !field.IsValid() {
+		return 0, false
+	}
+	switch field.Kind() {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return field.Uint(), true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return uint64(field.Int()), true
+	default:
+		return 0, false
+	}
+}
+
+func statChangeTime(info fs.FileInfo) (string, bool) {
+	value := statInfoStruct(info)
+	if !value.IsValid() {
+		return "", false
+	}
+	for _, name := range []string{"Ctim", "Ctimespec", "ChangeTime"} {
+		field := value.FieldByName(name)
+		if field.IsValid() {
+			return fmt.Sprint(field.Interface()), true
+		}
+	}
+	return "", false
+}
+
+func statInfoStruct(info fs.FileInfo) reflect.Value {
+	value := reflect.ValueOf(info.Sys())
+	if value.IsValid() && value.Kind() == reflect.Pointer && !value.IsNil() {
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return reflect.Value{}
+	}
+	return value
 }
 
 func hardLinked(info fs.FileInfo) bool {
-	value := reflect.ValueOf(info.Sys())
-	if !value.IsValid() {
-		return false
-	}
-	if value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return false
-		}
-		value = value.Elem()
-	}
-	if value.Kind() != reflect.Struct {
-		return false
-	}
-	links := value.FieldByName("Nlink")
-	if !links.IsValid() {
-		return false
-	}
-	switch links.Kind() {
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return links.Uint() > 1
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return links.Int() > 1
-	default:
-		return false
-	}
+	links, ok := statLinkCount(info)
+	return ok && links > 1
 }
 
 func hasSpecialFileMode(info fs.FileInfo) bool {
@@ -265,11 +342,38 @@ func validateRequiredChecks(values []string) ([]string, error) {
 }
 
 func containsCredentialLike(value string) bool {
-	return credentialLikePattern.MatchString(value)
+	for _, pattern := range credentialLikePatterns {
+		if pattern.MatchString(value) {
+			return true
+		}
+	}
+	return false
 }
 
 func manifestContainsCredential(project manifest.Manifest) bool {
+	if project.Homebrew.Service != nil {
+		for name := range project.Homebrew.Service.Environment {
+			if secretEnvironmentName(name) {
+				return true
+			}
+		}
+	}
 	return reflectedValueContainsCredential(reflect.ValueOf(project))
+}
+
+func secretEnvironmentName(name string) bool {
+	parts := strings.Split(name, "_")
+	for index, part := range parts {
+		switch part {
+		case "TOKEN", "PAT", "SECRET", "PASSWORD":
+			return true
+		case "API":
+			if index+1 < len(parts) && parts[index+1] == "KEY" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func reflectedValueContainsCredential(value reflect.Value) bool {

@@ -251,7 +251,7 @@ func TestManifestCredentialScanRecursesThroughSlicesPointersAndMaps(t *testing.T
 	if manifestContainsCredential(project) {
 		t.Fatal("safe typed manifest metadata was classified as a credential")
 	}
-	project.Homebrew.Service.Environment["SAFE_NAME"] = "ops_1234567890nestedcredential"
+	project.Homebrew.Service.Environment["SAFE_NAME"] = "ops_1234567890abcdefghijklmnopqrstuvwxyzABCDEF"
 	if !manifestContainsCredential(project) {
 		t.Fatal("nested service environment credential was not detected")
 	}
@@ -259,6 +259,76 @@ func TestManifestCredentialScanRecursesThroughSlicesPointersAndMaps(t *testing.T
 	project.Homebrew.TestArgs = append(project.Homebrew.TestArgs, "github_pat_1234567890slicecredential")
 	if !manifestContainsCredential(project) {
 		t.Fatal("slice credential was not detected")
+	}
+}
+
+func TestCredentialClassifierUsesBoundedHighConfidenceFamilies(t *testing.T) {
+	positives := []string{
+		"sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+		"sk-svcacct-abcdefghijklmnopqrstuvwxyz0123456789",
+		"sk-abcdefghijklmnopqrstuvwxyz0123456789",
+		"sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
+		"github_pat_abcdefghijklmnopqrstuvwxyz0123456789",
+		"ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+		"AKIAABCDEFGHIJKLMNOP",
+		"ASIAABCDEFGHIJKLMNOP",
+		"ops_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+		"token: sk-proj-abcdefghijklmnopqrstuvwxyz0123456789.",
+	}
+	for _, value := range positives {
+		if !containsCredentialLike(value) {
+			t.Errorf("credential family was not detected: %q", value)
+		}
+	}
+	negatives := []string{
+		"devops_platform_configuration",
+		"ordinary_sk-proj-abcdefghijklmnopqrstuvwxyz0123456789_embedded",
+		"prefixgithub_pat_abcdefghijklmnopqrstuvwxyz0123456789suffix",
+		"ghp_1234567890short",
+		"ops_short_configuration",
+		"AKIAABCDEFGHIJKLMNO",
+		"listen at 127.0.0.1:9801",
+	}
+	for _, value := range negatives {
+		if containsCredentialLike(value) {
+			t.Errorf("ordinary metadata was classified as a credential: %q", value)
+		}
+	}
+}
+
+func TestManifestCredentialScanRejectsObviousSecretEnvironmentNames(t *testing.T) {
+	secretNames := []string{"API_KEY", "GITHUB_TOKEN", "DEPLOY_PAT", "CLIENT_SECRET", "DATABASE_PASSWORD"}
+	for _, name := range secretNames {
+		project := manifest.Manifest{Homebrew: manifest.Homebrew{Service: &manifest.Service{Environment: map[string]string{name: "not-a-secret"}}}}
+		if !manifestContainsCredential(project) {
+			t.Errorf("secret environment key %q was not rejected", name)
+		}
+	}
+	safe := manifest.Manifest{Homebrew: manifest.Homebrew{Service: &manifest.Service{Environment: map[string]string{
+		"CLAUDE_RC_PROXY_LISTEN": "127.0.0.1:9801",
+		"RUNTIME_MODE":           "service",
+	}}}}
+	if manifestContainsCredential(safe) {
+		t.Fatal("ordinary runtime configuration was rejected")
+	}
+}
+
+func TestReadLocalFileRejectsSameSizeInPlaceRewriteDuringRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "managed")
+	original := []byte("first-state\n")
+	replacement := []byte("other-state\n")
+	if len(replacement) != len(original) {
+		t.Fatal("test replacement changed size")
+	}
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readLocalFileWithHook(path, "managed", maximumLocalFile, true, func() {
+		if writeErr := os.WriteFile(path, replacement, 0o644); writeErr != nil {
+			t.Fatalf("rewrite managed file: %v", writeErr)
+		}
+	}); err == nil {
+		t.Fatal("readLocalFile() accepted a same-size in-place rewrite")
 	}
 }
 
@@ -471,7 +541,7 @@ func TestApplyFailureRemovesOnlyInvocationOwnedFiles(t *testing.T) {
 func TestArtifactsContainNoCredentialValues(t *testing.T) {
 	project := writeGoProject(t)
 	options := validOptions(project)
-	options.Description = "github_pat_1234567890secret"
+	options.Description = "github_pat_1234567890secretcredential"
 	if _, err := Onboard(options); err == nil || strings.Contains(err.Error(), options.Description) {
 		t.Fatalf("credential input error = %v", err)
 	}
@@ -747,7 +817,8 @@ func TestOnboardFreshProjectValidateAndRerun(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo SijanC147/example-tool",
+		"gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/SijanC147/example-tool",
+		"gh api --hostname github.com --method POST repos/SijanC147/example-tool/rulesets",
 		"Projects/example-tool.json", "Formula/example-tool.rb",
 		"class ExampleTool < Formula", "homebrew-only", "did not inspect or mutate any remote",
 	} {

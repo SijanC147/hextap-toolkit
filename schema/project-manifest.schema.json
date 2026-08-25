@@ -28,10 +28,12 @@
   "$defs": {
     "formulaName": {
       "type": "string",
+      "maxLength": 235,
       "pattern": "^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$"
     },
     "className": {
       "type": "string",
+      "maxLength": 255,
       "pattern": "^[A-Z][A-Za-z0-9]*$"
     },
     "repositoryName": {
@@ -46,14 +48,17 @@
     },
     "fileName": {
       "type": "string",
+      "maxLength": 255,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
     },
     "assetName": {
       "type": "string",
+      "maxLength": 255,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.tar\\.gz$"
     },
     "relativePath": {
       "type": "string",
+      "maxLength": 1024,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*(?:/[A-Za-z0-9][A-Za-z0-9._+-]*)*$"
     },
     "environmentKey": {

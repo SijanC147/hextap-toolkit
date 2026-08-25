@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -91,6 +92,48 @@ func TestParseRejectsDuplicateObjectKeysAtEveryNestingLevel(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Parse([]byte(input)); err == nil || !strings.Contains(err.Error(), "duplicate object key") {
 				t.Fatalf("Parse() error = %v, want duplicate object key rejection", err)
+			}
+		})
+	}
+}
+
+func TestParseRejectsCaseFoldAliasesAtEveryTypedObject(t *testing.T) {
+	const hiddenCredential = "github_pat_1234567890hiddenalias"
+	tests := map[string]string{
+		"root alias":        strings.Replace(validManifest, `"formula": {`, `"Formula": {`, 1),
+		"root collision":    strings.Replace(validManifest, `"formula": {`, `"Formula": {}, "formula": {`, 1),
+		"formula alias":     strings.Replace(validManifest, `"name": "claude-rc-proxy",`, `"Name": "claude-rc-proxy",`, 1),
+		"formula collision": strings.Replace(validManifest, `"name": "claude-rc-proxy",`, `"name": "claude-rc-proxy", "Name": "`+hiddenCredential+`",`, 1),
+		"repository alias":  strings.Replace(validManifest, `"owner": "SijanC147",`, `"Owner": "SijanC147",`, 1),
+		"assets alias":      strings.Replace(validManifest, `"darwin_arm64":`, `"Darwin_ARM64":`, 1),
+		"release alias":     strings.Replace(validManifest, `"build_script":`, `"Build_Script":`, 1),
+		"homebrew alias":    strings.Replace(validManifest, `"macos_only":`, `"MacOS_Only":`, 1),
+		"service alias":     strings.Replace(validManifest, `"enabled": true`, `"Enabled": true`, 1),
+		"keep alive alias":  strings.Replace(validManifest, `"crashed": true`, `"Crashed": true`, 1),
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(input)); err == nil {
+				t.Fatal("Parse() unexpectedly accepted a case-fold alias")
+			} else if strings.Contains(err.Error(), hiddenCredential) {
+				t.Fatalf("Parse() leaked losing alias value: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseRejectsInvalidOrLossyUnicode(t *testing.T) {
+	invalidUTF8 := bytes.Replace([]byte(validManifest), []byte("Selective Anthropic"), append([]byte("Selective "), 0xff), 1)
+	tests := map[string][]byte{
+		"invalid UTF-8":       invalidUTF8,
+		"unpaired surrogate":  bytes.Replace([]byte(validManifest), []byte("Selective Anthropic"), []byte(`Selective \ud800`), 1),
+		"replacement escape":  bytes.Replace([]byte(validManifest), []byte("Selective Anthropic"), []byte(`Selective \ufffd`), 1),
+		"literal replacement": bytes.Replace([]byte(validManifest), []byte("Selective Anthropic"), []byte("Selective �"), 1),
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse(input); err == nil {
+				t.Fatal("Parse() unexpectedly accepted invalid or lossy Unicode")
 			}
 		})
 	}
@@ -227,6 +270,57 @@ func TestFormulaClassMustBeDerivedFromFormulaName(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidateEnforcesGeneratedAndFilesystemPathByteLimits(t *testing.T) {
+	base, err := Parse([]byte(validManifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]func(*Manifest){
+		"formula generated suffix reserve": func(project *Manifest) {
+			project.Formula.Name = strings.Repeat("a", 236)
+			project.Formula.Class = formulaClassForName(project.Formula.Name)
+			project.Formula.Assets.DarwinARM64 = project.Formula.Name + "-darwin-arm64.tar.gz"
+			project.Formula.Assets.DarwinAMD64 = project.Formula.Name + "-darwin-amd64.tar.gz"
+		},
+		"class basename": func(project *Manifest) {
+			project.Formula.Class = strings.Repeat("A", 256)
+		},
+		"binary basename": func(project *Manifest) {
+			project.Formula.Binary = strings.Repeat("a", 256)
+		},
+		"explicit asset basename": func(project *Manifest) {
+			project.Formula.Assets.DarwinARM64 = strings.Repeat("a", 249) + ".tar.gz"
+		},
+		"relative component": func(project *Manifest) {
+			project.Release.BuildScript = "scripts/" + strings.Repeat("a", 256)
+		},
+		"relative total": func(project *Manifest) {
+			component := strings.Repeat("a", 250)
+			project.Release.BuildScript = strings.Join([]string{component, component, component, component, component}, "/")
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			project := base
+			mutate(&project)
+			if err := project.Validate(); err == nil {
+				t.Fatal("Validate() unexpectedly accepted an oversized path value")
+			}
+		})
+	}
+
+	boundary := base
+	boundary.Formula.Name = strings.Repeat("a", 235)
+	boundary.Formula.Class = formulaClassForName(boundary.Formula.Name)
+	boundary.Formula.Binary = strings.Repeat("b", 255)
+	boundary.Formula.Assets.DarwinARM64 = boundary.Formula.Name + "-darwin-arm64.tar.gz"
+	boundary.Formula.Assets.DarwinAMD64 = boundary.Formula.Name + "-darwin-amd64.tar.gz"
+	boundary.Release.BuildScript = strings.Repeat("c", 255)
+	if err := boundary.Validate(); err != nil {
+		t.Fatalf("Validate(boundary values) = %v", err)
 	}
 }
 

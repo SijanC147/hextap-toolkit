@@ -1,11 +1,15 @@
 package onboard
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	formulaengine "github.com/SijanC147/hextap-toolkit/internal/formula"
+	"github.com/SijanC147/hextap-toolkit/internal/manifest"
 )
 
 func writeRemoteRulesetFixture(t *testing.T, localPath, destination string, id int64, mutate func(map[string]any)) {
@@ -66,19 +70,34 @@ func writeFakeGH(t *testing.T, project string) (logPath string) {
 	})
 	formulaPath := filepath.Join(directory, "formula.rb")
 	formulaSpoofPath := filepath.Join(directory, "formula-spoof.rb")
-	formula := `class ExampleTool < Formula
-  desc "class Wrong < Formula"
-  def caveats
-    <<~EOS
-      class Wrong < Formula
-    EOS
-  end
-end
-`
-	if err := os.WriteFile(formulaPath, []byte(formula), 0o600); err != nil {
+	formulaHostilePath := filepath.Join(directory, "formula-hostile.rb")
+	formulaStalePath := filepath.Join(directory, "formula-stale.rb")
+	formulaNoncanonicalPath := filepath.Join(directory, "formula-noncanonical.rb")
+	manifestData, err := os.ReadFile(filepath.Join(project, ".hextap.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectManifest, err := manifest.Parse(manifestData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	formula, err := formulaengine.Render(projectManifest, "1.2.3", strings.Repeat("a", 64), strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(formulaPath, formula, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(formulaSpoofPath, []byte("# class ExampleTool < Formula\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(formulaHostilePath, bytes.Replace(formula, []byte("class ExampleTool < Formula\n"), []byte("class ExampleTool < Formula\n  system \"id\"\n"), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(formulaStalePath, bytes.Replace(formula, []byte(`bin.install "example-tool"`), []byte(`bin.install "other"`), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(formulaNoncanonicalPath, bytes.Replace(formula, []byte("  desc"), []byte("   desc"), 1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -87,23 +106,23 @@ set -eu
 printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 mode="${FAKE_GH_MODE:-success}"
 case "$*" in
-  "auth status --hostname github.com")
+  "auth status --active --hostname github.com")
     if [ "$mode" = auth ]; then printf '%s\n' 'ghp_1234567890secret' >&2; exit 1; fi ;;
-  "api repos/SijanC147/example-tool --jq .default_branch")
+  "api --hostname github.com repos/SijanC147/example-tool --jq .default_branch")
     if [ "$mode" = default ]; then printf '%s\n' develop; else printf '%s\n' main; fi ;;
-  "api repos/SijanC147/example-tool/immutable-releases --jq .enabled")
+  "api --hostname github.com repos/SijanC147/example-tool/immutable-releases --jq .enabled")
     if [ "$mode" = immutable ]; then printf '%s\n' false; else printf '%s\n' true; fi ;;
-  "api --paginate repos/SijanC147/example-tool/actions/secrets --jq .secrets[].name")
+  "api --hostname github.com --paginate repos/SijanC147/example-tool/actions/secrets --jq .secrets[].name")
     if [ "$mode" != secret ]; then printf '%s\n' OP_SERVICE_ACCOUNT_TOKEN; fi ;;
-  "api --paginate --slurp repos/SijanC147/example-tool/rulesets?per_page=100")
+  "api --hostname github.com --paginate --slurp repos/SijanC147/example-tool/rulesets?per_page=100")
     case "$mode" in
       ruleset-missing) printf '%s\n' '[[{"id":101,"name":"hextap/main","target":"branch","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}]]' ;;
       ruleset-wrong-source) printf '%s\n' '[[{"id":101,"name":"hextap/main","target":"branch","source_type":"Organization","source":"SijanC147","enforcement":"active"},{"id":102,"name":"hextap/release-tags","target":"tag","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}]]' ;;
       ruleset-inactive) printf '%s\n' '[[{"id":101,"name":"hextap/main","target":"branch","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"disabled"},{"id":102,"name":"hextap/release-tags","target":"tag","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}]]' ;;
       ruleset-duplicate) printf '%s\n' '[[{"id":101,"name":"hextap/main","target":"branch","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"},{"id":103,"name":"hextap/main","target":"branch","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"},{"id":102,"name":"hextap/release-tags","target":"tag","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}]]' ;;
-      *) printf '%s\n' '[[{"id":101,"name":"hextap/main","target":"branch","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"},{"id":102,"name":"hextap/release-tags","target":"tag","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}]]' ;;
+      *) printf '%s\n' '[[{"id":101,"name":"hextap/main","target":"branch","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}],[{"id":102,"name":"hextap/release-tags","target":"tag","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}]]' ;;
     esac ;;
-  "api repos/SijanC147/example-tool/rulesets/101")
+  "api --hostname github.com repos/SijanC147/example-tool/rulesets/101")
     case "$mode" in
       ruleset-drift) cat "$FAKE_MAIN_DRIFT" ;;
       ruleset-conditions-drift) cat "$FAKE_MAIN_CONDITIONS_DRIFT" ;;
@@ -112,8 +131,8 @@ case "$*" in
       ruleset-detail-source) cat "$FAKE_MAIN_WRONG_SOURCE" ;;
       *) cat "$FAKE_MAIN_RULESET" ;;
     esac ;;
-  "api repos/SijanC147/example-tool/rulesets/102") cat "$FAKE_TAG_RULESET" ;;
-  "api repos/SijanC147/hextap-toolkit/git/ref/tags/v1.2.3")
+  "api --hostname github.com repos/SijanC147/example-tool/rulesets/102") cat "$FAKE_TAG_RULESET" ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/ref/tags/v1.2.3")
     case "$mode" in
       tag-missing) exit 44 ;;
       tag-malformed) printf '%s\n' '{"ref":"refs/tags/v1.2.3","object":{"type":"tag","sha":"bad"}}' ;;
@@ -122,30 +141,33 @@ case "$*" in
       tag-commit-drift) printf '%s\n' '{"ref":"refs/tags/v1.2.3","object":{"type":"commit","sha":"ffffffffffffffffffffffffffffffffffffffff"}}' ;;
       *) printf '%s\n' '{"ref":"refs/tags/v1.2.3","object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}' ;;
     esac ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     case "$mode" in
       tag-annotated) printf '%s\n' '{"tag":"v1.2.3","object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}' ;;
       tag-type) printf '%s\n' '{"tag":"v1.2.3","object":{"type":"blob","sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}' ;;
       *) printf '%s\n' '{"tag":"v1.2.3","object":{"type":"tag","sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}' ;;
     esac ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
     if [ "$mode" = tag-cycle ]; then printf '%s\n' '{"tag":"nested","object":{"type":"tag","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'; else printf '%s\n' '{"tag":"nested","object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}'; fi ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/1111111111111111111111111111111111111111") printf '%s\n' '{"tag":"depth-1","object":{"type":"tag","sha":"2222222222222222222222222222222222222222"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/2222222222222222222222222222222222222222") printf '%s\n' '{"tag":"depth-2","object":{"type":"tag","sha":"3333333333333333333333333333333333333333"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/3333333333333333333333333333333333333333") printf '%s\n' '{"tag":"depth-3","object":{"type":"tag","sha":"4444444444444444444444444444444444444444"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/4444444444444444444444444444444444444444") printf '%s\n' '{"tag":"depth-4","object":{"type":"tag","sha":"5555555555555555555555555555555555555555"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/5555555555555555555555555555555555555555") printf '%s\n' '{"tag":"depth-5","object":{"type":"tag","sha":"6666666666666666666666666666666666666666"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/6666666666666666666666666666666666666666") printf '%s\n' '{"tag":"depth-6","object":{"type":"tag","sha":"7777777777777777777777777777777777777777"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/7777777777777777777777777777777777777777") printf '%s\n' '{"tag":"depth-7","object":{"type":"tag","sha":"8888888888888888888888888888888888888888"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/8888888888888888888888888888888888888888") printf '%s\n' '{"tag":"depth-8","object":{"type":"tag","sha":"9999999999999999999999999999999999999999"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/git/tags/9999999999999999999999999999999999999999") printf '%s\n' '{"tag":"depth-9","object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}' ;;
-  "api repos/SijanC147/hextap-toolkit/commits/v1.2.3 --jq .sha") printf '%s\n' '0123456789abcdef0123456789abcdef01234567' ;;
-  "api -H Accept: application/vnd.github.raw+json repos/SijanC147/homebrew-hextap/contents/Projects/example-tool.json")
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/1111111111111111111111111111111111111111") printf '%s\n' '{"tag":"depth-1","object":{"type":"tag","sha":"2222222222222222222222222222222222222222"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/2222222222222222222222222222222222222222") printf '%s\n' '{"tag":"depth-2","object":{"type":"tag","sha":"3333333333333333333333333333333333333333"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/3333333333333333333333333333333333333333") printf '%s\n' '{"tag":"depth-3","object":{"type":"tag","sha":"4444444444444444444444444444444444444444"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/4444444444444444444444444444444444444444") printf '%s\n' '{"tag":"depth-4","object":{"type":"tag","sha":"5555555555555555555555555555555555555555"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/5555555555555555555555555555555555555555") printf '%s\n' '{"tag":"depth-5","object":{"type":"tag","sha":"6666666666666666666666666666666666666666"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/6666666666666666666666666666666666666666") printf '%s\n' '{"tag":"depth-6","object":{"type":"tag","sha":"7777777777777777777777777777777777777777"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/7777777777777777777777777777777777777777") printf '%s\n' '{"tag":"depth-7","object":{"type":"tag","sha":"8888888888888888888888888888888888888888"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/8888888888888888888888888888888888888888") printf '%s\n' '{"tag":"depth-8","object":{"type":"tag","sha":"9999999999999999999999999999999999999999"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/git/tags/9999999999999999999999999999999999999999") printf '%s\n' '{"tag":"depth-9","object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}' ;;
+  "api --hostname github.com repos/SijanC147/hextap-toolkit/commits/v1.2.3 --jq .sha") printf '%s\n' '0123456789abcdef0123456789abcdef01234567' ;;
+  "api --hostname github.com -H Accept: application/vnd.github.raw+json repos/SijanC147/homebrew-hextap/contents/Projects/example-tool.json")
     if [ "$mode" = tap ]; then printf '%s\n' '{"schema":1}'; else cat "$FAKE_TAP_PATH"; fi ;;
-  "api -H Accept: application/vnd.github.raw+json repos/SijanC147/homebrew-hextap/contents/Formula/example-tool.rb")
+  "api --hostname github.com -H Accept: application/vnd.github.raw+json repos/SijanC147/homebrew-hextap/contents/Formula/example-tool.rb")
     case "$mode" in
       formula-missing) exit 44 ;;
       formula-spoof) cat "$FAKE_FORMULA_SPOOF" ;;
+      formula-hostile) cat "$FAKE_FORMULA_HOSTILE" ;;
+      formula-stale) cat "$FAKE_FORMULA_STALE" ;;
+      formula-noncanonical) cat "$FAKE_FORMULA_NONCANONICAL" ;;
       *) cat "$FAKE_FORMULA_PATH" ;;
     esac ;;
   *) exit 44 ;;
@@ -166,6 +188,9 @@ esac
 	t.Setenv("FAKE_MAIN_WRONG_SOURCE", mainWrongSource)
 	t.Setenv("FAKE_FORMULA_PATH", formulaPath)
 	t.Setenv("FAKE_FORMULA_SPOOF", formulaSpoofPath)
+	t.Setenv("FAKE_FORMULA_HOSTILE", formulaHostilePath)
+	t.Setenv("FAKE_FORMULA_STALE", formulaStalePath)
+	t.Setenv("FAKE_FORMULA_NONCANONICAL", formulaNoncanonicalPath)
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return logPath
 }
@@ -186,6 +211,7 @@ func TestDoctorLocalMakesNoGHCallsAndOnlineIsReadOnly(t *testing.T) {
 	if data, err := os.ReadFile(logPath); err == nil && len(data) != 0 {
 		t.Fatalf("local doctor invoked gh: %s", data)
 	}
+	t.Setenv("GH_HOST", "evil.example")
 	online, err := Doctor(DoctorOptions{Project: project, Online: true})
 	if err != nil {
 		t.Fatalf("Doctor(online) error = %v", err)
@@ -204,6 +230,14 @@ func TestDoctorLocalMakesNoGHCallsAndOnlineIsReadOnly(t *testing.T) {
 	}
 	if strings.Contains(string(log), "/commits/v1.2.3") {
 		t.Fatalf("online doctor used ambiguous commit-ish resolution:\n%s", log)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(log)), "\n") {
+		if strings.HasPrefix(line, "api ") && !strings.HasPrefix(line, "api --hostname github.com ") {
+			t.Fatalf("gh api call was not pinned to github.com: %q", line)
+		}
+		if strings.HasPrefix(line, "auth ") && line != "auth status --active --hostname github.com" {
+			t.Fatalf("gh auth call was not active and pinned to github.com: %q", line)
+		}
 	}
 }
 
@@ -247,6 +281,9 @@ func TestDoctorOnlineReportsEveryRemoteInvariantFailure(t *testing.T) {
 		"tap mismatch":              "tap",
 		"Formula missing":           "formula-missing",
 		"Formula declaration spoof": "formula-spoof",
+		"Formula hostile body":      "formula-hostile",
+		"Formula stale body":        "formula-stale",
+		"Formula noncanonical body": "formula-noncanonical",
 	}
 	for name, mode := range tests {
 		t.Run(name, func(t *testing.T) {

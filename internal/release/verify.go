@@ -3,7 +3,6 @@ package release
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"crypto/sha256"
 	"debug/elf"
 	"debug/macho"
@@ -19,6 +18,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"archive/tar"
@@ -559,6 +559,39 @@ func executeVerifiedBinary(binaryName, version, commit, asset string, data []byt
 	return executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset, data, verifyCommandTimeout)
 }
 
+type liveBoundedBuffer struct {
+	mu       sync.Mutex
+	data     []byte
+	maximum  int
+	overflow chan<- struct{}
+}
+
+func (b *liveBoundedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	remaining := b.maximum - len(b.data)
+	if remaining > len(data) {
+		remaining = len(data)
+	}
+	if remaining > 0 {
+		b.data = append(b.data, data[:remaining]...)
+	}
+	overflowed := remaining < len(data)
+	b.mu.Unlock()
+	if overflowed {
+		select {
+		case b.overflow <- struct{}{}:
+		default:
+		}
+	}
+	return len(data), nil
+}
+
+func (b *liveBoundedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.data...)
+}
+
 func executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset string, data []byte, timeout time.Duration) error {
 	directory, err := os.MkdirTemp("", ".hextap-verify-*")
 	if err != nil {
@@ -581,86 +614,51 @@ func executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset string,
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close extracted binary: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	stdoutFile, err := os.CreateTemp(directory, ".stdout-*")
-	if err != nil {
-		return fmt.Errorf("create %s stdout capture: %w", asset, err)
-	}
-	stdoutPath := stdoutFile.Name()
-	defer os.Remove(stdoutPath)
-	stderrFile, err := os.CreateTemp(directory, ".stderr-*")
-	if err != nil {
-		_ = stdoutFile.Close()
-		return fmt.Errorf("create %s stderr capture: %w", asset, err)
-	}
-	stderrPath := stderrFile.Name()
-	defer os.Remove(stderrPath)
-	command := exec.CommandContext(ctx, path, "--version")
+	overflow := make(chan struct{}, 1)
+	stdout := &liveBoundedBuffer{maximum: maxVerifyCommandOutput, overflow: overflow}
+	stderr := &liveBoundedBuffer{maximum: maxVerifyCommandOutput, overflow: overflow}
+	command := exec.Command(path, "--version")
 	command.Dir = directory
 	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TZ=UTC"}
 	command.Stdin = nil
-	command.Stdout = stdoutFile
-	command.Stderr = stderrFile
-	err = command.Run()
-	stdoutCloseErr := stdoutFile.Close()
-	stderrCloseErr := stderrFile.Close()
-	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("execute %s: timed out", asset)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	command.WaitDelay = 2 * time.Second
+	prepareVerifiedCommand(command)
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("execute %s: start command: %w", asset, err)
 	}
-	if stdoutCloseErr != nil || stderrCloseErr != nil {
-		return fmt.Errorf("execute %s: close output capture failed", asset)
+	wait := make(chan error, 1)
+	go func() { wait <- command.Wait() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err = <-wait:
+		select {
+		case <-overflow:
+			return fmt.Errorf("execute %s: output limit exceeded", asset)
+		default:
+		}
+	case <-overflow:
+		terminateVerifiedCommand(command)
+		<-wait
+		return fmt.Errorf("execute %s: output limit exceeded", asset)
+	case <-timer.C:
+		terminateVerifiedCommand(command)
+		<-wait
+		return fmt.Errorf("execute %s: timed out", asset)
 	}
 	if err != nil {
 		return fmt.Errorf("execute %s: command failed", asset)
 	}
-	stdout, err := readBoundedCapture(stdoutPath)
-	if err != nil {
-		return fmt.Errorf("execute %s: read stdout capture: %w", asset, err)
-	}
-	stderr, err := readBoundedCapture(stderrPath)
-	if err != nil {
-		return fmt.Errorf("execute %s: read stderr capture: %w", asset, err)
-	}
+	stdoutData := stdout.Bytes()
+	stderrData := stderr.Bytes()
 	want := binaryName + " " + version + " (commit " + commit + ")\n"
-	if len(stderr) != 0 {
+	if len(stderrData) != 0 {
 		return fmt.Errorf("execute %s: stderr was not empty", asset)
 	}
-	if string(stdout) != want {
+	if string(stdoutData) != want {
 		return fmt.Errorf("execute %s: stdout did not match expected version", asset)
 	}
 	return nil
-}
-
-func readBoundedCapture(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, errors.New("capture is not a regular file")
-	}
-	if info.Size() < 0 || info.Size() > maxVerifyCommandOutput {
-		return nil, errors.New("capture exceeds output limit")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !os.SameFile(info, openedInfo) || openedInfo.Size() != info.Size() {
-		return nil, errors.New("capture changed while opening")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxVerifyCommandOutput+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxVerifyCommandOutput || int64(len(data)) != openedInfo.Size() {
-		return nil, errors.New("capture changed size while reading")
-	}
-	return data, nil
 }
