@@ -59,6 +59,10 @@ type VerifyResult struct {
 // ExecuteTarget is set, all artifacts are validated before its binary is
 // extracted into a private temporary directory and run.
 func Verify(options VerifyOptions) (VerifyResult, error) {
+	return verifyWithHook(options, nil)
+}
+
+func verifyWithHook(options VerifyOptions, afterChecksums func()) (VerifyResult, error) {
 	if _, err := ParseVersion(options.Version); err != nil {
 		return VerifyResult{}, fmt.Errorf("validate verify version: %w", err)
 	}
@@ -89,13 +93,17 @@ func Verify(options VerifyOptions) (VerifyResult, error) {
 	if err := verifyDirectoryEntries(directory, append(append([]string(nil), assets...), "SHA256SUMS")); err != nil {
 		return VerifyResult{}, err
 	}
-	if err := verifyChecksums(directory, assets); err != nil {
+	archiveBytes, err := verifyChecksums(directory, assets)
+	if err != nil {
 		return VerifyResult{}, err
+	}
+	if afterChecksums != nil {
+		afterChecksums()
 	}
 
 	binaries := make(map[string][]byte, len(targets))
 	for _, item := range targets {
-		binary, err := verifyArchive(filepath.Join(directory, item.Asset), project.Formula.Binary, item.OS, item.Arch)
+		binary, err := verifyArchive(archiveBytes[item.Asset], project.Formula.Binary, item.OS, item.Arch)
 		if err != nil {
 			return VerifyResult{}, fmt.Errorf("verify %s: %w", item.Asset, err)
 		}
@@ -120,9 +128,9 @@ func readVerifyManifest(path string) (manifest.Manifest, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return manifest.Manifest{}, errors.New("verify manifest must be a regular non-symlink file")
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedRegularFile(path, "verify manifest", 1<<20, true)
 	if err != nil {
-		return manifest.Manifest{}, fmt.Errorf("read verify manifest: %w", err)
+		return manifest.Manifest{}, err
 	}
 	project, err := manifest.Parse(data)
 	if err != nil {
@@ -196,81 +204,106 @@ func verifyDirectoryEntries(directory string, expected []string) error {
 	return nil
 }
 
-func verifyChecksums(directory string, assets []string) error {
+func verifyChecksums(directory string, assets []string) (map[string][]byte, error) {
 	path := filepath.Join(directory, "SHA256SUMS")
 	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("inspect SHA256SUMS: %w", err)
+		return nil, fmt.Errorf("inspect SHA256SUMS: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return errors.New("SHA256SUMS must be a regular non-symlink file")
+		return nil, errors.New("SHA256SUMS must be a regular non-symlink file")
 	}
 	data, err := readBoundedVerifyFile(path, 1<<20)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(data) == 0 || data[len(data)-1] != '\n' {
-		return errors.New("SHA256SUMS must end with a newline")
+		return nil, errors.New("SHA256SUMS must end with a newline")
 	}
 	lines := strings.Split(string(data[:len(data)-1]), "\n")
 	want := append([]string(nil), assets...)
 	sort.Strings(want)
 	if len(lines) != len(want) {
-		return fmt.Errorf("SHA256SUMS entries = %d, want %d", len(lines), len(want))
+		return nil, fmt.Errorf("SHA256SUMS entries = %d, want %d", len(lines), len(want))
 	}
 	seen := make(map[string]bool, len(lines))
+	archives := make(map[string][]byte, len(lines))
 	previous := ""
 	for i, line := range lines {
 		if len(line) < 67 || line[64:66] != "  " || !isLowerHex(line[:64]) {
-			return fmt.Errorf("SHA256SUMS line %d has invalid format", i+1)
+			return nil, fmt.Errorf("SHA256SUMS line %d has invalid format", i+1)
 		}
 		name := line[66:]
 		if name == "" || filepath.Base(name) != name || filepath.Clean(name) != name || strings.ContainsAny(name, "\\\r\t") {
-			return fmt.Errorf("SHA256SUMS line %d has unsafe asset name", i+1)
+			return nil, fmt.Errorf("SHA256SUMS line %d has unsafe asset name", i+1)
 		}
 		if name <= previous {
-			return errors.New("SHA256SUMS entries must be strictly sorted")
+			return nil, errors.New("SHA256SUMS entries must be strictly sorted")
 		}
 		if seen[name] {
-			return fmt.Errorf("SHA256SUMS contains duplicate asset %q", name)
+			return nil, fmt.Errorf("SHA256SUMS contains duplicate asset %q", name)
 		}
 		seen[name] = true
 		if i >= len(want) || name != want[i] {
-			return fmt.Errorf("SHA256SUMS contains unexpected asset %q", name)
+			return nil, fmt.Errorf("SHA256SUMS contains unexpected asset %q", name)
 		}
 		raw, err := readBoundedVerifyFile(filepath.Join(directory, name), maxVerifyCompressedSize)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		sum := sha256.Sum256(raw)
 		if hex.EncodeToString(sum[:]) != line[:64] {
-			return fmt.Errorf("SHA256SUMS checksum mismatch for %q", name)
+			return nil, fmt.Errorf("SHA256SUMS checksum mismatch for %q", name)
 		}
+		archives[name] = raw
 		previous = name
 	}
-	return nil
+	return archives, nil
 }
 
 func readBoundedVerifyFile(path string, maximum int64) ([]byte, error) {
+	return readBoundedRegularFile(path, "release file", maximum, true)
+}
+
+func readBoundedRegularFile(path, label string, maximum int64, checkOuter bool) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect release file %q: %w", path, err)
+		return nil, fmt.Errorf("inspect %s %q: %w", label, path, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("release file %q must be a regular non-symlink file", path)
+		return nil, fmt.Errorf("%s %q must be a regular non-symlink file", label, path)
 	}
-	if err := verifyOuterFileLayout(info); err != nil {
-		return nil, err
+	if checkOuter {
+		if err := verifyOuterFileLayout(info); err != nil {
+			return nil, err
+		}
 	}
 	if info.Size() < 0 || info.Size() > maximum {
-		return nil, fmt.Errorf("release file %q exceeds %d bytes", path, maximum)
+		return nil, fmt.Errorf("%s %q exceeds %d bytes", label, path, maximum)
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read release file %q: %w", path, err)
+		return nil, fmt.Errorf("open %s %q: %w", label, path, err)
 	}
-	if int64(len(data)) != info.Size() {
-		return nil, fmt.Errorf("release file %q changed size while reading", path)
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect opened %s %q: %w", label, path, err)
+	}
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Size() != info.Size() {
+		return nil, fmt.Errorf("%s %q changed while opening", label, path)
+	}
+	if checkOuter {
+		if err := verifyOuterFileLayout(openedInfo); err != nil {
+			return nil, err
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s %q: %w", label, path, err)
+	}
+	if int64(len(data)) > maximum || int64(len(data)) != openedInfo.Size() {
+		return nil, fmt.Errorf("%s %q changed size while reading", label, path)
 	}
 	return data, nil
 }
@@ -287,11 +320,8 @@ func isLowerHex(value string) bool {
 	return true
 }
 
-func verifyArchive(path, binaryName, targetOS, targetArch string) ([]byte, error) {
-	raw, err := readBoundedVerifyFile(path, maxVerifyCompressedSize)
-	if err != nil {
-		return nil, err
-	}
+func verifyArchive(raw []byte, binaryName, targetOS, targetArch string) ([]byte, error) {
+	var err error
 	rawReader := bytes.NewReader(raw)
 	gzipReader, err := gzip.NewReader(rawReader)
 	if err != nil {
@@ -320,6 +350,7 @@ func verifyArchive(path, binaryName, targetOS, targetArch string) ([]byte, error
 	tarData := bytes.NewReader(payload)
 	tarReader := tar.NewReader(tarData)
 	var binary []byte
+	members := make([][]byte, 3)
 	for index, expected := range []string{binaryName, "LICENSE", "README.md"} {
 		header, err := tarReader.Next()
 		if err != nil {
@@ -328,16 +359,24 @@ func verifyArchive(path, binaryName, targetOS, targetArch string) ([]byte, error
 		if err := verifyTarHeader(header, expected, index); err != nil {
 			return nil, err
 		}
-		if header.Size > maxVerifyMemberSize {
-			return nil, fmt.Errorf("tar member %q exceeds %d bytes", header.Name, maxVerifyMemberSize)
+		memberMaximum := maxVerifyMemberSize
+		switch index {
+		case 1:
+			memberMaximum = maxLicenseSize
+		case 2:
+			memberMaximum = maxReadmeSize
 		}
-		member, err := io.ReadAll(io.LimitReader(tarReader, maxVerifyMemberSize+1))
+		if header.Size > memberMaximum {
+			return nil, fmt.Errorf("tar member %q exceeds %d bytes", header.Name, memberMaximum)
+		}
+		member, err := io.ReadAll(io.LimitReader(tarReader, memberMaximum+1))
 		if err != nil {
 			return nil, fmt.Errorf("read tar member %q: %w", header.Name, err)
 		}
 		if int64(len(member)) != header.Size {
 			return nil, fmt.Errorf("tar member %q size changed", header.Name)
 		}
+		members[index] = member
 		if index == 0 {
 			binary = member
 		}
@@ -351,10 +390,52 @@ func verifyArchive(path, binaryName, targetOS, targetArch string) ([]byte, error
 	if tarData.Len() != 0 {
 		return nil, errors.New("tar contains trailing data")
 	}
+	canonical, err := canonicalTarPayload(binaryName, members)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(payload, canonical) {
+		return nil, errors.New("tar payload is not canonical")
+	}
 	if err := verifyExecutable(binary, targetOS, targetArch); err != nil {
 		return nil, err
 	}
 	return binary, nil
+}
+
+func canonicalTarPayload(binaryName string, members [][]byte) ([]byte, error) {
+	var buffer bytes.Buffer
+	writer := tar.NewWriter(&buffer)
+	for index, name := range []string{binaryName, "LICENSE", "README.md"} {
+		mode := int64(0o644)
+		if index == 0 {
+			mode = 0o755
+		}
+		header := &tar.Header{
+			Name:       name,
+			Mode:       mode,
+			Uid:        0,
+			Gid:        0,
+			Size:       int64(len(members[index])),
+			ModTime:    time.Unix(0, 0).UTC(),
+			Typeflag:   tar.TypeReg,
+			Uname:      "",
+			Gname:      "",
+			AccessTime: time.Time{},
+			ChangeTime: time.Time{},
+			Format:     tar.FormatUSTAR,
+		}
+		if err := writer.WriteHeader(header); err != nil {
+			return nil, fmt.Errorf("serialize canonical tar member %q: %w", name, err)
+		}
+		if _, err := writer.Write(members[index]); err != nil {
+			return nil, fmt.Errorf("serialize canonical tar member %q: %w", name, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("serialize canonical tar: %w", err)
+	}
+	return buffer.Bytes(), nil
 }
 
 func verifyTarHeader(header *tar.Header, expected string, index int) error {
@@ -411,6 +492,23 @@ func verifyExecutable(data []byte, targetOS, targetArch string) error {
 		if file.Cpu != want || file.SubCpu != wantSubCPU {
 			return fmt.Errorf("Mach-O architecture is %s, want %s", file.Cpu, want)
 		}
+		hasExecutableSegment := false
+		for _, load := range file.Loads {
+			segment, ok := load.(*macho.Segment)
+			if !ok {
+				continue
+			}
+			if segment.Filesz != 0 && segment.Memsz != 0 && segment.Prot&0x4 != 0 { // VM_PROT_EXECUTE.
+				hasExecutableSegment = true
+				break
+			}
+		}
+		if !hasExecutableSegment {
+			return errors.New("Mach-O binary has no nonempty executable segment")
+		}
+		// debug/macho exposes load commands and segments but does not expose
+		// LC_MAIN/LC_UNIXTHREAD entry state. The executable-segment invariant is
+		// therefore the strongest entry-structure check available in stdlib.
 		return nil
 	}
 	if targetOS != "linux" {
@@ -421,8 +519,11 @@ func verifyExecutable(data []byte, targetOS, targetArch string) error {
 		return fmt.Errorf("invalid ELF binary: %w", err)
 	}
 	defer file.Close()
-	if file.Class != elf.ELFCLASS64 || file.Type != elf.ET_EXEC {
-		return errors.New("ELF binary is not a 64-bit ET_EXEC executable")
+	if file.Class != elf.ELFCLASS64 || file.Data != elf.ELFDATA2LSB || file.Type != elf.ET_EXEC {
+		return errors.New("ELF binary is not a 64-bit little-endian ET_EXEC executable")
+	}
+	if file.OSABI != elf.ELFOSABI_NONE && file.OSABI != elf.ELFOSABI_LINUX {
+		return errors.New("ELF binary has unsupported OS ABI")
 	}
 	want := elf.EM_X86_64
 	if targetArch == "arm64" {
@@ -431,10 +532,34 @@ func verifyExecutable(data []byte, targetOS, targetArch string) error {
 	if file.Machine != want {
 		return fmt.Errorf("ELF architecture is %s, want %s", file.Machine, want)
 	}
+	if file.Entry == 0 {
+		return errors.New("ELF binary has no entry address")
+	}
+	hasExecutableEntry := false
+	for _, program := range file.Progs {
+		if program.Type != elf.PT_LOAD || program.Flags&elf.PF_X == 0 || program.Memsz == 0 {
+			continue
+		}
+		end := program.Vaddr + program.Memsz
+		if end < program.Vaddr {
+			continue
+		}
+		if file.Entry >= program.Vaddr && file.Entry < end {
+			hasExecutableEntry = true
+			break
+		}
+	}
+	if !hasExecutableEntry {
+		return errors.New("ELF entry is not inside an executable PT_LOAD")
+	}
 	return nil
 }
 
 func executeVerifiedBinary(binaryName, version, commit, asset string, data []byte) error {
+	return executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset, data, verifyCommandTimeout)
+}
+
+func executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset string, data []byte, timeout time.Duration) error {
 	directory, err := os.MkdirTemp("", ".hextap-verify-*")
 	if err != nil {
 		return fmt.Errorf("create verification temporary directory: %w", err)
@@ -456,40 +581,86 @@ func executeVerifiedBinary(binaryName, version, commit, asset string, data []byt
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close extracted binary: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), verifyCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	stdoutFile, err := os.CreateTemp(directory, ".stdout-*")
+	if err != nil {
+		return fmt.Errorf("create %s stdout capture: %w", asset, err)
+	}
+	stdoutPath := stdoutFile.Name()
+	defer os.Remove(stdoutPath)
+	stderrFile, err := os.CreateTemp(directory, ".stderr-*")
+	if err != nil {
+		_ = stdoutFile.Close()
+		return fmt.Errorf("create %s stderr capture: %w", asset, err)
+	}
+	stderrPath := stderrFile.Name()
+	defer os.Remove(stderrPath)
 	command := exec.CommandContext(ctx, path, "--version")
+	command.Dir = directory
 	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TZ=UTC"}
 	command.Stdin = nil
-	stdout := &boundedBuffer{limit: maxVerifyCommandOutput}
-	stderr := &boundedBuffer{limit: maxVerifyCommandOutput}
-	command.Stdout = stdout
-	command.Stderr = stderr
+	command.Stdout = stdoutFile
+	command.Stderr = stderrFile
 	err = command.Run()
+	stdoutCloseErr := stdoutFile.Close()
+	stderrCloseErr := stderrFile.Close()
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("execute %s: timed out", asset)
+	}
+	if stdoutCloseErr != nil || stderrCloseErr != nil {
+		return fmt.Errorf("execute %s: close output capture failed", asset)
 	}
 	if err != nil {
 		return fmt.Errorf("execute %s: command failed", asset)
 	}
+	stdout, err := readBoundedCapture(stdoutPath)
+	if err != nil {
+		return fmt.Errorf("execute %s: read stdout capture: %w", asset, err)
+	}
+	stderr, err := readBoundedCapture(stderrPath)
+	if err != nil {
+		return fmt.Errorf("execute %s: read stderr capture: %w", asset, err)
+	}
 	want := binaryName + " " + version + " (commit " + commit + ")\n"
-	if stderr.Len() != 0 {
+	if len(stderr) != 0 {
 		return fmt.Errorf("execute %s: stderr was not empty", asset)
 	}
-	if stdout.String() != want {
+	if string(stdout) != want {
 		return fmt.Errorf("execute %s: stdout did not match expected version", asset)
 	}
 	return nil
 }
 
-type boundedBuffer struct {
-	bytes.Buffer
-	limit int
-}
-
-func (buffer *boundedBuffer) Write(data []byte) (int, error) {
-	if buffer.Len()+len(data) > buffer.limit {
-		return 0, errors.New("command output exceeds limit")
+func readBoundedCapture(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
 	}
-	return buffer.Buffer.Write(data)
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("capture is not a regular file")
+	}
+	if info.Size() < 0 || info.Size() > maxVerifyCommandOutput {
+		return nil, errors.New("capture exceeds output limit")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, openedInfo) || openedInfo.Size() != info.Size() {
+		return nil, errors.New("capture changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxVerifyCommandOutput+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxVerifyCommandOutput || int64(len(data)) != openedInfo.Size() {
+		return nil, errors.New("capture changed size while reading")
+	}
+	return data, nil
 }

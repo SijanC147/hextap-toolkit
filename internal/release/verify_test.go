@@ -2,9 +2,11 @@ package release
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -108,6 +110,24 @@ func TestVerifyRejectsChecksumMutation(t *testing.T) {
 	}
 	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
 		t.Fatal("Verify() accepted wrong checksum")
+	}
+}
+
+func TestVerifyUsesChecksummedArchiveBytesAfterPathReplacement(t *testing.T) {
+	manifestPath, output := buildRealVerifyFixture(t, false)
+	asset := "claude-rc-proxy-darwin-arm64.tar.gz"
+	path := filepath.Join(output, asset)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = verifyWithHook(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}, func() {
+		if err := os.WriteFile(path, bytes.Repeat([]byte{0}, len(original)), 0o644); err != nil {
+			t.Fatalf("replace archive: %v", err)
+		}
+	})
+	if err != nil {
+		t.Fatalf("verifyWithHook() reread checksummed path: %v", err)
 	}
 }
 
@@ -234,6 +254,135 @@ func TestVerifyRejectsHardlinkedAndSparseOuterFiles(t *testing.T) {
 	}
 }
 
+func TestVerifyRejectsPerMemberLimits(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		size int64
+	}{
+		{name: "LICENSE", size: maxLicenseSize + 1},
+		{name: "README.md", size: maxReadmeSize + 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manifestPath, output := buildRealVerifyFixture(t, false)
+			asset := "claude-rc-proxy-darwin-arm64.tar.gz"
+			archive := readArchive(t, filepath.Join(output, asset))
+			archive[test.name] = archiveFileForVerify(archive[test.name].header, make([]byte, test.size))
+			writeVerifyArchive(t, filepath.Join(output, asset), archive)
+			updateVerifyChecksum(t, output, asset)
+			_, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output})
+			if err == nil || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("Verify() error = %v, want per-member size rejection", err)
+			}
+		})
+	}
+}
+
+func TestVerifyManifestBoundedRegularIdentity(t *testing.T) {
+	source, manifestPath := writeRealVerifyFixture(t, false)
+	output := filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oversized := bytes.Repeat([]byte{'x'}, 1<<20+1)
+	if err := os.WriteFile(manifestPath, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted oversized manifest")
+	}
+	validManifest := filepath.Join(source, "valid-manifest")
+	data, err := os.ReadFile(filepath.Join("..", "..", "examples", "claude-rc-proxy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(validManifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(source, "manifest-link")
+	if err := os.Symlink(validManifest, symlink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Verify(VerifyOptions{ManifestPath: symlink, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted symlink manifest")
+	}
+}
+
+func TestVerifyRejectsTarPaddingByCanonicalByteComparison(t *testing.T) {
+	manifestPath, output := buildRealVerifyFixture(t, false)
+	asset := "claude-rc-proxy-darwin-arm64.tar.gz"
+	path := filepath.Join(output, asset)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(gzipReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipReader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload = append(payload, make([]byte, 512)...)
+	var mutated bytes.Buffer
+	gzipWriter, err := gzip.NewWriterLevel(&mutated, gzip.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter.Header.ModTime = time.Time{}
+	gzipWriter.Header.OS = 255
+	if _, err := gzipWriter.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, mutated.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updateVerifyChecksum(t, output, asset)
+	if _, err := Verify(VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}); err == nil {
+		t.Fatal("Verify() accepted padded tar payload")
+	}
+}
+
+func TestExecuteUsesPrivateWorkingDirectory(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "cwd")
+	script := []byte("#!/bin/sh\npwd > " + marker + "\nprintf 'tool 1.2.3 (commit " + testCommit + ")\\n'\n")
+	if err := executeVerifiedBinaryWithTimeout("tool", "1.2.3", testCommit, "tool.tar.gz", script, time.Second); err != nil {
+		t.Fatalf("executeVerifiedBinaryWithTimeout() error = %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(strings.TrimSpace(string(data))) == filepath.Clean(current) {
+		t.Fatal("execution did not use a private working directory")
+	}
+	if strings.Contains(string(data), "hextap-toolkit-worktrees") {
+		t.Fatalf("execution cwd leaked repository path: %q", data)
+	}
+}
+
+func TestExecuteTimeoutDoesNotWaitForDescendantOutputDescriptor(t *testing.T) {
+	script := []byte("#!/bin/sh\n(sleep 1) &\nsleep 5\n")
+	started := time.Now()
+	err := executeVerifiedBinaryWithTimeout("tool", "1.2.3", testCommit, "tool.tar.gz", script, 100*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("execute timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timeout waited for descendant: %s", elapsed)
+	}
+}
+
 func archiveFileForVerify(header *tar.Header, data []byte) archiveFile {
 	copyHeader := *header
 	return archiveFile{header: &copyHeader, data: data}
@@ -257,6 +406,7 @@ func writeVerifyArchive(t *testing.T, path string, files map[string]archiveFile)
 	tarWriter := tar.NewWriter(gzipWriter)
 	for _, name := range []string{"claude-rc-proxy", "LICENSE", "README.md"} {
 		header := *files[name].header
+		header.Size = int64(len(files[name].data))
 		if err := tarWriter.WriteHeader(&header); err != nil {
 			t.Fatal(err)
 		}

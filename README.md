@@ -260,8 +260,14 @@ hextapctl release verify \
   --version 1.2.3 \
   --commit 0123456789abcdef0123456789abcdef01234567 \
   --dir /path/to/project/dist \
-  --execute-target darwin-arm64
+--execute-target darwin-arm64
 ```
+
+The verification runner executes from a private temporary working directory
+with a minimal environment and bounded file-backed stdout/stderr captures.
+Release binaries must not daemonize or intentionally retain the runner's
+descriptor handles; the runner terminates and reaps only the direct process,
+while the surrounding release runner owns any descendant cleanup policy.
 
 #### Build-adapter contract
 
