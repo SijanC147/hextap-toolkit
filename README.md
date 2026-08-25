@@ -66,8 +66,11 @@ workflow caller, exact tap-registration payload, two reviewable ruleset API
 bodies, and `.hextap/SETUP.md` with the remaining owner-controlled steps.
 An authoritative existing manifest is preserved byte-for-byte, including a
 valid document without a trailing newline, and a custom adapter may contain
-arbitrary executable bytes. Final-newline and credential-shaped text checks
-apply only to toolkit-generated managed text.
+arbitrary executable bytes. Final-newline checks apply only to
+toolkit-generated managed text. All decoded manifest string metadata is
+credential-scanned before planning or copying the exact tap payload; custom
+adapter bytes are deliberately exempt because they are neither copied nor
+published as metadata.
 
 Local validation is read-only unless the explicit build smoke is selected:
 
@@ -86,7 +89,9 @@ must be active repository-owned objects whose fetched bodies exactly match the
 local normalized policies. Toolkit provenance starts from the exact tag ref
 and peels annotated tag objects with bounded cycle/type checks; it never uses
 an ambiguous branch-or-tag commit-ish lookup. Doctor never reads a secret
-value or repairs remote state.
+value or repairs remote state. Remote Formula validation fails closed: after
+an optional blank/comment/block-comment prelude, the first semantic Ruby line
+must be the exact registered top-level Formula class declaration.
 
 ## Project manifest schema
 

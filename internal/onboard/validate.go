@@ -61,6 +61,9 @@ func Validate(options ValidateOptions) (ValidateResult, error) {
 	if err != nil {
 		return ValidateResult{}, err
 	}
+	if manifestContainsCredential(project) {
+		return ValidateResult{}, errors.New("manifest metadata appears to contain a credential and was rejected")
+	}
 	if project.RepositorySlug() != repository {
 		return ValidateResult{}, fmt.Errorf("manifest repository %q does not match Git remote origin identity %q", project.RepositorySlug(), repository)
 	}

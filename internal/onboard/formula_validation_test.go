@@ -19,6 +19,12 @@ func TestValidateFormulaClassRejectsSpoofsAndAdditionalClasses(t *testing.T) {
 		"dead nested only":     "if false\n  class ExampleTool < Formula\n  end\nend\n",
 		"dead unindented only": "if false\nclass ExampleTool < Formula\nend\n",
 		"end data only":        "__END__\nclass ExampleTool < Formula\nend\n",
+		"percent q literal":    "value = %q(\nclass ExampleTool < Formula\nend\n)\n",
+		"percent Q literal":    "value = %Q{\nclass ExampleTool < Formula\nend\n}\n",
+		"percent r literal":    "value = %r{\nclass ExampleTool < Formula\nend\n}\n",
+		"slash regex literal":  "value = /\nclass ExampleTool < Formula\nend\n/\n",
+		"backtick literal":     "value = `\nclass ExampleTool < Formula\nend\n`\n",
+		"semantic prelude":     "puts \"before\"\nclass ExampleTool < Formula\nend\n",
 		"indented only":        "  class ExampleTool < Formula\n  end\n",
 		"duplicate expected":   "class ExampleTool < Formula\nend\nclass ExampleTool < Formula\nend\n",
 		"alternate top-level": "class ExampleTool < Formula\nend\n" +
@@ -42,8 +48,8 @@ func TestValidateFormulaClassAcceptsOneGenuineDeclarationAndIgnoresSpoofText(t *
 =begin
 class Wrong < Formula
 =end
-message = "class Wrong < Formula"
 class ExampleTool < Formula
+  message = "class Wrong < Formula"
   def caveats
     <<~EOS
       class Wrong < Formula

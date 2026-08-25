@@ -54,6 +54,34 @@ func TestStableBuildDefaultsOnboardPinAndValidate(t *testing.T) {
 	if code != 0 || stderr != "" || !strings.HasPrefix(stdout, "VALIDATED ") {
 		t.Fatalf("Run(validate) = %d, %q, %q", code, stdout, stderr)
 	}
+	manifestPath := filepath.Join(project, ".hextap.json")
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const decodedManifestCredential = "github_pat_1234567890escapedcli"
+	const escapedManifestCredential = `\u0067\u0069\u0074\u0068\u0075\u0062\u005f\u0070\u0061\u0074\u005f1234567890escapedcli`
+	manifestData = bytes.Replace(manifestData, []byte("CLI fixture"), []byte(escapedManifestCredential), 1)
+	manifestData = bytes.TrimSuffix(manifestData, []byte("\n"))
+	if err := os.WriteFile(manifestPath, manifestData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tapPath := filepath.Join(project, ".hextap", "tap-registration.json")
+	tapBefore, err := os.ReadFile(tapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = execute("v1.2.3", commit, "onboard", "--project", project, "--required-check", "test")
+	if code == 0 || stdout != "" || !strings.HasPrefix(stderr, "error: onboard: ") {
+		t.Fatalf("Run(credential manifest) = %d, %q, %q", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, decodedManifestCredential) || strings.Contains(stderr, escapedManifestCredential) {
+		t.Fatalf("credential manifest leaked through CLI error: %q", stderr)
+	}
+	tapAfter, err := os.ReadFile(tapPath)
+	if err != nil || !bytes.Equal(tapAfter, tapBefore) {
+		t.Fatalf("credential rejection changed tap registration: %v", err)
+	}
 }
 
 func TestVersionAliases(t *testing.T) {

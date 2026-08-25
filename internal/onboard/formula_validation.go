@@ -32,6 +32,7 @@ func validateFormulaClass(data []byte, expected string) error {
 	}
 	state := rubyFormulaState{}
 	declarations := 0
+	wantLine := "class " + expected + " < Formula"
 	for lineNumber, line := range strings.Split(string(data), "\n") {
 		if state.blockComment {
 			if isRubyBlockCommentMarker(line, "=end") {
@@ -54,9 +55,11 @@ func validateFormulaClass(data []byte, expected string) error {
 		if trimmed == "__END__" {
 			return fmt.Errorf("tap Formula contains unsupported dead-data marker at line %d", lineNumber+1)
 		}
+		if declarations == 0 && trimmed != "" && line != wantLine {
+			return fmt.Errorf("tap Formula first semantic line must be the canonical class declaration at line %d", lineNumber+1)
+		}
 		matches := formulaClassPattern.FindAllStringSubmatch(sanitized, -1)
 		for _, match := range matches {
-			wantLine := "class " + expected + " < Formula"
 			if state.depth != 0 || line != wantLine || match[1] != expected {
 				return fmt.Errorf("tap Formula has an alternate, nested, or noncanonical Formula class at line %d", lineNumber+1)
 			}

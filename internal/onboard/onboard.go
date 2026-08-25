@@ -123,15 +123,6 @@ func prepareOnboarding(options Options) (onboardingState, error) {
 	if err != nil {
 		return onboardingState{}, err
 	}
-	if generatedManifest {
-		canonicalManifest, encodeErr := manifestBytes(project)
-		if encodeErr != nil {
-			return onboardingState{}, encodeErr
-		}
-		if containsCredentialLike(string(canonicalManifest)) {
-			return onboardingState{}, errors.New("manifest metadata appears to contain a credential and was rejected")
-		}
-	}
 	adapterArtifact, err := resolveAdapter(root, project, options)
 	if err != nil {
 		return onboardingState{}, err
@@ -181,6 +172,9 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 		project, parseErr := parseManifestBytes(data)
 		if parseErr != nil {
 			return nil, manifest.Manifest{}, false, parseErr
+		}
+		if manifestContainsCredential(project) {
+			return nil, manifest.Manifest{}, false, errors.New("manifest metadata appears to contain a credential and was rejected")
 		}
 		if project.RepositorySlug() != repository {
 			return nil, manifest.Manifest{}, false, fmt.Errorf("manifest repository %q does not match Git remote origin identity %q", project.RepositorySlug(), repository)
@@ -233,6 +227,9 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 	}
 	if err := project.Validate(); err != nil {
 		return nil, manifest.Manifest{}, false, err
+	}
+	if manifestContainsCredential(project) {
+		return nil, manifest.Manifest{}, false, errors.New("manifest metadata appears to contain a credential and was rejected")
 	}
 	data, err := manifestBytes(project)
 	if err != nil {

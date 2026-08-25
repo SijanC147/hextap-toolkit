@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/SijanC147/hextap-toolkit/internal/manifest"
 )
 
 const testToolkitSHA = "0123456789abcdef0123456789abcdef01234567"
@@ -117,7 +119,6 @@ func TestAuthoritativeManifestWithoutNewlineAndBinaryCustomAdapterArePreserved(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifestData = bytes.Replace(manifestData, []byte("A deterministic example CLI"), []byte("github_pat_1234567890authoritative"), 1)
 	manifestData = bytes.TrimSuffix(manifestData, []byte("\n"))
 	if err := os.WriteFile(manifestPath, manifestData, 0o644); err != nil {
 		t.Fatal(err)
@@ -138,7 +139,6 @@ func TestAuthoritativeManifestWithoutNewlineAndBinaryCustomAdapterArePreserved(t
 	if err := os.WriteFile(adapterPath, custom, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	options.Description = ""
 	result, err := Onboard(options)
 	if err != nil {
 		t.Fatalf("Onboard(authoritative no-LF/custom binary) = %v", err)
@@ -162,6 +162,103 @@ func TestAuthoritativeManifestWithoutNewlineAndBinaryCustomAdapterArePreserved(t
 	}
 	if _, err := Validate(ValidateOptions{Project: project}); err != nil {
 		t.Fatalf("Validate(authoritative no-LF/custom binary) = %v", err)
+	}
+}
+
+func TestAuthoritativeManifestCredentialMetadataIsRejectedWithoutWritesOrLeakage(t *testing.T) {
+	const decodedCredential = "github_pat_1234567890authoritative"
+	tests := map[string]string{
+		"plain":   decodedCredential,
+		"escaped": `\u0067\u0069\u0074\u0068\u0075\u0062\u005f\u0070\u0061\u0074\u005f1234567890authoritative`,
+	}
+	for name, encodedCredential := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := writeGoProject(t)
+			item := expectedArtifact(t, root, manifestPath)
+			manifestData := bytes.Replace(item.data, []byte("A deterministic example CLI"), []byte(encodedCredential), 1)
+			manifestData = bytes.TrimSuffix(manifestData, []byte("\n"))
+			if err := os.WriteFile(filepath.Join(root, manifestPath), manifestData, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotProjectTree(t, root)
+			options := validOptions(root)
+			options.Description = ""
+			result, err := Onboard(options)
+			if err == nil {
+				t.Fatal("Onboard() unexpectedly accepted credential metadata")
+			}
+			if strings.Contains(err.Error(), decodedCredential) || strings.Contains(err.Error(), encodedCredential) {
+				t.Fatalf("credential value leaked in error: %v", err)
+			}
+			if _, validateErr := Validate(ValidateOptions{Project: root}); validateErr == nil {
+				t.Fatal("Validate() unexpectedly accepted credential metadata")
+			} else if strings.Contains(validateErr.Error(), decodedCredential) || strings.Contains(validateErr.Error(), encodedCredential) {
+				t.Fatalf("credential value leaked in validation error: %v", validateErr)
+			}
+			if result.Project != "" || len(result.Entries) != 0 || result.DryRun {
+				t.Fatalf("failed onboarding returned a plan/result: %#v", result)
+			}
+			after := snapshotProjectTree(t, root)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("credential rejection changed project tree\nbefore=%v\nafter=%v", before, after)
+			}
+			for _, relative := range []string{workflowPath, tapPath, mainRulesetPath, tagRulesetPath, setupPath, defaultAdapterPath} {
+				if _, statErr := os.Lstat(filepath.Join(root, filepath.FromSlash(relative))); !os.IsNotExist(statErr) {
+					t.Fatalf("credential rejection created %s: %v", relative, statErr)
+				}
+			}
+			if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				relative, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				if relative == ".git" {
+					return filepath.SkipDir
+				}
+				if !entry.Type().IsRegular() {
+					return nil
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				if relative != manifestPath && (bytes.Contains(data, []byte(decodedCredential)) || bytes.Contains(data, []byte(encodedCredential))) {
+					return fmt.Errorf("credential leaked from manifest into %s", relative)
+				}
+				if name == "escaped" && bytes.Contains(data, []byte(decodedCredential)) {
+					return fmt.Errorf("decoded escaped credential appeared in %s", relative)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestManifestCredentialScanRecursesThroughSlicesPointersAndMaps(t *testing.T) {
+	project := manifest.Manifest{
+		Homebrew: manifest.Homebrew{
+			TestArgs: []string{"--version"},
+			Service: &manifest.Service{
+				Environment: map[string]string{"SAFE_NAME": "safe-value"},
+			},
+		},
+	}
+	if manifestContainsCredential(project) {
+		t.Fatal("safe typed manifest metadata was classified as a credential")
+	}
+	project.Homebrew.Service.Environment["SAFE_NAME"] = "ops_1234567890nestedcredential"
+	if !manifestContainsCredential(project) {
+		t.Fatal("nested service environment credential was not detected")
+	}
+	project.Homebrew.Service.Environment["SAFE_NAME"] = "safe-value"
+	project.Homebrew.TestArgs = append(project.Homebrew.TestArgs, "github_pat_1234567890slicecredential")
+	if !manifestContainsCredential(project) {
+		t.Fatal("slice credential was not detected")
 	}
 }
 

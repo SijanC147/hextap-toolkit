@@ -268,6 +268,42 @@ func containsCredentialLike(value string) bool {
 	return credentialLikePattern.MatchString(value)
 }
 
+func manifestContainsCredential(project manifest.Manifest) bool {
+	return reflectedValueContainsCredential(reflect.ValueOf(project))
+}
+
+func reflectedValueContainsCredential(value reflect.Value) bool {
+	if !value.IsValid() {
+		return false
+	}
+	switch value.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		return !value.IsNil() && reflectedValueContainsCredential(value.Elem())
+	case reflect.String:
+		return containsCredentialLike(value.String())
+	case reflect.Struct:
+		for index := 0; index < value.NumField(); index++ {
+			if reflectedValueContainsCredential(value.Field(index)) {
+				return true
+			}
+		}
+	case reflect.Map:
+		iterator := value.MapRange()
+		for iterator.Next() {
+			if reflectedValueContainsCredential(iterator.Key()) || reflectedValueContainsCredential(iterator.Value()) {
+				return true
+			}
+		}
+	case reflect.Array, reflect.Slice:
+		for index := 0; index < value.Len(); index++ {
+			if reflectedValueContainsCredential(value.Index(index)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func inferGoPackage(root, binary string) (string, error) {
 	candidate := filepath.Join(root, "cmd", binary)
 	if hasGoMainPackage(candidate) {
