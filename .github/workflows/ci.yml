@@ -29,8 +29,15 @@ jobs:
         run: |
           test -z "$(gofmt -l .)"
           go test -count=1 ./...
+          go test -race -count=1 ./...
           go vet ./...
           go build -trimpath ./...
           bash -n scripts/*.sh
+          shellcheck scripts/*.sh
           git diff --exit-code
 
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Check workflow schema
+        run: scripts/check-actionlint.sh

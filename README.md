@@ -7,6 +7,9 @@ updates Formulae. The separately installable `brew-hextap` executable is the
 human-facing `brew hextap` command for conflict-safe local onboarding,
 validation, and read-only doctor checks.
 
+The durable initiative architecture, ownership boundaries, decisions, and
+live-gate roadmap are under [`docs/initiative`](docs/initiative/architecture.md).
+
 ## Requirements and build
 
 - Go 1.26 or newer
@@ -104,6 +107,43 @@ Every `gh` call is explicitly pinned to `github.com`; `GH_HOST` cannot redirect
 doctor or the generated setup commands. Readiness also requires the entire
 Formula to equal the deterministic manifest rendering for its validated
 current stable URLs and SHA-256 metadata, not merely a matching class line.
+
+## Managed reusable workflow
+
+Generated callers pin the full commit SHA of an exact stable toolkit release;
+they never call mutable `@main`. Within the called workflow, all five toolkit
+checkouts use GitHub's server-resolved `job.workflow_sha` so YAML, Go code, and
+publisher scripts come from one commit.
+
+The validate job resolves and detaches the requested source tag before reading
+the tracked manifest. That exact validated file is uploaded once, identified by
+artifact ID, and bound to an explicit content SHA-256. Build, native verify,
+release, and Homebrew jobs download and recheck the same bytes. Source quality
+is a hard publication dependency, `release.linux` controls the native matrix,
+and per-repository release runs use a non-canceling queued concurrency group.
+
+Full mode accepts stable and prerelease tags and produces an exact immutable
+GitHub release. Only stable releases may enter Homebrew. `homebrew-only` is a
+stable recovery mode for an existing immutable verified release only while the
+requested tag's manifest remains fully semantically equal to the current tap
+registration. It is deliberately not an all-historical-tags recovery promise:
+there are no field exceptions or versioned registry snapshots in schema 1.
+The Homebrew job is the only place the explicitly mapped
+`OP_SERVICE_ACCOUNT_TOKEN` is visible; it loads the tap credential from
+1Password, requires that equality, changes only Formula URL/SHA metadata, and
+verifies tap CI at the exact direct-push commit. An out-of-window attempt fails
+explicitly with `tap/source manifest mismatch` before Formula mutation.
+
+The existing `claude-rc-proxy v0.1.0` tag is outside that recovery window after
+the XDG-aware caveat evolution. Recovery will be proven with the next stable
+tag whose source manifest is aligned with the current tap registration.
+
+For the first toolkit `v0.1.0`, the one-executable archive contains
+`brew-hextap` only. The future Formula installs that binary to expose
+`brew hextap`; `hextapctl` stays source-built inside the pinned reusable
+workflow. The toolkit's own self-release manifest/caller and paired tap
+bootstrap are the immediate coordinator-owned P0 before tagging, not part of
+this PR.
 
 ## Project manifest schema
 
@@ -443,5 +483,14 @@ test -z "$(gofmt -l .)"
 go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
-go build -trimpath ./cmd/hextapctl
+go build -trimpath ./...
+bash -n scripts/*.sh
+shellcheck scripts/*.sh
+scripts/check-actionlint.sh
 ```
+
+GitHub currently documents `concurrency.queue: max` and the reusable-job
+`job.workflow_sha` identity fields. Actionlint 1.7.12 predates both. The checker
+script does not suppress diagnostics broadly: it accepts a future clean run or
+exactly the reviewed one queue plus five workflow-SHA schema-lag diagnostics,
+and fails on any additional or changed result.
