@@ -2,6 +2,7 @@
 package brewcli
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -327,14 +328,28 @@ func resolveSkillsRoots(scope skillinstall.Scope, project string) (home, project
 		if commandErr != nil {
 			return "", "", fmt.Errorf("resolve project Git top-level")
 		}
-		projectRoot = strings.TrimSpace(string(output))
-		if projectRoot == "" {
-			return "", "", fmt.Errorf("resolve project Git top-level: empty result")
+		projectRoot, commandErr = parseGitTopLevelRecord(output)
+		if commandErr != nil {
+			return "", "", fmt.Errorf("resolve project Git top-level: %w", commandErr)
 		}
 		return "", projectRoot, nil
 	default:
 		return "", project, nil
 	}
+}
+
+func parseGitTopLevelRecord(output []byte) (string, error) {
+	if len(output) == 0 || output[len(output)-1] != '\n' {
+		return "", fmt.Errorf("missing record terminator")
+	}
+	record := output[:len(output)-1]
+	if len(record) == 0 {
+		return "", fmt.Errorf("empty record")
+	}
+	if bytes.ContainsAny(record, "\x00\n") {
+		return "", fmt.Errorf("unexpected extra or invalid record")
+	}
+	return string(record), nil
 }
 
 func newFlagSet(name string) *flag.FlagSet {

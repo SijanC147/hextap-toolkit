@@ -50,7 +50,7 @@ func loadBundle() (loadedBundle, error) {
 	if len(files) == 0 {
 		return loadedBundle{}, fmt.Errorf("embedded %s skill contains no files", bundle.Name)
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+	sort.Slice(files, func(i, j int) bool { return publicationPathLess(files[i].name, files[j].name) })
 	marker, err := markerForBundle(bundle.Name, bundle.Version, files)
 	if err != nil {
 		return loadedBundle{}, err
@@ -60,4 +60,14 @@ func loadBundle() (loadedBundle, error) {
 		return loadedBundle{}, err
 	}
 	return loadedBundle{name: bundle.Name, version: bundle.Version, files: files, marker: marker, markerBytes: markerBytes}, nil
+}
+
+func publicationPathLess(left, right string) bool {
+	if left == "SKILL.md" {
+		return false
+	}
+	if right == "SKILL.md" {
+		return true
+	}
+	return left < right
 }

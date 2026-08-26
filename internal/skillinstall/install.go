@@ -21,7 +21,14 @@ type preparedFile struct {
 }
 
 type applyControl struct {
+	beforeClaim   func(index int, agent, path string)
 	beforePublish func(index int, entry Entry)
+}
+
+type directoryClaim struct {
+	agent        string
+	relativePath string
+	absolutePath string
 }
 
 // Install plans and optionally installs the embedded Hextap skill for the
@@ -48,16 +55,20 @@ func install(options Options, control applyControl) (Result, error) {
 	}
 
 	var prepared []preparedFile
+	var claims []directoryClaim
 	for _, target := range targets {
 		inspection, err := inspectTarget(root, rootPath, target, bundle)
 		if err != nil {
 			return Result{}, err
 		}
-		planned, err := planTarget(root, inspection, bundle)
+		planned, claim, err := planTarget(root, inspection, bundle)
 		if err != nil {
 			return Result{}, err
 		}
 		prepared = append(prepared, planned...)
+		if claim != nil {
+			claims = append(claims, *claim)
+		}
 	}
 	entries := make([]Entry, len(prepared))
 	for index := range prepared {
@@ -67,22 +78,22 @@ func install(options Options, control applyControl) (Result, error) {
 	if options.DryRun {
 		return result, nil
 	}
-	if err := apply(root, prepared, control); err != nil {
+	if err := apply(root, claims, prepared, control); err != nil {
 		return Result{}, err
 	}
 	return result, nil
 }
 
-func planTarget(root *os.Root, inspection targetInspection, bundle loadedBundle) ([]preparedFile, error) {
+func planTarget(root *os.Root, inspection targetInspection, bundle loadedBundle) ([]preparedFile, *directoryClaim, error) {
 	switch inspection.state {
 	case UnmanagedState:
-		return nil, fmt.Errorf("agent %q target %q contains an unmanaged Hextap skill; refusing to overwrite it", inspection.target.agent, inspection.absoluteDir)
+		return nil, nil, fmt.Errorf("agent %q target %q contains an unmanaged Hextap skill; refusing to overwrite it", inspection.target.agent, inspection.absoluteDir)
 	case InvalidState:
-		return nil, fmt.Errorf("agent %q target %q has an invalid Hextap ownership marker; refusing to write", inspection.target.agent, inspection.absoluteDir)
+		return nil, nil, fmt.Errorf("agent %q target %q has an invalid Hextap ownership marker; refusing to write", inspection.target.agent, inspection.absoluteDir)
 	case DriftedState:
-		return nil, fmt.Errorf("agent %q target %q has drifted from its Hextap ownership marker; refusing to overwrite local changes", inspection.target.agent, inspection.absoluteDir)
+		return nil, nil, fmt.Errorf("agent %q target %q has drifted from its Hextap ownership marker; refusing to overwrite local changes", inspection.target.agent, inspection.absoluteDir)
 	case DifferentState:
-		return nil, fmt.Errorf("agent %q target %q contains a different managed Hextap bundle; managed updates are not implemented", inspection.target.agent, inspection.absoluteDir)
+		return nil, nil, fmt.Errorf("agent %q target %q contains a different managed Hextap bundle; managed updates are not implemented", inspection.target.agent, inspection.absoluteDir)
 	}
 
 	prepared := make([]preparedFile, 0, len(bundle.files)+1)
@@ -106,10 +117,10 @@ func planTarget(root *os.Root, inspection targetInspection, bundle loadedBundle)
 		} else {
 			info, err := root.Lstat(relative)
 			if err == nil {
-				return nil, fmt.Errorf("agent %q target %q is not marker-owned; refusing to overwrite it", inspection.target.agent, item.entry.Path)
+				return nil, nil, fmt.Errorf("agent %q target %q is not marker-owned; refusing to overwrite it", inspection.target.agent, item.entry.Path)
 			}
 			if !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("inspect agent %q target %q: %w", inspection.target.agent, item.entry.Path, err)
+				return nil, nil, fmt.Errorf("inspect agent %q target %q: %w", inspection.target.agent, item.entry.Path, err)
 			}
 			_ = info
 		}
@@ -134,10 +145,17 @@ func planTarget(root *os.Root, inspection targetInspection, bundle loadedBundle)
 		markerItem.entry.Action = UnchangedAction
 	}
 	prepared = append(prepared, markerItem)
-	return prepared, nil
+	if inspection.state == NotInstalledState {
+		return prepared, &directoryClaim{
+			agent:        inspection.target.agent,
+			relativePath: inspection.skillDir,
+			absolutePath: inspection.absoluteDir,
+		}, nil
+	}
+	return prepared, nil, nil
 }
 
-func apply(root *os.Root, prepared []preparedFile, control applyControl) (retErr error) {
+func apply(root *os.Root, claims []directoryClaim, prepared []preparedFile, control applyControl) (retErr error) {
 	changed := make([]*preparedFile, 0, len(prepared))
 	defer func() {
 		for _, item := range changed {
@@ -148,6 +166,24 @@ func apply(root *os.Root, prepared []preparedFile, control applyControl) (retErr
 			}
 		}
 	}()
+	for index, claim := range claims {
+		parent := filepath.Dir(claim.relativePath)
+		if err := preflightParents(root, claim.agent, parent); err != nil {
+			return err
+		}
+		if err := root.MkdirAll(parent, 0o755); err != nil {
+			return fmt.Errorf("create agent %q skill parent: %w", claim.agent, err)
+		}
+		if control.beforeClaim != nil {
+			control.beforeClaim(index, claim.agent, claim.absolutePath)
+		}
+		if err := root.Mkdir(claim.relativePath, 0o755); err != nil {
+			return fmt.Errorf("claim agent %q skill directory %q: %w", claim.agent, claim.absolutePath, err)
+		}
+		if err := syncDirectory(root, parent); err != nil {
+			return fmt.Errorf("sync agent %q skill parent after claim: %w", claim.agent, err)
+		}
+	}
 
 	for index := range prepared {
 		item := &prepared[index]

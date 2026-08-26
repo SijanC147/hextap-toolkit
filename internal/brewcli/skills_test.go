@@ -42,7 +42,10 @@ func TestSkillsInstallAndStatusCLIUseTemporaryUserHome(t *testing.T) {
 
 func TestSkillsProjectDryRunUsesAgentsConvention(t *testing.T) {
 	home := t.TempDir()
-	project := t.TempDir()
+	project := filepath.Join(t.TempDir(), "repository ")
+	if err := os.Mkdir(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	command := exec.Command("git", "-C", project, "init", "-q", "-b", "main")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
@@ -72,6 +75,28 @@ func TestSkillsProjectDryRunUsesAgentsConvention(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
 		t.Fatalf("project dry-run touched HOME: entries=%v error=%v", entries, err)
+	}
+}
+
+func TestParseGitTopLevelRecordPreservesWhitespaceAndRejectsAmbiguity(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		want    string
+		wantErr bool
+	}{
+		{name: "trailing space", output: "/tmp/repository \n", want: "/tmp/repository "},
+		{name: "missing terminator", output: "/tmp/repository ", wantErr: true},
+		{name: "extra record", output: "/tmp/one\n/tmp/two\n", wantErr: true},
+		{name: "empty record", output: "\n", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseGitTopLevelRecord([]byte(test.output))
+			if (err != nil) != test.wantErr || got != test.want {
+				t.Fatalf("parseGitTopLevelRecord(%q) = %q, %v", test.output, got, err)
+			}
+		})
 	}
 }
 

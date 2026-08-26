@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -111,17 +112,18 @@ func TestInstallDryRunReportsCompletePlanWithoutWrites(t *testing.T) {
 	}
 }
 
-func TestLatePublicationFailureReportsAndPreservesEarlierCreatedFiles(t *testing.T) {
+func TestSupportFilesPublishBeforeSkillAndMarkerOnLateCollision(t *testing.T) {
 	home := t.TempDir()
-	var firstPath string
-	wantFirst := bundledFiles(t)[0].data
+	target := targetByIDForTest(t, "claude-code")
+	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
+	wantPublished := filepath.Join(skillDir, "references", "onboarding-and-validation.md")
+	wantCollision := filepath.Join(skillDir, "references", "release-and-recovery.md")
+	wantSupport := fileDataByName(t, "references/onboarding-and-validation.md")
+	var attempted []string
 	_, err := install(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home}, applyControl{
-		beforePublish: func(index int, entry Entry) {
-			if index == 0 {
-				firstPath = entry.Path
-				return
-			}
-			if index == 1 {
+		beforePublish: func(_ int, entry Entry) {
+			attempted = append(attempted, entry.Path)
+			if entry.Path == wantCollision {
 				if writeErr := os.WriteFile(entry.Path, []byte("late conflict\n"), 0o600); writeErr != nil {
 					t.Fatalf("create late conflict: %v", writeErr)
 				}
@@ -135,16 +137,59 @@ func TestLatePublicationFailureReportsAndPreservesEarlierCreatedFiles(t *testing
 	if !errors.As(err, &partial) {
 		t.Fatalf("Install(late conflict) error = %T %v, want PartialInstallError", err, err)
 	}
-	if !reflect.DeepEqual(partial.Published, []string{firstPath}) {
-		t.Fatalf("partial paths = %v, want %v", partial.Published, []string{firstPath})
+	if !reflect.DeepEqual(attempted, []string{wantPublished, wantCollision}) {
+		t.Fatalf("publication order = %v, want support files before SKILL.md", attempted)
 	}
-	gotFirst, readErr := os.ReadFile(firstPath)
-	if readErr != nil || !bytes.Equal(gotFirst, wantFirst) {
-		t.Fatalf("first published file = %q, error=%v, want canonical embedded bytes", gotFirst, readErr)
+	if !reflect.DeepEqual(partial.Published, []string{wantPublished}) {
+		t.Fatalf("partial paths = %v, want %v", partial.Published, []string{wantPublished})
 	}
-	target := targetByIDForTest(t, "claude-code")
-	if _, statErr := os.Lstat(filepath.Join(home, target.UserSkillsDir, "hextap", markerFileName)); !os.IsNotExist(statErr) {
+	gotSupport, readErr := os.ReadFile(wantPublished)
+	if readErr != nil || !bytes.Equal(gotSupport, wantSupport) {
+		t.Fatalf("published support file = %q, error=%v, want canonical embedded bytes", gotSupport, readErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(skillDir, "SKILL.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed installation published SKILL.md: %v", statErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(skillDir, markerFileName)); !os.IsNotExist(statErr) {
 		t.Fatalf("failed installation published ownership marker: %v", statErr)
+	}
+}
+
+func TestDirectoryClaimRefusesConcurrentTargetAndPreservesContent(t *testing.T) {
+	home := t.TempDir()
+	target := targetByIDForTest(t, "claude-code")
+	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
+	localPath := filepath.Join(skillDir, "LOCAL-NOTES.md")
+	claimCalls := 0
+
+	_, err := install(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home}, applyControl{
+		beforeClaim: func(index int, agent, path string) {
+			claimCalls++
+			if index != 0 || agent != "claude-code" || path != skillDir {
+				t.Fatalf("claim hook = (%d, %q, %q)", index, agent, path)
+			}
+			if mkdirErr := os.Mkdir(path, 0o755); mkdirErr != nil {
+				t.Fatalf("concurrent mkdir: %v", mkdirErr)
+			}
+			if writeErr := os.WriteFile(localPath, []byte("concurrent owner\n"), 0o600); writeErr != nil {
+				t.Fatalf("concurrent write: %v", writeErr)
+			}
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "claim") {
+		t.Fatalf("Install(concurrent directory) error = %v", err)
+	}
+	if claimCalls != 1 {
+		t.Fatalf("claim hook calls = %d, want 1", claimCalls)
+	}
+	data, readErr := os.ReadFile(localPath)
+	if readErr != nil || string(data) != "concurrent owner\n" {
+		t.Fatalf("concurrent content changed: data=%q error=%v", data, readErr)
+	}
+	for _, absent := range []string{"SKILL.md", markerFileName} {
+		if _, statErr := os.Lstat(filepath.Join(skillDir, absent)); !os.IsNotExist(statErr) {
+			t.Fatalf("failed claim published %s: %v", absent, statErr)
+		}
 	}
 }
 
@@ -478,9 +523,21 @@ func bundledFiles(t *testing.T) []bundleFile {
 		t.Fatalf("walk Hextap bundle: %v", err)
 	}
 	if len(files) == 0 || files[0].name != "SKILL.md" {
-		t.Fatalf("Hextap bundle files = %v, want sorted SKILL.md first", files)
+		t.Fatalf("Hextap bundle files = %v, want SKILL.md", files)
 	}
+	sort.Slice(files, func(i, j int) bool { return publicationPathLess(files[i].name, files[j].name) })
 	return files
+}
+
+func fileDataByName(t *testing.T, name string) []byte {
+	t.Helper()
+	for _, file := range bundledFiles(t) {
+		if file.name == name {
+			return file.data
+		}
+	}
+	t.Fatalf("embedded bundle is missing %q", name)
+	return nil
 }
 
 func expectedEntries(t *testing.T, root string, scope Scope, agents []string, action Action) []Entry {

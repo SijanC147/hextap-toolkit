@@ -85,6 +85,9 @@ func decodeMarker(data []byte) (installMarker, error) {
 	if len(data) > maxMarkerSize {
 		return installMarker{}, fmt.Errorf("marker exceeds %d bytes", maxMarkerSize)
 	}
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return installMarker{}, fmt.Errorf("decode marker: %w", err)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var marker installMarker
@@ -102,6 +105,66 @@ func decodeMarker(data []byte) (installMarker, error) {
 		return installMarker{}, err
 	}
 	return marker, nil
+}
+
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	return walkJSONValue(decoder)
+}
+
+func walkJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]bool)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("object key is not a string")
+			}
+			if seen[key] {
+				return fmt.Errorf("duplicate JSON object key %q", key)
+			}
+			seen[key] = true
+			if err := walkJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim('}') {
+			return fmt.Errorf("object has invalid closing delimiter")
+		}
+	case '[':
+		for decoder.More() {
+			if err := walkJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim(']') {
+			return fmt.Errorf("array has invalid closing delimiter")
+		}
+	default:
+		return fmt.Errorf("unexpected closing delimiter %q", delimiter)
+	}
+	return nil
 }
 
 func validateMarker(marker installMarker) error {
