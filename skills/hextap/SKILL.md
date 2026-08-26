@@ -2,6 +2,7 @@
 name: hextap
 description: "This skill should be used when onboarding a GitHub project to Hextap, validating Hextap files or release builds, checking remote release readiness, coordinating tap registration, cutting stable or prerelease releases, or recovering stable Homebrew publication."
 compatibility: "Requires Homebrew and the brew hextap external command."
+license: MIT
 metadata:
   hextap-skill-version: "1.0.0"
 ---
