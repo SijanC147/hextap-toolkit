@@ -35,7 +35,7 @@ func TestStableBuildDefaultsOnboardPinAndValidate(t *testing.T) {
 	const commit = "0123456789abcdef0123456789abcdef01234567"
 	const credential = "ops_1234567890clioutputsecret"
 	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", credential)
-	code, stdout, stderr := execute("v1.2.3", commit,
+	code, stdout, stderr := execute("1.2.3", commit,
 		"onboard", "--project", project,
 		"--description", "CLI fixture", "--license", "MIT", "--go-package", ".",
 		"--required-check", "test", "--linux=false",
@@ -71,7 +71,7 @@ func TestStableBuildDefaultsOnboardPinAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, stdout, stderr = execute("v1.2.3", commit, "onboard", "--project", project, "--required-check", "test")
+	code, stdout, stderr = execute("1.2.3", commit, "onboard", "--project", project, "--required-check", "test")
 	if code == 0 || stdout != "" || !strings.HasPrefix(stderr, "error: onboard: ") {
 		t.Fatalf("Run(credential manifest) = %d, %q, %q", code, stdout, stderr)
 	}
@@ -86,8 +86,8 @@ func TestStableBuildDefaultsOnboardPinAndValidate(t *testing.T) {
 
 func TestVersionAliases(t *testing.T) {
 	for _, args := range [][]string{{"--version"}, {"version"}} {
-		code, stdout, stderr := execute("v1.2.3", "0123456789abcdef0123456789abcdef01234567", args...)
-		if code != 0 || stdout != "brew-hextap v1.2.3 (commit 0123456789abcdef0123456789abcdef01234567)\n" || stderr != "" {
+		code, stdout, stderr := execute("1.2.3", "0123456789abcdef0123456789abcdef01234567", args...)
+		if code != 0 || stdout != "brew-hextap 1.2.3 (commit 0123456789abcdef0123456789abcdef01234567)\n" || stderr != "" {
 			t.Fatalf("Run(%v) = %d, %q, %q", args, code, stdout, stderr)
 		}
 	}

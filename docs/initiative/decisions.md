@@ -70,7 +70,7 @@ Status: accepted.
 
 The initial toolkit archive and future Formula install `brew-hextap`, exposing
 `brew hextap`. `hextapctl` remains an internal/source-built engine. The archive
-schema is not expanded to multiple binaries in this PR.
+schema remains the existing one-binary contract.
 
 ## D-009: Exact Actionlint schema-lag handling
 

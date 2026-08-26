@@ -25,8 +25,8 @@ Commands:
 )
 
 var (
-	stableInjectedVersion = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
-	fullInjectedCommit    = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	stableRuntimeVersion = regexp.MustCompile(`^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
+	fullInjectedCommit   = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
 type stringList []string
@@ -91,8 +91,8 @@ func runOnboard(args []string, stdout, stderr io.Writer, version, commit string)
 	versionSymbol := flags.String("version-symbol", "main.version", "package-qualified version variable")
 	commitSymbol := flags.String("commit-symbol", "main.commit", "package-qualified commit variable")
 	defaultToolkitVersion := ""
-	if stableInjectedVersion.MatchString(version) {
-		defaultToolkitVersion = version
+	if stableRuntimeVersion.MatchString(version) {
+		defaultToolkitVersion = "v" + version
 	}
 	defaultToolkitSHA := ""
 	if fullInjectedCommit.MatchString(commit) {

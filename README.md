@@ -34,19 +34,21 @@ dist/hextapctl version
 # hextapctl 0.1.0 (commit abc1234)
 
 go build \
-  -ldflags '-s -w -X main.version=v0.1.0 -X main.commit=0123456789abcdef0123456789abcdef01234567' \
+  -ldflags '-s -w -X main.version=0.1.0 -X main.commit=0123456789abcdef0123456789abcdef01234567' \
   -o dist/brew-hextap \
   ./cmd/brew-hextap
 
 dist/brew-hextap --version
-# brew-hextap v0.1.0 (commit 0123456789abcdef0123456789abcdef01234567)
+# brew-hextap 0.1.0 (commit 0123456789abcdef0123456789abcdef01234567)
 ```
 
 ## Local onboarding
 
-Homebrew exposes `brew-hextap` as `brew hextap`. A stable installed build can
-use its linker-injected toolkit tag and full commit as the workflow pin;
-development builds must receive both values explicitly:
+Homebrew exposes `brew-hextap` as `brew hextap`. A stable installed build uses
+its normalized linker-injected runtime version and full commit to derive the
+workflow pin: runtime `0.1.0` becomes the human provenance tag `v0.1.0` while
+the executable continues to report normalized `0.1.0`. Development builds
+must receive both pin values explicitly:
 
 ```sh
 brew hextap onboard \
@@ -139,11 +141,20 @@ the XDG-aware caveat evolution. Recovery will be proven with the next stable
 tag whose source manifest is aligned with the current tap registration.
 
 For the first toolkit `v0.1.0`, the one-executable archive contains
-`brew-hextap` only. The future Formula installs that binary to expose
+`brew-hextap` only. The Formula installs that binary to expose
 `brew hextap`; `hextapctl` stays source-built inside the pinned reusable
-workflow. The toolkit's own self-release manifest/caller and paired tap
-bootstrap are the immediate coordinator-owned P0 before tagging, not part of
-this PR.
+workflow. The checked-in `.hextap.json` uses the explicit disabled-service
+shape, and `scripts/hextap-build` validates the normalized version, commit,
+OS, and architecture before building only `./cmd/brew-hextap`.
+
+The toolkit self-caller uses the relative
+`./.github/workflows/release-go.yml` path so the reusable workflow resolves at
+the same tag commit. Tag pushes select `full`; manual dispatch accepts an
+existing stable tag and selects `homebrew-only`. It maps only
+`OP_SERVICE_ACCOUNT_TOKEN` and grants the three release permissions required
+by the reusable workflow. External project callers continue to use full-SHA
+toolkit pins. No tag, release, tap registration, Formula, secret, ruleset, or
+immutable-release setting is created by this source change.
 
 ## Project manifest schema
 
