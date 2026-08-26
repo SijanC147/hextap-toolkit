@@ -22,6 +22,7 @@ type preparedFile struct {
 
 type applyControl struct {
 	beforeClaim   func(index int, agent, path string)
+	beforeStage   func(index int, entry Entry)
 	beforePublish func(index int, entry Entry)
 }
 
@@ -157,11 +158,13 @@ func planTarget(root *os.Root, inspection targetInspection, bundle loadedBundle)
 
 func apply(root *os.Root, claims []directoryClaim, prepared []preparedFile, control applyControl) (retErr error) {
 	changed := make([]*preparedFile, 0, len(prepared))
+	claimed := make([]string, 0, len(claims))
+	published := make([]*preparedFile, 0, len(prepared))
 	defer func() {
 		for _, item := range changed {
 			if item.temporary != "" {
 				if err := root.Remove(item.temporary); retErr == nil && err != nil && !errors.Is(err, fs.ErrNotExist) {
-					retErr = fmt.Errorf("remove temporary skill file: %w", err)
+					retErr = partialStateError(claimed, published, fmt.Errorf("remove temporary skill file: %w", err))
 				}
 			}
 		}
@@ -169,19 +172,20 @@ func apply(root *os.Root, claims []directoryClaim, prepared []preparedFile, cont
 	for index, claim := range claims {
 		parent := filepath.Dir(claim.relativePath)
 		if err := preflightParents(root, claim.agent, parent); err != nil {
-			return err
+			return partialStateError(claimed, published, err)
 		}
 		if err := root.MkdirAll(parent, 0o755); err != nil {
-			return fmt.Errorf("create agent %q skill parent: %w", claim.agent, err)
+			return partialStateError(claimed, published, fmt.Errorf("create agent %q skill parent: %w", claim.agent, err))
 		}
 		if control.beforeClaim != nil {
 			control.beforeClaim(index, claim.agent, claim.absolutePath)
 		}
 		if err := root.Mkdir(claim.relativePath, 0o755); err != nil {
-			return fmt.Errorf("claim agent %q skill directory %q: %w", claim.agent, claim.absolutePath, err)
+			return partialStateError(claimed, published, fmt.Errorf("claim agent %q skill directory %q: %w", claim.agent, claim.absolutePath, err))
 		}
+		claimed = append(claimed, claim.absolutePath)
 		if err := syncDirectory(root, parent); err != nil {
-			return fmt.Errorf("sync agent %q skill parent after claim: %w", claim.agent, err)
+			return partialStateError(claimed, published, fmt.Errorf("sync agent %q skill parent after claim: %w", claim.agent, err))
 		}
 	}
 
@@ -190,60 +194,59 @@ func apply(root *os.Root, claims []directoryClaim, prepared []preparedFile, cont
 		if item.entry.Action == UnchangedAction {
 			continue
 		}
+		if control.beforeStage != nil {
+			control.beforeStage(index, item.entry)
+		}
 		if err := preflightParents(root, item.entry.Agent, filepath.Dir(item.relativePath)); err != nil {
-			return err
+			return partialStateError(claimed, published, err)
 		}
 		if err := root.MkdirAll(filepath.Dir(item.relativePath), 0o755); err != nil {
-			return fmt.Errorf("create agent %q skill directory: %w", item.entry.Agent, err)
+			return partialStateError(claimed, published, fmt.Errorf("create agent %q skill directory: %w", item.entry.Agent, err))
 		}
 		temporary, err := stage(root, item.relativePath, item.data)
 		if err != nil {
-			return fmt.Errorf("stage agent %q target %q: %w", item.entry.Agent, item.entry.Path, err)
+			return partialStateError(claimed, published, fmt.Errorf("stage agent %q target %q: %w", item.entry.Agent, item.entry.Path, err))
 		}
 		item.temporary = temporary
 		changed = append(changed, item)
 	}
 	for _, item := range prepared {
 		if err := revalidate(root, item); err != nil {
-			return err
+			return partialStateError(claimed, published, err)
 		}
 	}
-	published := make([]*preparedFile, 0, len(changed))
 	for index, item := range changed {
 		if control.beforePublish != nil {
 			control.beforePublish(index, item.entry)
 		}
 		err := root.Link(item.temporary, item.relativePath)
 		if err != nil {
-			return publishedError(published, fmt.Errorf("publish agent %q target %q after %d of %d files: %w", item.entry.Agent, item.entry.Path, index, len(changed), err))
+			return partialStateError(claimed, published, fmt.Errorf("publish agent %q target %q after %d of %d files: %w", item.entry.Agent, item.entry.Path, index, len(changed), err))
 		}
 		published = append(published, item)
 		if err := syncDirectory(root, filepath.Dir(item.relativePath)); err != nil {
-			return publishedError(published, fmt.Errorf("sync agent %q target %q after publication: %w", item.entry.Agent, item.entry.Path, err))
+			return partialStateError(claimed, published, fmt.Errorf("sync agent %q target %q after publication: %w", item.entry.Agent, item.entry.Path, err))
 		}
 	}
 	for _, item := range changed {
 		if err := root.Remove(item.temporary); err != nil {
-			paths := make([]string, len(published))
-			for index, publishedItem := range published {
-				paths[index] = publishedItem.entry.Path
-			}
-			return &PartialInstallError{Cause: fmt.Errorf("remove temporary link for agent %q target %q: %w", item.entry.Agent, item.entry.Path, err), Published: paths}
+			return partialStateError(claimed, published, fmt.Errorf("remove temporary link for agent %q target %q: %w", item.entry.Agent, item.entry.Path, err))
 		}
 		item.temporary = ""
 	}
 	return nil
 }
 
-func publishedError(published []*preparedFile, cause error) error {
-	if len(published) == 0 {
+func partialStateError(claimed []string, published []*preparedFile, cause error) error {
+	if len(claimed) == 0 && len(published) == 0 {
 		return cause
 	}
-	paths := make([]string, len(published))
+	claimedPaths := append([]string(nil), claimed...)
+	publishedPaths := make([]string, len(published))
 	for index, item := range published {
-		paths[index] = item.entry.Path
+		publishedPaths[index] = item.entry.Path
 	}
-	return &PartialInstallError{Cause: cause, Published: paths}
+	return &PartialInstallError{Cause: cause, Claimed: claimedPaths, Published: publishedPaths}
 }
 
 func stage(root *os.Root, destination string, data []byte) (temporary string, retErr error) {

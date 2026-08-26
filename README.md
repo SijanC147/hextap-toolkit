@@ -165,6 +165,13 @@ existing different bundle. Those mutations require a separately reviewed
 version-ordering, backup, and removal contract; manually deleting or
 overwriting an owned or unmanaged skill is not an installer fallback.
 
+If installation reports a partial state, its exact `claimed directories` and
+`published files` are the durable create-only prefix that Hextap itself
+created. Preserve and reconcile those explicitly reported paths. Never infer
+that another unmarked or unreported path is safe to delete: it may contain
+concurrent or otherwise unmanaged user content, and pathname rollback is not a
+recovery mechanism.
+
 ## Managed reusable workflow
 
 Generated callers pin the full commit SHA of an exact stable toolkit release;

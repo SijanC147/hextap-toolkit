@@ -143,6 +143,9 @@ func TestSupportFilesPublishBeforeSkillAndMarkerOnLateCollision(t *testing.T) {
 	if !reflect.DeepEqual(partial.Published, []string{wantPublished}) {
 		t.Fatalf("partial paths = %v, want %v", partial.Published, []string{wantPublished})
 	}
+	if !reflect.DeepEqual(partial.Claimed, []string{skillDir}) {
+		t.Fatalf("claimed paths = %v, want %v", partial.Claimed, []string{skillDir})
+	}
 	gotSupport, readErr := os.ReadFile(wantPublished)
 	if readErr != nil || !bytes.Equal(gotSupport, wantSupport) {
 		t.Fatalf("published support file = %q, error=%v, want canonical embedded bytes", gotSupport, readErr)
@@ -193,6 +196,95 @@ func TestDirectoryClaimRefusesConcurrentTargetAndPreservesContent(t *testing.T) 
 	}
 }
 
+func TestSecondDirectoryClaimFailureReportsFirstClaimAndPreservesConcurrentContent(t *testing.T) {
+	home := t.TempDir()
+	agentsDir := filepath.Join(home, ".agents", "skills", "hextap")
+	claudeDir := filepath.Join(home, ".claude", "skills", "hextap")
+	concurrentPath := filepath.Join(claudeDir, "LOCAL-NOTES.md")
+	const concurrentContent = "second target belongs to another actor\n"
+
+	_, err := install(Options{
+		Agents:                    []string{"all"},
+		Scope:                     UserScope,
+		HomeDir:                   home,
+		AllowOverlappingDiscovery: true,
+	}, applyControl{
+		beforeClaim: func(index int, _, path string) {
+			if index != 1 {
+				return
+			}
+			if path != claudeDir {
+				t.Fatalf("second claim path = %q, want %q", path, claudeDir)
+			}
+			if mkdirErr := os.Mkdir(path, 0o755); mkdirErr != nil {
+				t.Fatalf("concurrent mkdir: %v", mkdirErr)
+			}
+			if writeErr := os.WriteFile(concurrentPath, []byte(concurrentContent), 0o600); writeErr != nil {
+				t.Fatalf("concurrent write: %v", writeErr)
+			}
+		},
+	})
+	var partial *PartialInstallError
+	if !errors.As(err, &partial) {
+		t.Fatalf("Install(second claim race) error = %T %v, want PartialInstallError", err, err)
+	}
+	if !reflect.DeepEqual(partial.Claimed, []string{agentsDir}) || len(partial.Published) != 0 {
+		t.Fatalf("partial state = claimed %v, published %v", partial.Claimed, partial.Published)
+	}
+	if strings.Contains(err.Error(), concurrentContent) {
+		t.Fatalf("partial error leaked concurrent content: %q", err)
+	}
+	data, readErr := os.ReadFile(concurrentPath)
+	if readErr != nil || string(data) != concurrentContent {
+		t.Fatalf("concurrent content changed: data=%q error=%v", data, readErr)
+	}
+	for _, directory := range []string{agentsDir, claudeDir} {
+		for _, absent := range []string{"SKILL.md", markerFileName} {
+			if _, statErr := os.Lstat(filepath.Join(directory, absent)); !os.IsNotExist(statErr) {
+				t.Fatalf("failed second claim published %s below %s: %v", absent, directory, statErr)
+			}
+		}
+	}
+}
+
+func TestPostClaimPreLinkFailureReportsClaimAndPreservesConcurrentContent(t *testing.T) {
+	home := t.TempDir()
+	target := targetByIDForTest(t, "claude-code")
+	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
+	concurrentPath := filepath.Join(skillDir, "references")
+	const concurrentContent = "support path claimed concurrently\n"
+
+	_, err := install(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home}, applyControl{
+		beforeStage: func(index int, _ Entry) {
+			if index != 0 {
+				return
+			}
+			if writeErr := os.WriteFile(concurrentPath, []byte(concurrentContent), 0o600); writeErr != nil {
+				t.Fatalf("concurrent support write: %v", writeErr)
+			}
+		},
+	})
+	var partial *PartialInstallError
+	if !errors.As(err, &partial) {
+		t.Fatalf("Install(post-claim failure) error = %T %v, want PartialInstallError", err, err)
+	}
+	if !reflect.DeepEqual(partial.Claimed, []string{skillDir}) || len(partial.Published) != 0 {
+		t.Fatalf("partial state = claimed %v, published %v", partial.Claimed, partial.Published)
+	}
+	if strings.Contains(err.Error(), concurrentContent) {
+		t.Fatalf("partial error leaked concurrent content: %q", err)
+	}
+	data, readErr := os.ReadFile(concurrentPath)
+	if readErr != nil || string(data) != concurrentContent {
+		t.Fatalf("concurrent content changed: data=%q error=%v", data, readErr)
+	}
+	for _, absent := range []string{"SKILL.md", markerFileName} {
+		if _, statErr := os.Lstat(filepath.Join(skillDir, absent)); !os.IsNotExist(statErr) {
+			t.Fatalf("post-claim failure published %s: %v", absent, statErr)
+		}
+	}
+}
+
 func TestPartialPublicationPreservesConcurrentEditsAndReportsExactPath(t *testing.T) {
 	home := t.TempDir()
 	var firstPath string
@@ -220,6 +312,11 @@ func TestPartialPublicationPreservesConcurrentEditsAndReportsExactPath(t *testin
 	if !reflect.DeepEqual(partial.Published, []string{firstPath}) {
 		t.Fatalf("partial paths = %v, want %v", partial.Published, []string{firstPath})
 	}
+	target := targetByIDForTest(t, "claude-code")
+	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
+	if !reflect.DeepEqual(partial.Claimed, []string{skillDir}) {
+		t.Fatalf("claimed paths = %v, want %v", partial.Claimed, []string{skillDir})
+	}
 	data, readErr := os.ReadFile(firstPath)
 	if readErr != nil || string(data) != "concurrent local edit\n" {
 		t.Fatalf("concurrent edit was not preserved: data=%q error=%v", data, readErr)
@@ -228,7 +325,6 @@ func TestPartialPublicationPreservesConcurrentEditsAndReportsExactPath(t *testin
 	if conflictErr != nil || string(conflictData) != "late conflict\n" {
 		t.Fatalf("concurrent conflict was not preserved: data=%q error=%v", conflictData, conflictErr)
 	}
-	target := targetByIDForTest(t, "claude-code")
 	if _, statErr := os.Lstat(filepath.Join(home, target.UserSkillsDir, "hextap", markerFileName)); !os.IsNotExist(statErr) {
 		t.Fatalf("failed installation published ownership marker: %v", statErr)
 	}

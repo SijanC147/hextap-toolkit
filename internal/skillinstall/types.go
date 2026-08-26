@@ -79,15 +79,24 @@ type StatusResult struct {
 	Entries []StatusEntry
 }
 
-// PartialInstallError reports paths preserved after a later create-only
-// publication failed. Recovery never removes published paths by pathname.
+// PartialInstallError reports durable paths preserved after a create-only
+// claim or publication prefix succeeded. Recovery never removes these or any
+// other paths by pathname.
 type PartialInstallError struct {
 	Cause     error
+	Claimed   []string
 	Published []string
 }
 
 func (err *PartialInstallError) Error() string {
-	return fmt.Sprintf("skill install partially published %s: %v", strings.Join(err.Published, ", "), err.Cause)
+	states := make([]string, 0, 2)
+	if len(err.Claimed) != 0 {
+		states = append(states, "claimed directories "+strings.Join(err.Claimed, ", "))
+	}
+	if len(err.Published) != 0 {
+		states = append(states, "published files "+strings.Join(err.Published, ", "))
+	}
+	return fmt.Sprintf("skill install partial state (%s): %v", strings.Join(states, "; "), err.Cause)
 }
 
 func (err *PartialInstallError) Unwrap() error {
