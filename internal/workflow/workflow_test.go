@@ -144,8 +144,11 @@ func TestPublishHomebrewContract(t *testing.T) {
 	assertContains(t, script, `push_output="$(git -C "$attempt_dir" push origin HEAD:main 2>&1)"`)
 	assertContains(t, script, `push_diagnostic="${push_output,,}"`)
 	assertContains(t, script, `-f head_sha="$tap_commit"`)
+	assertContains(t, script, `run_events+=(workflow_dispatch)`)
+	assertContains(t, script, `-f event="$candidate_event"`)
 	assertContains(t, script, `run.fetch("path") == ".github/workflows/tests.yml"`)
 	assertContains(t, script, `run.fetch("head_sha") == ARGV[0]`)
+	assertContains(t, script, `run.fetch("event") == ARGV[1]`)
 }
 
 func TestPublishReleaseDraftContract(t *testing.T) {
@@ -172,6 +175,66 @@ func TestPublishHomebrewUsesCustomManifestAssets(t *testing.T) {
 	}
 	if !strings.Contains(result.hextapLog, "--amd64-sha "+strings.Repeat("b", 64)) {
 		t.Fatalf("hextapctl log missing custom amd64 checksum: %q", result.hextapLog)
+	}
+}
+
+func TestPublishHomebrewAlreadyCurrentAcceptsExactManualTapGate(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		tapRunMode: "workflow_dispatch",
+	})
+	if result.err != nil {
+		t.Fatalf("publish-homebrew.sh failed: %v\nstdout:\n%s\nstderr:\n%s", result.err, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.stdout, "already-current custom-formula 1.2.3") {
+		t.Fatalf("stdout = %q, want already-current result", result.stdout)
+	}
+	if !strings.Contains(result.ghLog, "event=push") {
+		t.Fatalf("publisher did not prefer the automatic push gate: %q", result.ghLog)
+	}
+	if !strings.Contains(result.ghLog, "event=workflow_dispatch") {
+		t.Fatalf("publisher did not fall back to the explicit main gate: %q", result.ghLog)
+	}
+}
+
+func TestPublishHomebrewSelectsSuccessfulExactTapGate(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		tapRunMode:     "workflow_dispatch",
+		tapRunOutcomes: "failed-then-success",
+	})
+	if result.err != nil {
+		t.Fatalf("publish-homebrew.sh failed: %v\nstdout:\n%s\nstderr:\n%s", result.err, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.ghLog, "run watch 42") {
+		t.Fatalf("publisher did not select the successful exact run: %q", result.ghLog)
+	}
+	if strings.Contains(result.ghLog, "run watch 41") {
+		t.Fatalf("publisher selected the failed exact run: %q", result.ghLog)
+	}
+}
+
+func TestPublishHomebrewNewPublicationRequiresAutomaticPushGate(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		gitChanged: true,
+		tapRunMode: "workflow_dispatch",
+	})
+	if result.err == nil {
+		t.Fatalf("publish-homebrew.sh accepted a manual gate for a new tap commit\nstdout:\n%s\nstderr:\n%s", result.stdout, result.stderr)
+	}
+	if strings.Contains(result.ghLog, "event=workflow_dispatch") {
+		t.Fatalf("new publication fell back to a manual gate: %q", result.ghLog)
+	}
+}
+
+func TestPublishHomebrewRejectsMismatchedTapGateEvent(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		tapRunMode:    "workflow_dispatch",
+		tapStateEvent: "push",
+	})
+	if result.err == nil {
+		t.Fatal("publish-homebrew.sh accepted a tap run with a mismatched event")
+	}
+	if !strings.Contains(result.stderr, "tap run event mismatch") {
+		t.Fatalf("stderr = %q, want event identity failure", result.stderr)
 	}
 }
 
@@ -248,14 +311,18 @@ type publisherResult struct {
 	stdout    string
 	stderr    string
 	hextapLog string
+	ghLog     string
 	pushCount int
 	sleepLog  string
 	err       error
 }
 
 type publisherOptions struct {
-	gitChanged bool
-	pushMode   string
+	gitChanged     bool
+	pushMode       string
+	tapRunMode     string
+	tapRunOutcomes string
+	tapStateEvent  string
 }
 
 func runPublisher(t *testing.T, sourceManifest, tapManifest string) publisherResult {
@@ -278,6 +345,7 @@ func runPublisherWithOptions(t *testing.T, sourceManifest, tapManifest string, o
 	sourcePath := filepath.Join(temporary, "source-manifest.json")
 	tapPath := filepath.Join(temporary, "tap-manifest.json")
 	hextapLogPath := filepath.Join(temporary, "hextap.log")
+	ghLogPath := filepath.Join(temporary, "gh.log")
 	pushCountPath := filepath.Join(temporary, "push-count")
 	sleepLogPath := filepath.Join(temporary, "sleep.log")
 	writeFile(t, sourcePath, sourceManifest, 0o600)
@@ -289,6 +357,7 @@ func runPublisherWithOptions(t *testing.T, sourceManifest, tapManifest string, o
 	ghPath := filepath.Join(stubDirectory, "gh")
 	writeFile(t, ghPath, `#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "$TEST_GH_LOG"
 if [[ "$1" == auth && "$2" == setup-git ]]; then
   exit 0
 fi
@@ -310,9 +379,17 @@ if [[ "$1" == api ]]; then
     fi
   done
   if [[ "$endpoint" == */actions/workflows/tests.yml/runs ]]; then
-    printf '{"workflow_runs":[{"id":42,"html_url":"https://example.invalid/run/42"}]}\n'
+	if [[ " $* " == *" event=$TEST_TAP_RUN_MODE "* ]]; then
+	  if [[ "$TEST_TAP_RUN_OUTCOMES" == failed-then-success ]]; then
+	    printf '{"workflow_runs":[{"id":41,"html_url":"https://example.invalid/run/41","status":"completed","conclusion":"failure"},{"id":42,"html_url":"https://example.invalid/run/42","status":"completed","conclusion":"success"}]}\n'
+	  else
+	    printf '{"workflow_runs":[{"id":42,"html_url":"https://example.invalid/run/42","status":"completed","conclusion":"success"}]}\n'
+	  fi
+	else
+	  printf '{"workflow_runs":[]}\n'
+	fi
   elif [[ "$endpoint" == */actions/runs/42 ]]; then
-    printf '{"repository":{"full_name":"SijanC147/homebrew-hextap"},"path":".github/workflows/tests.yml","head_sha":"%s","status":"completed","conclusion":"success"}\n' "$TEST_TAP_SHA"
+	printf '{"repository":{"full_name":"SijanC147/homebrew-hextap"},"path":".github/workflows/tests.yml","head_sha":"%s","event":"%s","status":"completed","conclusion":"success"}\n' "$TEST_TAP_SHA" "$TEST_TAP_STATE_EVENT"
   else
     printf 'unexpected gh api endpoint: %s\n' "$endpoint" >&2
     exit 1
@@ -380,6 +457,18 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 	if options.gitChanged {
 		gitChanged = "true"
 	}
+	tapRunMode := options.tapRunMode
+	if tapRunMode == "" {
+		tapRunMode = "push"
+	}
+	tapStateEvent := options.tapStateEvent
+	if tapStateEvent == "" {
+		tapStateEvent = tapRunMode
+	}
+	tapRunOutcomes := options.tapRunOutcomes
+	if tapRunOutcomes == "" {
+		tapRunOutcomes = "success"
+	}
 	command.Env = append(os.Environ(),
 		"PATH="+stubDirectory+":/usr/bin:/bin",
 		"GH_TOKEN=test-token",
@@ -387,8 +476,12 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 		"TEST_FORMULA=custom-formula",
 		"TEST_TAP_SHA="+strings.Repeat("c", 40),
 		"TEST_HEXTAP_LOG="+hextapLogPath,
+		"TEST_GH_LOG="+ghLogPath,
 		"TEST_GIT_CHANGED="+gitChanged,
 		"TEST_PUSH_MODE="+options.pushMode,
+		"TEST_TAP_RUN_MODE="+tapRunMode,
+		"TEST_TAP_RUN_OUTCOMES="+tapRunOutcomes,
+		"TEST_TAP_STATE_EVENT="+tapStateEvent,
 		"TEST_PUSH_COUNT="+pushCountPath,
 		"TEST_SLEEP_LOG="+sleepLogPath,
 	)
@@ -398,6 +491,10 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 	command.Stderr = &stderr
 	err := command.Run()
 	hextapLog, readErr := os.ReadFile(hextapLogPath)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	ghLog, readErr := os.ReadFile(ghLogPath)
 	if readErr != nil && !os.IsNotExist(readErr) {
 		t.Fatal(readErr)
 	}
@@ -423,6 +520,7 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 		stdout:    stdout.String(),
 		stderr:    stderr.String(),
 		hextapLog: string(hextapLog),
+		ghLog:     string(ghLog),
 		pushCount: pushCount,
 		sleepLog:  string(sleepLog),
 		err:       err,
