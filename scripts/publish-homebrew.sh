@@ -132,16 +132,49 @@ if [[ "$status" == "already-current" ]]; then
   run_events+=(workflow_dispatch)
 fi
 for _ in {1..60}; do
+  fallback_id=""
+  fallback_url=""
+  fallback_event=""
+  fallback_priority=0
   for candidate_event in "${run_events[@]}"; do
     run_json="$(gh api --method GET "repos/$tap_repository/actions/workflows/tests.yml/runs" \
       -f event="$candidate_event" -f branch=main -f head_sha="$tap_commit" -f per_page=10)"
-    count="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("workflow_runs").length' <<<"$run_json")"
-    if (( count >= 1 )); then
-      IFS=$'\t' read -r run_id run_url <<<"$(ruby -rjson -e 'r=JSON.parse(STDIN.read).fetch("workflow_runs").first; puts [r.fetch("id"),r.fetch("html_url")].join("\t")' <<<"$run_json")"
+    IFS=$'\t' read -r candidate_kind candidate_id candidate_url <<<"$(ruby -rjson -e '
+      runs=JSON.parse(STDIN.read).fetch("workflow_runs")
+      success=runs.find { |run| run.fetch("status") == "completed" && run.fetch("conclusion") == "success" }
+      active=runs.find { |run| %w[queued in_progress requested waiting pending].include?(run.fetch("status")) }
+      selected=success || active || runs.first
+      if selected
+        kind=selected.equal?(success) ? "success" : (selected.equal?(active) ? "active" : "failed")
+        puts [kind, selected.fetch("id"), selected.fetch("html_url")].join("\t")
+      else
+        puts "none\t\t"
+      end
+    ' <<<"$run_json")"
+    if [[ "$candidate_kind" == "success" ]]; then
+      run_id="$candidate_id"
+      run_url="$candidate_url"
       run_event="$candidate_event"
       break 2
     fi
+    case "$candidate_kind" in
+      active) candidate_priority=2 ;;
+      failed) candidate_priority=1 ;;
+      *) candidate_priority=0 ;;
+    esac
+    if (( candidate_priority > fallback_priority )); then
+      fallback_id="$candidate_id"
+      fallback_url="$candidate_url"
+      fallback_event="$candidate_event"
+      fallback_priority="$candidate_priority"
+    fi
   done
+  if [[ -n "$fallback_id" ]]; then
+    run_id="$fallback_id"
+    run_url="$fallback_url"
+    run_event="$fallback_event"
+    break
+  fi
   sleep 2
 done
 

@@ -196,6 +196,22 @@ func TestPublishHomebrewAlreadyCurrentAcceptsExactManualTapGate(t *testing.T) {
 	}
 }
 
+func TestPublishHomebrewSelectsSuccessfulExactTapGate(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		tapRunMode:     "workflow_dispatch",
+		tapRunOutcomes: "failed-then-success",
+	})
+	if result.err != nil {
+		t.Fatalf("publish-homebrew.sh failed: %v\nstdout:\n%s\nstderr:\n%s", result.err, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.ghLog, "run watch 42") {
+		t.Fatalf("publisher did not select the successful exact run: %q", result.ghLog)
+	}
+	if strings.Contains(result.ghLog, "run watch 41") {
+		t.Fatalf("publisher selected the failed exact run: %q", result.ghLog)
+	}
+}
+
 func TestPublishHomebrewNewPublicationRequiresAutomaticPushGate(t *testing.T) {
 	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
 		gitChanged: true,
@@ -302,10 +318,11 @@ type publisherResult struct {
 }
 
 type publisherOptions struct {
-	gitChanged    bool
-	pushMode      string
-	tapRunMode    string
-	tapStateEvent string
+	gitChanged     bool
+	pushMode       string
+	tapRunMode     string
+	tapRunOutcomes string
+	tapStateEvent  string
 }
 
 func runPublisher(t *testing.T, sourceManifest, tapManifest string) publisherResult {
@@ -363,7 +380,11 @@ if [[ "$1" == api ]]; then
   done
   if [[ "$endpoint" == */actions/workflows/tests.yml/runs ]]; then
 	if [[ " $* " == *" event=$TEST_TAP_RUN_MODE "* ]]; then
-	  printf '{"workflow_runs":[{"id":42,"html_url":"https://example.invalid/run/42"}]}\n'
+	  if [[ "$TEST_TAP_RUN_OUTCOMES" == failed-then-success ]]; then
+	    printf '{"workflow_runs":[{"id":41,"html_url":"https://example.invalid/run/41","status":"completed","conclusion":"failure"},{"id":42,"html_url":"https://example.invalid/run/42","status":"completed","conclusion":"success"}]}\n'
+	  else
+	    printf '{"workflow_runs":[{"id":42,"html_url":"https://example.invalid/run/42","status":"completed","conclusion":"success"}]}\n'
+	  fi
 	else
 	  printf '{"workflow_runs":[]}\n'
 	fi
@@ -444,6 +465,10 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 	if tapStateEvent == "" {
 		tapStateEvent = tapRunMode
 	}
+	tapRunOutcomes := options.tapRunOutcomes
+	if tapRunOutcomes == "" {
+		tapRunOutcomes = "success"
+	}
 	command.Env = append(os.Environ(),
 		"PATH="+stubDirectory+":/usr/bin:/bin",
 		"GH_TOKEN=test-token",
@@ -455,6 +480,7 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 		"TEST_GIT_CHANGED="+gitChanged,
 		"TEST_PUSH_MODE="+options.pushMode,
 		"TEST_TAP_RUN_MODE="+tapRunMode,
+		"TEST_TAP_RUN_OUTCOMES="+tapRunOutcomes,
 		"TEST_TAP_STATE_EVENT="+tapStateEvent,
 		"TEST_PUSH_COUNT="+pushCountPath,
 		"TEST_SLEEP_LOG="+sleepLogPath,
