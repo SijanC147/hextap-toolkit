@@ -24,6 +24,7 @@ type applyControl struct {
 	beforeClaim   func(index int, agent, path string)
 	beforeStage   func(index int, entry Entry)
 	beforePublish func(index int, entry Entry)
+	beforeSuccess func(entries []Entry)
 }
 
 type directoryClaim struct {
@@ -234,6 +235,18 @@ func apply(root *os.Root, claims []directoryClaim, prepared []preparedFile, cont
 		}
 		item.temporary = ""
 	}
+	if control.beforeSuccess != nil {
+		entries := make([]Entry, len(published))
+		for index, item := range published {
+			entries[index] = item.entry
+		}
+		control.beforeSuccess(entries)
+	}
+	for _, item := range published {
+		if err := verifyPublished(root, item); err != nil {
+			return partialStateError(claimed, published, err)
+		}
+	}
 	return nil
 }
 
@@ -247,6 +260,30 @@ func partialStateError(claimed []string, published []*preparedFile, cause error)
 		publishedPaths[index] = item.entry.Path
 	}
 	return &PartialInstallError{Cause: cause, Claimed: claimedPaths, Published: publishedPaths}
+}
+
+func verifyPublished(root *os.Root, item *preparedFile) error {
+	if err := preflightParents(root, item.entry.Agent, filepath.Dir(item.relativePath)); err != nil {
+		return fmt.Errorf("verify published target %q parent chain: %w", item.entry.Path, err)
+	}
+	info, err := root.Lstat(item.relativePath)
+	if err != nil {
+		return fmt.Errorf("verify published target %q: %w", item.entry.Path, err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("verify published target %q: not a regular file", item.entry.Path)
+	}
+	if info.Mode().Perm() != item.entry.Mode.Perm() {
+		return fmt.Errorf("verify published target %q: mode changed", item.entry.Path)
+	}
+	data, err := root.ReadFile(item.relativePath)
+	if err != nil {
+		return fmt.Errorf("verify published target %q bytes: %w", item.entry.Path, err)
+	}
+	if !bytes.Equal(data, item.data) {
+		return fmt.Errorf("verify published target %q: bytes changed", item.entry.Path)
+	}
+	return nil
 }
 
 func stage(root *os.Root, destination string, data []byte) (temporary string, retErr error) {

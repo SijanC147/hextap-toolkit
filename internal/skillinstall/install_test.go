@@ -285,6 +285,100 @@ func TestPostClaimPreLinkFailureReportsClaimAndPreservesConcurrentContent(t *tes
 	}
 }
 
+func TestFinalVerificationRejectsPostPublicationMutation(t *testing.T) {
+	home := t.TempDir()
+	target := targetByIDForTest(t, "claude-code")
+	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+	const concurrentContent = "post-publication concurrent edit\n"
+	var publishedEntries []Entry
+
+	_, err := install(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home}, applyControl{
+		beforeSuccess: func(entries []Entry) {
+			publishedEntries = append([]Entry(nil), entries...)
+			foundTemporary := false
+			walkErr := filepath.WalkDir(skillDir, func(_ string, entry fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if strings.Contains(entry.Name(), ".hextap-tmp-") {
+					foundTemporary = true
+				}
+				return nil
+			})
+			if walkErr != nil {
+				t.Fatalf("walk published skill: %v", walkErr)
+			}
+			if foundTemporary {
+				t.Fatal("success-boundary hook ran before temporary-link cleanup")
+			}
+			if writeErr := os.WriteFile(skillPath, []byte(concurrentContent), 0o644); writeErr != nil {
+				t.Fatalf("post-publication edit: %v", writeErr)
+			}
+		},
+	})
+	var partial *PartialInstallError
+	if !errors.As(err, &partial) {
+		t.Fatalf("Install(post-publication edit) error = %T %v, want PartialInstallError", err, err)
+	}
+	if len(publishedEntries) == 0 || filepath.Base(publishedEntries[len(publishedEntries)-1].Path) != markerFileName {
+		t.Fatalf("success-boundary entries = %#v, want marker last", publishedEntries)
+	}
+	wantPublished := make([]string, len(publishedEntries))
+	for index, entry := range publishedEntries {
+		wantPublished[index] = entry.Path
+	}
+	if !reflect.DeepEqual(partial.Claimed, []string{skillDir}) || !reflect.DeepEqual(partial.Published, wantPublished) {
+		t.Fatalf("partial state = claimed %v, published %v", partial.Claimed, partial.Published)
+	}
+	if strings.Contains(err.Error(), concurrentContent) {
+		t.Fatalf("partial error leaked concurrent content: %q", err)
+	}
+	data, readErr := os.ReadFile(skillPath)
+	if readErr != nil || string(data) != concurrentContent {
+		t.Fatalf("post-publication edit changed: data=%q error=%v", data, readErr)
+	}
+	status, statusErr := Status(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home})
+	if statusErr != nil || len(status.Entries) != 1 || status.Entries[0].State != DriftedState {
+		t.Fatalf("Status(post-publication edit) = %#v, %v, want DRIFTED", status, statusErr)
+	}
+}
+
+func TestFinalVerificationIncludesOwnershipMarker(t *testing.T) {
+	home := t.TempDir()
+	target := targetByIDForTest(t, "claude-code")
+	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
+	markerPath := filepath.Join(skillDir, markerFileName)
+	var publishedEntries []Entry
+
+	_, err := install(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home}, applyControl{
+		beforeSuccess: func(entries []Entry) {
+			publishedEntries = append([]Entry(nil), entries...)
+			if len(entries) == 0 || entries[len(entries)-1].Path != markerPath {
+				t.Fatalf("success-boundary entries = %#v, want marker last", entries)
+			}
+			if writeErr := os.WriteFile(markerPath, []byte("{}\n"), 0o644); writeErr != nil {
+				t.Fatalf("post-publication marker edit: %v", writeErr)
+			}
+		},
+	})
+	var partial *PartialInstallError
+	if !errors.As(err, &partial) {
+		t.Fatalf("Install(marker edit) error = %T %v, want PartialInstallError", err, err)
+	}
+	wantPublished := make([]string, len(publishedEntries))
+	for index, entry := range publishedEntries {
+		wantPublished[index] = entry.Path
+	}
+	if !reflect.DeepEqual(partial.Claimed, []string{skillDir}) || !reflect.DeepEqual(partial.Published, wantPublished) {
+		t.Fatalf("partial state = claimed %v, published %v", partial.Claimed, partial.Published)
+	}
+	status, statusErr := Status(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home})
+	if statusErr != nil || len(status.Entries) != 1 || status.Entries[0].State != InvalidState {
+		t.Fatalf("Status(marker edit) = %#v, %v, want INVALID", status, statusErr)
+	}
+}
+
 func TestPartialPublicationPreservesConcurrentEditsAndReportsExactPath(t *testing.T) {
 	home := t.TempDir()
 	var firstPath string
