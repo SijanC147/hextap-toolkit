@@ -98,7 +98,7 @@ func TestUsageAndCommandErrors(t *testing.T) {
 	if code != 0 || stderr != "" || !strings.HasPrefix(stdout, "usage: brew-hextap") {
 		t.Fatalf("Run(--help) = %d, %q, %q", code, stdout, stderr)
 	}
-	for _, command := range []string{"onboard", "validate", "doctor"} {
+	for _, command := range []string{"onboard", "validate", "doctor", "dev"} {
 		code, stdout, stderr = execute("dev", "unknown", command, "--help")
 		if code != 0 || stderr != "" || !strings.HasPrefix(stdout, "usage: brew-hextap "+command) {
 			t.Fatalf("Run(%s --help) = %d, %q, %q", command, code, stdout, stderr)

@@ -1,11 +1,12 @@
 # hextap-toolkit
 
-`hextap-toolkit` is the deterministic, dependency-free release and onboarding
-toolkit for the private Hextap Homebrew tap. `hextapctl` remains the workflow
+`hextap-toolkit` is the deterministic, dependency-free release, onboarding,
+and self-development toolkit for the private Hextap Homebrew tap. `hextapctl` remains the workflow
 engine that validates manifests, builds and verifies archives, and renders or
 updates Formulae. The separately installable `brew-hextap` executable is the
 human-facing `brew hextap` command for conflict-safe local onboarding,
-validation, and read-only doctor checks.
+validation, read-only doctor checks, managed agent skills, and protected
+toolkit development/release orchestration.
 
 The durable initiative architecture, ownership boundaries, decisions, and
 live-gate roadmap are under [`docs/initiative`](docs/initiative/architecture.md).
@@ -160,10 +161,28 @@ brew hextap skills status --agent codex --scope user
 brew hextap skills status --agent cursor --scope project --project .
 ```
 
-The first installer release intentionally does not update or uninstall an
-existing different bundle. Those mutations require a separately reviewed
-version-ordering, backup, and removal contract; manually deleting or
-overwriting an owned or unmanaged skill is not an installer fallback.
+Inventory defaults to every concrete location in the selected scope and reports
+the installed/available versions plus its safe recommendation. JSON is intended
+for agents and automation:
+
+```sh
+brew hextap skills status --scope user
+brew hextap skills status --scope user --json
+```
+
+An intact marker-owned lower version may be upgraded after reviewing the dry
+run:
+
+```sh
+brew hextap skills upgrade --agent codex --scope user --dry-run
+brew hextap skills upgrade --agent codex --scope user
+```
+
+Upgrade refuses unmanaged paths, drift, invalid markers, untracked extras,
+same-version/different-byte bundles, and downgrades. It stages the complete new
+bundle outside agent discovery, switches the directory as one transaction, and
+retains the exact previous bundle at the reported recovery path. Uninstall and
+automatic recovery-path deletion remain intentionally unsupported.
 
 If installation reports a partial state, its exact `claimed directories` and
 `published files` are the durable create-only prefix that Hextap itself
@@ -171,6 +190,64 @@ created. Preserve and reconcile those explicitly reported paths. Never infer
 that another unmarked or unreported path is safe to delete: it may contain
 concurrent or otherwise unmanaged user content, and pathname rollback is not a
 recovery mechanism.
+
+## Toolkit development and self-release
+
+`brew hextap dev` is specific to `SijanC147/hextap-toolkit`. It validates the
+canonical module and origin identity, rejects additional writable remotes, and
+never reads secret values.
+
+Read-only inventory and SemVer planning:
+
+```sh
+brew hextap dev status --project .
+brew hextap dev plan --project . --bump patch
+brew hextap dev plan --project . --bump minor --json
+```
+
+Local validation mirrors the repository CI contract. Full mode includes the
+race detector; `--quick` is the iteration-only rung:
+
+```sh
+brew hextap dev validate --project . --quick
+brew hextap dev validate --project .
+```
+
+From a clean reviewed feature branch, the protected end-to-end path is:
+
+```sh
+brew hextap dev deploy \
+  --project . \
+  --bump minor \
+  --confirm-tag vNEXT \
+  --execute
+```
+
+It reruns full validation, pushes only the feature branch to canonical origin,
+creates or reuses its PR, waits for updated-head checks, and stops on unresolved
+reviews or a non-clean merge state. It never uses administrator or auto-merge
+bypass. After a protected merge it requires the exact merged-main CI run,
+recomputes the release baseline, creates or reuses only the confirmed annotated
+tag, waits for the exact self-release workflow, and verifies the immutable
+stable release and complete assets.
+
+Use `dev release` for the release-only half from clean canonical `main`. Add
+`--install` only when local Hextap mutation is authorized. Standalone install
+requires the exact released tag and commit:
+
+```sh
+brew hextap dev install \
+  --project . \
+  --tag vVERSION \
+  --commit FULL_RELEASE_COMMIT \
+  --execute
+```
+
+The install phase discovers the Homebrew tree that owns active `brew-hextap`,
+updates tap metadata, upgrades only `sean/hextap/hextap`, requires the exact
+version/commit, runs the Formula test, and optionally reconciles concrete
+`--skill-agent` targets. No developer command invokes `brew services` or
+changes another Formula, proxy, certificate, port, or runtime configuration.
 
 ## Managed reusable workflow
 

@@ -1,7 +1,7 @@
 # Hextap release architecture
 
-Status: implemented locally on the toolkit feature branch; live publication is
-coordinator-controlled.
+Status: release platform published; self-development orchestration is under
+review on an isolated toolkit feature branch.
 
 ## Components and trust boundaries
 
@@ -71,7 +71,8 @@ caveat evolution; the next aligned stable tag is the recovery proof target.
 `hextapctl` is the deterministic, network-free engine built from the pinned
 toolkit source inside reusable jobs. `brew-hextap` is the installable external
 command that Homebrew exposes as `brew hextap`; it provides local onboarding,
-validation, and optional read-only GitHub diagnostics.
+validation, optional read-only GitHub diagnostics, managed portable skills, and
+an explicit self-development state machine.
 
 Onboarding renders seven local artifacts, preflights every managed path, and
 uses a rooted, staged, create-only transaction. It never sets a secret, applies
@@ -81,6 +82,13 @@ review boundary for those owner-controlled operations.
 For the initial toolkit `v0.1.0` distribution, the one-executable archive
 contains `brew-hextap` only. `hextapctl` remains source-built; multi-binary
 archive support is intentionally outside this initiative.
+
+The `dev` surface wraps the toolkit repository's existing contracts instead of
+duplicating release policy in agent prompts. Read-only status and planning are
+separate from trusted-code validation, protected PR/release mutation, and local
+Homebrew/skill mutation. Remote commands require `--execute` plus the exact
+computed tag; local installation remains separately explicit. The state machine
+never bypasses protection or resolves review feedback.
 
 ## Verification layers
 

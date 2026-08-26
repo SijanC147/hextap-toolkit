@@ -87,3 +87,18 @@ explicitly.
 Authoritative references: [GitHub concurrency queues](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
 [GitHub reusable-job workflow identity](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#example-usage-of-job-context-workflow-identity),
 and [Actionlint queue schema issue #680](https://github.com/rhysd/actionlint/issues/680).
+
+## D-010: Deterministic self-development with explicit authority
+
+Status: accepted.
+
+The installable `brew-hextap` binary owns one toolkit-specific `dev` state
+machine for repository inventory, local validation, SemVer planning, protected
+PR deployment, release-only recovery, and local Hextap installation. Agents use
+this interface rather than reconstructing Git/GitHub/Homebrew shell policy.
+
+Status/plan are read-only. Validation executes trusted toolkit source. Remote
+mutation requires `--execute` and the exact computed tag, never bypasses review
+or branch protection, and delegates final asset/tap publication to the existing
+immutable release workflow. Local installation is separately explicit and may
+change only Hextap and selected marker-owned Hextap skill copies.

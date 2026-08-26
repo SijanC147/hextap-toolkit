@@ -94,6 +94,45 @@ func resolveTargets(options Options) ([]resolvedTarget, error) {
 	return result, nil
 }
 
+func resolveStatusTargets(options Options) ([]resolvedTarget, error) {
+	if options.Scope != UserScope && options.Scope != ProjectScope {
+		return nil, fmt.Errorf("scope must be explicitly set to %q or %q", UserScope, ProjectScope)
+	}
+	requested := append([]string(nil), options.Agents...)
+	if len(requested) == 0 || (len(requested) == 1 && requested[0] == "all") {
+		requested = nil
+		for _, target := range targetRegistry {
+			if !target.Virtual {
+				requested = append(requested, target.ID)
+			}
+		}
+	} else if contains(requested, "all") {
+		return nil, errorsForAllWithConcreteTargets()
+	}
+	ids, err := normalizeAgentIDs(requested)
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string][]string)
+	for _, id := range ids {
+		target, _ := lookupTarget(id)
+		directory := pathForScope(target, options.Scope)
+		if err := validateTargetDirectory(id, directory); err != nil {
+			return nil, err
+		}
+		paths[directory] = append(paths[directory], id)
+	}
+	directories := sortedMapKeys(paths)
+	result := make([]resolvedTarget, 0, len(directories))
+	for _, directory := range directories {
+		result = append(result, resolvedTarget{
+			agent:     strings.Join(deduplicateSorted(paths[directory]), "+"),
+			skillsDir: directory,
+		})
+	}
+	return result, nil
+}
+
 func normalizeAgentIDs(requested []string) ([]string, error) {
 	if len(requested) == 0 {
 		return nil, fmt.Errorf("at least one --agent is required")

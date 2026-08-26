@@ -94,8 +94,12 @@ func planTarget(root *os.Root, inspection targetInspection, bundle loadedBundle)
 		return nil, nil, fmt.Errorf("agent %q target %q has an invalid Hextap ownership marker; refusing to write", inspection.target.agent, inspection.absoluteDir)
 	case DriftedState:
 		return nil, nil, fmt.Errorf("agent %q target %q has drifted from its Hextap ownership marker; refusing to overwrite local changes", inspection.target.agent, inspection.absoluteDir)
-	case DifferentState:
-		return nil, nil, fmt.Errorf("agent %q target %q contains a different managed Hextap bundle; managed updates are not implemented", inspection.target.agent, inspection.absoluteDir)
+	case UpdateAvailableState:
+		return nil, nil, fmt.Errorf("agent %q target %q has a managed Hextap skill update available; use skills upgrade", inspection.target.agent, inspection.absoluteDir)
+	case NewerThanCLIState:
+		return nil, nil, fmt.Errorf("agent %q target %q contains a newer managed Hextap skill; refusing to downgrade", inspection.target.agent, inspection.absoluteDir)
+	case SameVersionDifferentState:
+		return nil, nil, fmt.Errorf("agent %q target %q has the available version with different managed bytes; refusing to replace it", inspection.target.agent, inspection.absoluteDir)
 	}
 
 	prepared := make([]preparedFile, 0, len(bundle.files)+1)
