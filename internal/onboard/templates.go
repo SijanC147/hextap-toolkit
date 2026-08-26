@@ -33,12 +33,14 @@ type rulesetBody struct {
 }
 
 type pullRequestParameters struct {
-	RequiredApprovingReviewCount   int      `json:"required_approving_review_count"`
-	DismissStaleReviewsOnPush      bool     `json:"dismiss_stale_reviews_on_push"`
-	RequireCodeOwnerReview         bool     `json:"require_code_owner_review"`
-	RequireLastPushApproval        bool     `json:"require_last_push_approval"`
-	RequiredReviewThreadResolution bool     `json:"required_review_thread_resolution"`
-	AllowedMergeMethods            []string `json:"allowed_merge_methods"`
+	RequiredApprovingReviewCount              int      `json:"required_approving_review_count"`
+	DismissStaleReviewsOnPush                 bool     `json:"dismiss_stale_reviews_on_push"`
+	RequireCodeOwnerReview                    bool     `json:"require_code_owner_review"`
+	RequireExtraApprovalForUnattributedChange bool     `json:"require_extra_approval_for_unattributed_changes"`
+	RequireLastPushApproval                   bool     `json:"require_last_push_approval"`
+	RequiredReviewThreadResolution            bool     `json:"required_review_thread_resolution"`
+	RequiredReviewers                         []any    `json:"required_reviewers"`
+	AllowedMergeMethods                       []string `json:"allowed_merge_methods"`
 }
 
 type requiredStatusCheck struct {
@@ -48,6 +50,7 @@ type requiredStatusCheck struct {
 type requiredStatusParameters struct {
 	RequiredStatusChecks             []requiredStatusCheck `json:"required_status_checks"`
 	StrictRequiredStatusChecksPolicy bool                  `json:"strict_required_status_checks_policy"`
+	DoNotEnforceOnCreate             bool                  `json:"do_not_enforce_on_create"`
 }
 
 type updateParameters struct {
@@ -127,16 +130,19 @@ func mainRulesetBytes(checks []string) ([]byte, error) {
 			{Type: "deletion"},
 			{Type: "non_fast_forward"},
 			{Type: "pull_request", Parameters: pullRequestParameters{
-				RequiredApprovingReviewCount:   0,
-				DismissStaleReviewsOnPush:      false,
-				RequireCodeOwnerReview:         false,
-				RequireLastPushApproval:        false,
-				RequiredReviewThreadResolution: true,
-				AllowedMergeMethods:            []string{"merge", "rebase", "squash"},
+				RequiredApprovingReviewCount:              0,
+				DismissStaleReviewsOnPush:                 false,
+				RequireCodeOwnerReview:                    false,
+				RequireExtraApprovalForUnattributedChange: false,
+				RequireLastPushApproval:                   false,
+				RequiredReviewThreadResolution:            true,
+				RequiredReviewers:                         []any{},
+				AllowedMergeMethods:                       []string{"merge", "rebase", "squash"},
 			}},
 			{Type: "required_status_checks", Parameters: requiredStatusParameters{
 				RequiredStatusChecks:             statusChecks,
 				StrictRequiredStatusChecksPolicy: true,
+				DoNotEnforceOnCreate:             false,
 			}},
 		},
 	}

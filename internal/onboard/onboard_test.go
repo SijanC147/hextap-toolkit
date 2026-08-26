@@ -72,6 +72,34 @@ func TestGeneratedAdapterBuildsAndVerifiesPrerelease(t *testing.T) {
 	}
 }
 
+func TestGeneratedMainRulesetOwnsGitHubDefaultParameters(t *testing.T) {
+	project := writeGoProject(t)
+	if _, err := Onboard(validOptions(project)); err != nil {
+		t.Fatalf("Onboard() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(project, ".hextap", "rulesets", "main.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatal(err)
+	}
+	rules := body["rules"].([]any)
+	pull := rules[2].(map[string]any)["parameters"].(map[string]any)
+	status := rules[3].(map[string]any)["parameters"].(map[string]any)
+
+	if got, exists := pull["require_extra_approval_for_unattributed_changes"]; !exists || got != false {
+		t.Fatalf("explicit unattributed-change approval = %v, exists = %t", got, exists)
+	}
+	if got, exists := pull["required_reviewers"]; !exists || len(got.([]any)) != 0 {
+		t.Fatalf("explicit required reviewers = %v, exists = %t", got, exists)
+	}
+	if got, exists := status["do_not_enforce_on_create"]; !exists || got != false {
+		t.Fatalf("explicit status-check creation policy = %v, exists = %t", got, exists)
+	}
+}
+
 func TestExistingCustomAdapterIsPreservedAndValidated(t *testing.T) {
 	project := writeGoProject(t)
 	options := validOptions(project)
