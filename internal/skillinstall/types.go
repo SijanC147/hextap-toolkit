@@ -37,6 +37,8 @@ const (
 	CreateAction Action = "CREATE"
 	// UnchangedAction leaves an exact marker-owned file untouched.
 	UnchangedAction Action = "UNCHANGED"
+	// UpgradeAction replaces an intact older marker-owned skill bundle.
+	UpgradeAction Action = "UPGRADE"
 )
 
 const installedFileMode fs.FileMode = 0o644
@@ -59,24 +61,70 @@ type Result struct {
 type State string
 
 const (
-	NotInstalledState State = "NOT_INSTALLED"
-	CurrentState      State = "CURRENT"
-	DifferentState    State = "DIFFERENT"
-	DriftedState      State = "DRIFTED"
-	UnmanagedState    State = "UNMANAGED"
-	InvalidState      State = "INVALID"
+	NotInstalledState         State = "NOT_INSTALLED"
+	CurrentState              State = "CURRENT"
+	UpdateAvailableState      State = "UPDATE_AVAILABLE"
+	NewerThanCLIState         State = "NEWER_THAN_CLI"
+	SameVersionDifferentState State = "SAME_VERSION_DIFFERENT"
+	DriftedState              State = "DRIFTED"
+	UnmanagedState            State = "UNMANAGED"
+	InvalidState              State = "INVALID"
+)
+
+// Recommendation is the safe next operation for one inspected target.
+type Recommendation string
+
+const (
+	NoRecommendation      Recommendation = "NONE"
+	InstallRecommendation Recommendation = "INSTALL"
+	UpgradeRecommendation Recommendation = "UPGRADE"
+	RefuseRecommendation  Recommendation = "REFUSE"
 )
 
 // StatusEntry records one resolved target's read-only state.
 type StatusEntry struct {
-	State State
-	Agent string
-	Path  string
+	State            State          `json:"state"`
+	Agent            string         `json:"agent"`
+	Path             string         `json:"path"`
+	InstalledVersion string         `json:"installed_version,omitempty"`
+	AvailableVersion string         `json:"available_version"`
+	Recommendation   Recommendation `json:"recommendation"`
 }
 
 // StatusResult contains deterministic read-only target states.
 type StatusResult struct {
 	Entries []StatusEntry
+}
+
+// UpgradeEntry records one target-level managed bundle transition.
+type UpgradeEntry struct {
+	Action      Action
+	Agent       string
+	Path        string
+	FromVersion string
+	ToVersion   string
+	BackupPath  string
+}
+
+// UpgradeResult contains deterministic target-level upgrade outcomes.
+type UpgradeResult struct {
+	Entries []UpgradeEntry
+}
+
+// PartialUpgradeError reports completed targets and exact recovery paths after
+// a transaction stopped. Hextap never deletes these paths automatically.
+type PartialUpgradeError struct {
+	Cause         error
+	Completed     []UpgradeEntry
+	RecoveryPaths []string
+}
+
+func (err *PartialUpgradeError) Error() string {
+	return fmt.Sprintf("skill upgrade partial state (recovery paths %s): %v", strings.Join(err.RecoveryPaths, ", "), err.Cause)
+}
+
+func (err *PartialUpgradeError) Unwrap() error {
+	return err.Cause
 }
 
 // PartialInstallError reports durable paths preserved after a create-only

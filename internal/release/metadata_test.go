@@ -1,6 +1,10 @@
 package release
 
-import "testing"
+import (
+	"fmt"
+	"math"
+	"testing"
+)
 
 func TestParseMetadataStableAndPrerelease(t *testing.T) {
 	tests := []struct {
@@ -66,4 +70,74 @@ func TestParseVersionAcceptsNormalizedPrerelease(t *testing.T) {
 			t.Errorf("ParseVersion(%q) unexpectedly succeeded", invalid)
 		}
 	}
+}
+
+func TestStableVersionComparisonAndBumps(t *testing.T) {
+	comparisons := []struct {
+		left, right string
+		want        int
+	}{
+		{left: "0.0.0", right: "0.0.0", want: 0},
+		{left: "0.2.9", right: "0.3.0", want: -1},
+		{left: "2.0.0", right: "1.999.999", want: 1},
+		{left: "1.2.4", right: "1.2.3", want: 1},
+	}
+	for _, test := range comparisons {
+		got, err := CompareStableVersions(test.left, test.right)
+		if err != nil || got != test.want {
+			t.Errorf("CompareStableVersions(%q, %q) = %d, %v; want %d", test.left, test.right, got, err, test.want)
+		}
+	}
+
+	bumps := []struct {
+		current string
+		bump    Bump
+		want    string
+	}{
+		{current: "0.0.0", bump: PatchBump, want: "0.0.1"},
+		{current: "0.2.9", bump: MinorBump, want: "0.3.0"},
+		{current: "0.9.9", bump: MajorBump, want: "1.0.0"},
+		{current: "1.2.3", bump: PatchBump, want: "1.2.4"},
+		{current: "1.2.3", bump: MinorBump, want: "1.3.0"},
+		{current: "1.2.3", bump: MajorBump, want: "2.0.0"},
+	}
+	for _, test := range bumps {
+		got, err := BumpStableVersion(test.current, test.bump)
+		if err != nil || got != test.want {
+			t.Errorf("BumpStableVersion(%q, %q) = %q, %v; want %q", test.current, test.bump, got, err, test.want)
+		}
+	}
+}
+
+func TestStableVersionOperationsRejectUnsafeOrOverflowingInputs(t *testing.T) {
+	invalidVersions := []string{
+		"v1.2.3",
+		"1.2.3-rc.1",
+		"01.2.3",
+		"1.2",
+		"18446744073709551616.0.0",
+	}
+	for _, version := range invalidVersions {
+		if _, err := ParseStableVersion(version); err == nil {
+			t.Errorf("ParseStableVersion(%q) unexpectedly succeeded", version)
+		}
+	}
+	for _, test := range []struct {
+		version string
+		bump    Bump
+	}{
+		{version: "1.2.3", bump: Bump("other")},
+		{version: "1.2.3-rc.1", bump: PatchBump},
+		{version: "1.2." + uintString(math.MaxUint64), bump: PatchBump},
+		{version: "1." + uintString(math.MaxUint64) + ".0", bump: MinorBump},
+		{version: uintString(math.MaxUint64) + ".0.0", bump: MajorBump},
+	} {
+		if _, err := BumpStableVersion(test.version, test.bump); err == nil {
+			t.Errorf("BumpStableVersion(%q, %q) unexpectedly succeeded", test.version, test.bump)
+		}
+	}
+}
+
+func uintString(value uint64) string {
+	return fmt.Sprintf("%d", value)
 }

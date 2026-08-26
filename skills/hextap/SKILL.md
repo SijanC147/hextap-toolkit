@@ -1,10 +1,10 @@
 ---
 name: hextap
-description: "This skill should be used when onboarding a GitHub project to Hextap, validating Hextap files or release builds, checking remote release readiness, coordinating tap registration, cutting stable or prerelease releases, or recovering stable Homebrew publication."
+description: "This skill should be used when onboarding a GitHub project to Hextap, validating or releasing Hextap projects, developing and publishing the Hextap toolkit itself, installing Hextap agent skills, or recovering stable Homebrew publication."
 compatibility: "Requires Homebrew and the brew hextap external command."
 license: MIT
 metadata:
-  hextap-skill-version: "1.0.0"
+  hextap-skill-version: "1.1.0"
 ---
 
 # Hextap
@@ -21,6 +21,8 @@ release contract.
 - "Check whether this repository is ready for a Hextap release."
 - "Cut an RC or stable release, or recover the Homebrew step."
 - "Why did Hextap stop at the tap-registration gate?"
+- "Implement this Hextap toolkit feature and publish the next minor release."
+- "Show which agents have the Hextap skill and upgrade managed copies."
 
 ## Non-negotiable boundaries
 
@@ -41,6 +43,10 @@ release contract.
 6. Stop before owner-controlled remote mutations unless the request expressly
    authorizes them. This includes rulesets, secrets, tags, releases, tap writes,
    merges, and direct pushes.
+7. Treat `dev status` and `dev plan` as read-only, `dev validate` as trusted
+   toolkit code execution, `dev deploy` or `dev release` as remote mutation,
+   and `dev install` as local Homebrew/skill mutation. Never infer one boundary
+   from another.
 
 ## Core workflow
 
@@ -65,6 +71,10 @@ release contract.
 6. Require hosted source CI, protected-PR evidence, exact release assets, tap CI
    at the published commit, and merged-main CI where applicable before reporting
    completion. Local success alone is not release proof.
+7. For changes to Hextap itself, let the agent implement and review source in an
+   isolated worktree, then use the deterministic developer surface for status,
+   validation, SemVer planning, protected deployment, and optional installation.
+   Follow [Toolkit development](references/toolkit-development.md).
 
 ## Failure routing
 
@@ -81,3 +91,5 @@ drift. Route the exact diagnostic through
   tap bootstrap, stable/prerelease, and recovery sequence.
 - [Safety and failure routing](references/safety-and-failure-routing.md) - Secret,
   upstream, runtime, and failure-specific boundaries.
+- [Toolkit development](references/toolkit-development.md) - End-to-end Hextap
+  implementation, protected release, installation, and skill-refresh workflow.

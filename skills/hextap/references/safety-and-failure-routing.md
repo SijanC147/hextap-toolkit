@@ -48,6 +48,9 @@ repository, secret, or local-runtime boundary.
 | Tap push race | Allow only the toolkit's bounded fresh-clone retry. Authorization/ruleset failure must surface unchanged. Never force-push. |
 | Hosted checks are absent or GitHub Actions is unavailable | Make no release or repository mutation dependent on the missing evidence. Wait and recheck. |
 | Local install/service proof remains | Ask for a separate maintenance window and exact target approval before changing anything. |
+| `dev deploy` stops on PR review or merge state | Fix the reported source/review issue on the same branch, rerun full validation, push the new head, and rerun the same confirmed deploy command. Never resolve or bypass the review automatically. |
+| Confirmed toolkit tag differs after merge | Stop before tag creation. Another stable release changed the baseline; rerun `dev plan` and obtain a new exact confirmation. |
+| Managed skill reports `UPDATE_AVAILABLE` | Review `skills upgrade --dry-run`, then upgrade only when that local mutation is authorized. Preserve the reported recovery path. |
 
 ## Reporting
 

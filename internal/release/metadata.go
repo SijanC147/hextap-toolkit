@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +25,24 @@ type Metadata struct {
 	Prerelease bool
 	Mode       string
 }
+
+// StableVersion is a parsed stable SemVer core used for deterministic release
+// planning. Components are unsigned because negative versions are invalid.
+type StableVersion struct {
+	Major uint64
+	Minor uint64
+	Patch uint64
+}
+
+// Bump selects the stable SemVer component increment used by developer release
+// planning.
+type Bump string
+
+const (
+	PatchBump Bump = "patch"
+	MinorBump Bump = "minor"
+	MajorBump Bump = "major"
+)
 
 // ParseMetadata validates a strict v-prefixed SemVer tag and release mode.
 // Build metadata is intentionally unsupported because release asset identity
@@ -70,6 +89,91 @@ func ParseVersion(version string) (Metadata, error) {
 		return Metadata{}, errors.New("release version must not have a leading v")
 	}
 	return ParseMetadata("v"+version, "full")
+}
+
+// ParseStableVersion parses a normalized stable SemVer version into numeric
+// components. Prereleases and components that exceed uint64 are rejected.
+func ParseStableVersion(version string) (StableVersion, error) {
+	metadata, err := ParseVersion(version)
+	if err != nil {
+		return StableVersion{}, err
+	}
+	if !metadata.Stable {
+		return StableVersion{}, fmt.Errorf("version %q must be stable SemVer", version)
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return StableVersion{}, fmt.Errorf("version %q must have three components", version)
+	}
+	values := make([]uint64, 3)
+	for index, part := range parts {
+		value, parseErr := strconv.ParseUint(part, 10, 64)
+		if parseErr != nil {
+			return StableVersion{}, fmt.Errorf("version %q component %q: %w", version, part, parseErr)
+		}
+		values[index] = value
+	}
+	return StableVersion{Major: values[0], Minor: values[1], Patch: values[2]}, nil
+}
+
+func (version StableVersion) String() string {
+	return fmt.Sprintf("%d.%d.%d", version.Major, version.Minor, version.Patch)
+}
+
+// CompareStableVersions compares two normalized stable SemVer values.
+func CompareStableVersions(left, right string) (int, error) {
+	leftVersion, err := ParseStableVersion(left)
+	if err != nil {
+		return 0, fmt.Errorf("parse left version: %w", err)
+	}
+	rightVersion, err := ParseStableVersion(right)
+	if err != nil {
+		return 0, fmt.Errorf("parse right version: %w", err)
+	}
+	leftParts := [...]uint64{leftVersion.Major, leftVersion.Minor, leftVersion.Patch}
+	rightParts := [...]uint64{rightVersion.Major, rightVersion.Minor, rightVersion.Patch}
+	for index := range leftParts {
+		if leftParts[index] < rightParts[index] {
+			return -1, nil
+		}
+		if leftParts[index] > rightParts[index] {
+			return 1, nil
+		}
+	}
+	return 0, nil
+}
+
+// BumpStableVersion returns the next stable version for one explicit SemVer
+// component. Lower-order components reset according to SemVer convention.
+func BumpStableVersion(current string, bump Bump) (string, error) {
+	version, err := ParseStableVersion(current)
+	if err != nil {
+		return "", err
+	}
+	const maxUint64 = ^uint64(0)
+	switch bump {
+	case PatchBump:
+		if version.Patch == maxUint64 {
+			return "", errors.New("patch version overflow")
+		}
+		version.Patch++
+	case MinorBump:
+		if version.Minor == maxUint64 {
+			return "", errors.New("minor version overflow")
+		}
+		version.Minor++
+		version.Patch = 0
+	case MajorBump:
+		if version.Major == maxUint64 {
+			return "", errors.New("major version overflow")
+		}
+		version.Major++
+		version.Minor = 0
+		version.Patch = 0
+	default:
+		return "", fmt.Errorf("bump %q must be patch, minor, or major", bump)
+	}
+	return version.String(), nil
 }
 
 func validatePrerelease(suffix string) error {

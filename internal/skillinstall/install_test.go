@@ -508,7 +508,7 @@ func TestUnmarkedSkillDirectoryIsAlwaysUnmanaged(t *testing.T) {
 	}
 }
 
-func TestDifferentManagedBundleIsReportedAndNeverMutated(t *testing.T) {
+func TestOlderManagedBundleIsReportedAsUpdateAvailableAndNeverMutatedByInstall(t *testing.T) {
 	home := t.TempDir()
 	target := targetByIDForTest(t, "claude-code")
 	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
@@ -520,10 +520,13 @@ func TestDifferentManagedBundleIsReportedAndNeverMutated(t *testing.T) {
 	}
 
 	status, err := Status(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home})
-	if err != nil || len(status.Entries) != 1 || status.Entries[0].State != DifferentState {
+	if err != nil || len(status.Entries) != 1 || status.Entries[0].State != UpdateAvailableState {
 		t.Fatalf("Status(different bundle) = %#v, %v", status, err)
 	}
-	if _, err := Install(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home}); err == nil || !strings.Contains(err.Error(), "different managed") {
+	if status.Entries[0].InstalledVersion != "0.9.0" || status.Entries[0].AvailableVersion != toolskills.Hextap().Version || status.Entries[0].Recommendation != UpgradeRecommendation {
+		t.Fatalf("Status(different bundle) metadata = %#v", status.Entries[0])
+	}
+	if _, err := Install(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home}); err == nil || !strings.Contains(err.Error(), "skills upgrade") {
 		t.Fatalf("Install(different bundle) error = %v", err)
 	}
 	data, readErr := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
@@ -580,7 +583,7 @@ func TestInstallRefusesSymlinkedTargetParents(t *testing.T) {
 	}
 }
 
-func TestStatusDistinguishesAbsentCurrentDifferentDriftedAndUnmanaged(t *testing.T) {
+func TestStatusDistinguishesAbsentCurrentUpgradeDriftedAndUnmanaged(t *testing.T) {
 	stateFor := func(t *testing.T, prepare func(home, skillDir string)) State {
 		t.Helper()
 		home := t.TempDir()
@@ -611,7 +614,7 @@ func TestStatusDistinguishesAbsentCurrentDifferentDriftedAndUnmanaged(t *testing
 	}
 	if got := stateFor(t, func(_ string, skillDir string) {
 		writeManagedFixture(t, skillDir, []bundleFile{{name: "SKILL.md", data: []byte("old managed skill\n")}})
-	}); got != DifferentState {
+	}); got != UpdateAvailableState {
 		t.Errorf("different state = %s", got)
 	}
 	if got := stateFor(t, func(home, skillDir string) {
@@ -633,6 +636,47 @@ func TestStatusDistinguishesAbsentCurrentDifferentDriftedAndUnmanaged(t *testing
 		}
 	}); got != UnmanagedState {
 		t.Errorf("unmanaged state = %s", got)
+	}
+}
+
+func TestStatusDistinguishesNewerAndSameVersionDifferentBundles(t *testing.T) {
+	home := t.TempDir()
+	target := targetByIDForTest(t, "claude-code")
+	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
+	files := []bundleFile{{name: "SKILL.md", data: []byte("managed skill\n")}}
+	writeManagedFixtureVersion(t, skillDir, "9.0.0", files)
+
+	status, err := Status(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home})
+	if err != nil || len(status.Entries) != 1 || status.Entries[0].State != NewerThanCLIState || status.Entries[0].Recommendation != RefuseRecommendation {
+		t.Fatalf("newer status = %#v, %v", status, err)
+	}
+
+	home = t.TempDir()
+	skillDir = filepath.Join(home, target.UserSkillsDir, "hextap")
+	writeManagedFixtureVersion(t, skillDir, toolskills.Hextap().Version, files)
+	status, err = Status(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home})
+	if err != nil || len(status.Entries) != 1 || status.Entries[0].State != SameVersionDifferentState || status.Entries[0].Recommendation != RefuseRecommendation {
+		t.Fatalf("same-version-different status = %#v, %v", status, err)
+	}
+}
+
+func TestStatusWithoutAgentsInventoriesEveryConcretePhysicalTargetReadOnly(t *testing.T) {
+	home := t.TempDir()
+	result, err := Status(Options{Scope: UserScope, HomeDir: home})
+	if err != nil {
+		t.Fatalf("Status(all targets) error = %v", err)
+	}
+	want := []StatusEntry{
+		{State: NotInstalledState, Agent: "agents+codex", Path: filepath.Join(home, ".agents", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
+		{State: NotInstalledState, Agent: "claude-code", Path: filepath.Join(home, ".claude", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
+		{State: NotInstalledState, Agent: "cursor", Path: filepath.Join(home, ".cursor", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
+	}
+	if !reflect.DeepEqual(result.Entries, want) {
+		t.Fatalf("Status(all targets) = %#v, want %#v", result.Entries, want)
+	}
+	entries, readErr := os.ReadDir(home)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("Status(all targets) wrote to home: entries=%v error=%v", entries, readErr)
 	}
 }
 
@@ -801,6 +845,10 @@ func assertCurrentInstall(t *testing.T, root string, scope Scope, agent string) 
 }
 
 func writeManagedFixture(t *testing.T, skillDir string, files []bundleFile) {
+	writeManagedFixtureVersion(t, skillDir, "0.9.0", files)
+}
+
+func writeManagedFixtureVersion(t *testing.T, skillDir, version string, files []bundleFile) {
 	t.Helper()
 	for _, file := range files {
 		path := filepath.Join(skillDir, filepath.FromSlash(file.name))
@@ -811,7 +859,7 @@ func writeManagedFixture(t *testing.T, skillDir string, files []bundleFile) {
 			t.Fatal(err)
 		}
 	}
-	marker, err := encodeMarker("hextap", "0.9.0", files)
+	marker, err := encodeMarker("hextap", version, files)
 	if err != nil {
 		t.Fatal(err)
 	}

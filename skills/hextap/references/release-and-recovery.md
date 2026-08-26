@@ -73,3 +73,8 @@ Require the protected source merge, tag-to-main identity, immutable release and
 attestations, stable/prerelease classification, exact Formula bytes when stable,
 tap commit and exact correlated tap CI, plus installed consumer/service proof
 when that local mutation has separately been approved.
+
+For Hextap's own repository, prefer the confirmed `brew hextap dev deploy` or
+`dev release` state machine described in
+[Toolkit development](toolkit-development.md). It preserves these same release
+and recovery gates and stops before unresolved PR feedback.

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/SijanC147/hextap-toolkit/internal/release"
 )
 
 type targetInspection struct {
@@ -25,7 +27,7 @@ type targetInspection struct {
 
 // Status inspects marker ownership and bundle hashes without writing.
 func Status(options Options) (StatusResult, error) {
-	targets, err := resolveTargets(options)
+	targets, err := resolveStatusTargets(options)
 	if err != nil {
 		return StatusResult{}, err
 	}
@@ -44,9 +46,33 @@ func Status(options Options) (StatusResult, error) {
 		if err != nil {
 			return StatusResult{}, err
 		}
-		entries = append(entries, StatusEntry{State: inspection.state, Agent: target.agent, Path: inspection.absoluteDir})
+		installedVersion := ""
+		if inspection.marker.Version != "" {
+			installedVersion = inspection.marker.Version
+		}
+		entries = append(entries, StatusEntry{
+			State:            inspection.state,
+			Agent:            target.agent,
+			Path:             inspection.absoluteDir,
+			InstalledVersion: installedVersion,
+			AvailableVersion: bundle.version,
+			Recommendation:   recommendationForState(inspection.state),
+		})
 	}
 	return StatusResult{Entries: entries}, nil
+}
+
+func recommendationForState(state State) Recommendation {
+	switch state {
+	case NotInstalledState:
+		return InstallRecommendation
+	case CurrentState:
+		return NoRecommendation
+	case UpdateAvailableState:
+		return UpgradeRecommendation
+	default:
+		return RefuseRecommendation
+	}
 }
 
 func openOptionsRoot(options Options) (string, *os.Root, error) {
@@ -117,12 +143,12 @@ func inspectTarget(root *os.Root, absoluteRoot string, target resolvedTarget, bu
 		inspection.state = InvalidState
 		return inspection, nil
 	}
+	inspection.marker = marker
 	canonicalMarker, err := encodeExistingMarker(marker)
 	if err != nil || !bytes.Equal(canonicalMarker, markerData) || info.Mode().Perm() != installedFileMode {
 		inspection.state = DriftedState
 		return inspection, nil
 	}
-	inspection.marker = marker
 	inspection.markerData = markerData
 	inspection.markerMode = info.Mode().Perm()
 	intact, err := markerFilesAreIntact(root, skillDir, marker)
@@ -136,7 +162,16 @@ func inspectTarget(root *os.Root, absoluteRoot string, target resolvedTarget, bu
 	if markerMatchesBundle(marker, bundle.marker) {
 		inspection.state = CurrentState
 	} else {
-		inspection.state = DifferentState
+		comparison, compareErr := release.CompareStableVersions(marker.Version, bundle.version)
+		if compareErr != nil {
+			inspection.state = InvalidState
+		} else if comparison < 0 {
+			inspection.state = UpdateAvailableState
+		} else if comparison > 0 {
+			inspection.state = NewerThanCLIState
+		} else {
+			inspection.state = SameVersionDifferentState
+		}
 	}
 	return inspection, nil
 }

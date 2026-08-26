@@ -80,3 +80,7 @@ Record the CLI version/commit, project commit, workflow toolkit tag/full SHA,
 manifest identity, required checks, and each validation result. Never record
 credentials. Treat local, hosted source, release, tap, and installed-service
 evidence as distinct gates.
+
+For the toolkit's own source repository, use the dedicated developer validation
+surface instead of manually reconstructing its CI commands. See
+[Toolkit development](toolkit-development.md).

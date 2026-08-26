@@ -3,6 +3,7 @@ package brewcli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/SijanC147/hextap-toolkit/internal/devcli"
 	"github.com/SijanC147/hextap-toolkit/internal/onboard"
 	"github.com/SijanC147/hextap-toolkit/internal/skillinstall"
 )
@@ -26,6 +28,7 @@ Commands:
   validate    Validate local onboarding artifacts; optionally smoke-build
   doctor      Check local prerequisites; optionally inspect GitHub read-only
   skills      Install the bundled Hextap skill for explicit agent targets
+  dev         Develop, validate, release, and install Hextap itself
 `
 )
 
@@ -56,7 +59,7 @@ func Run(args []string, stdout, stderr io.Writer, version, commit string) int {
 		return 0
 	}
 	if len(args) == 0 {
-		return fail(stderr, "command required; expected version, onboard, validate, doctor, or skills")
+		return fail(stderr, "command required; expected version, onboard, validate, doctor, skills, or dev")
 	}
 	switch args[0] {
 	case "version":
@@ -73,8 +76,10 @@ func Run(args []string, stdout, stderr io.Writer, version, commit string) int {
 		return runDoctor(args[1:], stdout, stderr)
 	case "skills":
 		return runSkills(args[1:], stdout, stderr)
+	case "dev":
+		return devcli.Run(args[1:], stdout, stderr, version, commit)
 	default:
-		return fail(stderr, "unknown command; expected version, onboard, validate, doctor, or skills")
+		return fail(stderr, "unknown command; expected version, onboard, validate, doctor, skills, or dev")
 	}
 }
 
@@ -206,17 +211,19 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 
 func runSkills(args []string, stdout, stderr io.Writer) int {
 	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap skills <install|status|targets> [options]\n")
+		_, _ = io.WriteString(stdout, "usage: brew-hextap skills <install|status|targets|upgrade> [options]\n")
 		return 0
 	}
 	if len(args) == 0 {
-		return fail(stderr, "skills: subcommand required; expected install, status, or targets")
+		return fail(stderr, "skills: subcommand required; expected install, status, targets, or upgrade")
 	}
 	switch args[0] {
 	case "install":
 		return runSkillsInstall(args[1:], stdout, stderr)
 	case "status":
 		return runSkillsStatus(args[1:], stdout, stderr)
+	case "upgrade":
+		return runSkillsUpgrade(args[1:], stdout, stderr)
 	case "targets":
 		if len(args) != 1 {
 			return fail(stderr, "skills targets: unexpected arguments")
@@ -230,8 +237,52 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	default:
-		return fail(stderr, "skills: unknown subcommand %q; expected install, status, or targets", args[0])
+		return fail(stderr, "skills: unknown subcommand %q; expected install, status, targets, or upgrade", args[0])
 	}
+}
+
+func runSkillsUpgrade(args []string, stdout, stderr io.Writer) int {
+	if isHelpRequest(args) {
+		_, _ = io.WriteString(stdout, "usage: brew-hextap skills upgrade --agent ID [--agent ID ...] --scope user|project [--project PATH] [--dry-run] [--allow-overlapping-discovery]\n")
+		return 0
+	}
+	flags := newFlagSet("skills upgrade")
+	var agents stringList
+	flags.Var(&agents, "agent", "agent target ID (repeatable)")
+	scope := flags.String("scope", "", "required upgrade scope: user or project")
+	project := flags.String("project", ".", "project root for project scope")
+	dryRun := flags.Bool("dry-run", false, "report without writing")
+	allowOverlap := flags.Bool("allow-overlapping-discovery", false, "acknowledge shared Cursor discovery roots")
+	if err := flags.Parse(args); err != nil {
+		return fail(stderr, "skills upgrade: invalid arguments")
+	}
+	if flags.NArg() != 0 {
+		return fail(stderr, "skills upgrade: unexpected positional arguments")
+	}
+	selectedScope := skillinstall.Scope(*scope)
+	home, projectRoot, err := resolveSkillsRoots(selectedScope, *project)
+	if err != nil {
+		return fail(stderr, "skills upgrade: %v", err)
+	}
+	result, err := skillinstall.Upgrade(skillinstall.Options{
+		Agents:                    agents,
+		Scope:                     selectedScope,
+		HomeDir:                   home,
+		ProjectDir:                projectRoot,
+		DryRun:                    *dryRun,
+		AllowOverlappingDiscovery: *allowOverlap,
+	})
+	if err != nil {
+		return fail(stderr, "skills upgrade: %v", err)
+	}
+	for _, entry := range result.Entries {
+		fmt.Fprintf(stdout, "%s %s from=%s to=%s %s", entry.Action, entry.Agent, entry.FromVersion, entry.ToVersion, entry.Path)
+		if entry.BackupPath != "" {
+			fmt.Fprintf(stdout, " backup=%s", entry.BackupPath)
+		}
+		_, _ = io.WriteString(stdout, "\n")
+	}
+	return 0
 }
 
 func runSkillsInstall(args []string, stdout, stderr io.Writer) int {
@@ -276,15 +327,15 @@ func runSkillsInstall(args []string, stdout, stderr io.Writer) int {
 
 func runSkillsStatus(args []string, stdout, stderr io.Writer) int {
 	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap skills status --agent ID [--agent ID ...] --scope user|project [--project PATH] [--allow-overlapping-discovery]\n")
+		_, _ = io.WriteString(stdout, "usage: brew-hextap skills status [--agent ID ...] [--scope user|project] [--project PATH] [--json]\n")
 		return 0
 	}
 	flags := newFlagSet("skills status")
 	var agents stringList
 	flags.Var(&agents, "agent", "agent target ID (repeatable)")
-	scope := flags.String("scope", "", "required installation scope: user or project")
+	scope := flags.String("scope", string(skillinstall.UserScope), "inspection scope: user or project")
 	project := flags.String("project", ".", "project root for project scope")
-	allowOverlap := flags.Bool("allow-overlapping-discovery", false, "acknowledge shared Cursor discovery roots")
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON inventory")
 	if err := flags.Parse(args); err != nil {
 		return fail(stderr, "skills status: invalid arguments")
 	}
@@ -297,17 +348,33 @@ func runSkillsStatus(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "skills status: %v", err)
 	}
 	result, err := skillinstall.Status(skillinstall.Options{
-		Agents:                    agents,
-		Scope:                     selectedScope,
-		HomeDir:                   home,
-		ProjectDir:                projectRoot,
-		AllowOverlappingDiscovery: *allowOverlap,
+		Agents:     agents,
+		Scope:      selectedScope,
+		HomeDir:    home,
+		ProjectDir: projectRoot,
 	})
 	if err != nil {
 		return fail(stderr, "skills status: %v", err)
 	}
+	if *jsonOutput {
+		document := struct {
+			Schema  int                        `json:"schema"`
+			Scope   skillinstall.Scope         `json:"scope"`
+			Entries []skillinstall.StatusEntry `json:"entries"`
+		}{Schema: 1, Scope: selectedScope, Entries: result.Entries}
+		data, marshalErr := json.MarshalIndent(document, "", "  ")
+		if marshalErr != nil {
+			return fail(stderr, "skills status: encode JSON: %v", marshalErr)
+		}
+		_, _ = stdout.Write(append(data, '\n'))
+		return 0
+	}
 	for _, entry := range result.Entries {
-		fmt.Fprintf(stdout, "%s %s %s\n", entry.State, entry.Agent, entry.Path)
+		installed := entry.InstalledVersion
+		if installed == "" {
+			installed = "-"
+		}
+		fmt.Fprintf(stdout, "%s %s installed=%s available=%s action=%s %s\n", entry.State, entry.Agent, installed, entry.AvailableVersion, entry.Recommendation, entry.Path)
 	}
 	return 0
 }

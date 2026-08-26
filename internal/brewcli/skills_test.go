@@ -1,6 +1,9 @@
 package brewcli
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,8 +38,77 @@ func TestSkillsInstallAndStatusCLIUseTemporaryUserHome(t *testing.T) {
 		"--agent", "claude-code",
 		"--scope", "user",
 	)
-	if code != 0 || stderr != "" || !strings.HasPrefix(stdout, "CURRENT claude-code ") {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "CURRENT claude-code installed=1.1.0 available=1.1.0 action=NONE ") {
 		t.Fatalf("Run(skills status) = %d, %q, %q", code, stdout, stderr)
+	}
+}
+
+func TestSkillsStatusDefaultsToCompleteUserInventoryAndSupportsJSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if code, stdout, stderr := execute("dev", "unknown", "skills", "install", "--agent", "codex", "--scope", "user"); code != 0 {
+		t.Fatalf("install = %d, %q, %q", code, stdout, stderr)
+	}
+
+	code, stdout, stderr := execute("dev", "unknown", "skills", "status")
+	if code != 0 || stderr != "" {
+		t.Fatalf("status = %d, %q, %q", code, stdout, stderr)
+	}
+	for _, expected := range []string{
+		"CURRENT agents+codex installed=1.1.0 available=1.1.0 action=NONE ",
+		"NOT_INSTALLED claude-code installed=- available=1.1.0 action=INSTALL ",
+		"NOT_INSTALLED cursor installed=- available=1.1.0 action=INSTALL ",
+	} {
+		if !strings.Contains(stdout, expected) {
+			t.Errorf("human inventory %q is missing %q", stdout, expected)
+		}
+	}
+
+	code, stdout, stderr = execute("dev", "unknown", "skills", "status", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("status JSON = %d, %q, %q", code, stdout, stderr)
+	}
+	var document struct {
+		Schema  int    `json:"schema"`
+		Scope   string `json:"scope"`
+		Entries []struct {
+			State            string `json:"state"`
+			Agent            string `json:"agent"`
+			InstalledVersion string `json:"installed_version"`
+			AvailableVersion string `json:"available_version"`
+			Recommendation   string `json:"recommendation"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &document); err != nil {
+		t.Fatalf("decode status JSON %q: %v", stdout, err)
+	}
+	if document.Schema != 1 || document.Scope != "user" || len(document.Entries) != 3 || document.Entries[0].Agent != "agents+codex" || document.Entries[0].InstalledVersion != "1.1.0" {
+		t.Fatalf("status JSON = %#v", document)
+	}
+}
+
+func TestSkillsUpgradeCLIPlansAndAppliesManagedForwardUpgrade(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	skillDir := filepath.Join(home, ".claude", "skills", "hextap")
+	writeOldManagedSkillFixture(t, skillDir)
+
+	code, stdout, stderr := execute("dev", "unknown", "skills", "upgrade", "--agent", "claude-code", "--scope", "user", "--dry-run")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "UPGRADE claude-code from=0.9.0 to=1.1.0 ") || strings.Contains(stdout, "backup=") {
+		t.Fatalf("upgrade dry-run = %d, %q, %q", code, stdout, stderr)
+	}
+	data, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil || string(data) != "old managed skill\n" {
+		t.Fatalf("upgrade dry-run changed skill: data=%q error=%v", data, err)
+	}
+
+	code, stdout, stderr = execute("dev", "unknown", "skills", "upgrade", "--agent", "claude-code", "--scope", "user")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "UPGRADE claude-code from=0.9.0 to=1.1.0 ") || !strings.Contains(stdout, " backup=") {
+		t.Fatalf("upgrade = %d, %q, %q", code, stdout, stderr)
+	}
+	code, statusOutput, stderr := execute("dev", "unknown", "skills", "status", "--agent", "claude-code", "--scope", "user")
+	if code != 0 || stderr != "" || !strings.Contains(statusOutput, "CURRENT claude-code installed=1.1.0 available=1.1.0 action=NONE ") {
+		t.Fatalf("post-upgrade status = %d, %q, %q", code, statusOutput, stderr)
 	}
 }
 
@@ -138,6 +210,7 @@ func TestSkillsTargetsUsageAndErrors(t *testing.T) {
 		{"skills", "--help"},
 		{"skills", "install", "--help"},
 		{"skills", "status", "--help"},
+		{"skills", "upgrade", "--help"},
 	} {
 		code, stdout, stderr = execute("dev", "unknown", args...)
 		if code != 0 || stderr != "" || !strings.HasPrefix(stdout, "usage: brew-hextap skills") {
@@ -150,14 +223,52 @@ func TestSkillsTargetsUsageAndErrors(t *testing.T) {
 		{"skills", "unknown"},
 		{"skills", "install", "--agent", "codex"},
 		{"skills", "install", "--scope", "user"},
+		{"skills", "upgrade", "--scope", "user"},
 		{"skills", "install", "--agent", "unknown", "--scope", "user"},
 		{"skills", "install", "--agent", "codex", "--scope", "system"},
-		{"skills", "status", "--agent", "codex"},
+		{"skills", "status", "--scope", "system"},
 		{"skills", "install", "--agent", "codex", "--scope", "user", "extra"},
 	} {
 		code, stdout, stderr = execute("dev", "unknown", args...)
 		if code == 0 || stdout != "" || !strings.HasPrefix(stderr, "error: skills") || !strings.HasSuffix(stderr, "\n") {
 			t.Errorf("Run(%v) = %d, %q, %q", args, code, stdout, stderr)
 		}
+	}
+}
+
+func writeOldManagedSkillFixture(t *testing.T, skillDir string) {
+	t.Helper()
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const name = "SKILL.md"
+	data := []byte("old managed skill\n")
+	if err := os.WriteFile(filepath.Join(skillDir, name), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileHash := sha256.Sum256(data)
+	fileHashString := fmt.Sprintf("%x", fileHash)
+	bundleHash := sha256.Sum256([]byte(fmt.Sprintf("version:0.9.0\n%d:%s:%s\n", len(name), name, fileHashString)))
+	marker := struct {
+		Schema       int    `json:"schema"`
+		Bundle       string `json:"bundle"`
+		Version      string `json:"version"`
+		BundleSHA256 string `json:"bundle_sha256"`
+		Files        []struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		} `json:"files"`
+	}{Schema: 1, Bundle: "hextap", Version: "0.9.0", BundleSHA256: fmt.Sprintf("%x", bundleHash)}
+	marker.Files = append(marker.Files, struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	}{Path: name, SHA256: fileHashString})
+	encoded, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(filepath.Join(skillDir, ".hextap-install.json"), encoded, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
