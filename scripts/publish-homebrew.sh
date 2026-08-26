@@ -126,14 +126,22 @@ done
 
 run_id=""
 run_url=""
+run_event=""
+run_events=(push)
+if [[ "$status" == "already-current" ]]; then
+  run_events+=(workflow_dispatch)
+fi
 for _ in {1..60}; do
-  run_json="$(gh api --method GET "repos/$tap_repository/actions/workflows/tests.yml/runs" \
-    -f event=push -f branch=main -f head_sha="$tap_commit" -f per_page=10)"
-  count="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("workflow_runs").length' <<<"$run_json")"
-  if [[ "$count" == 1 ]]; then
-    IFS=$'\t' read -r run_id run_url <<<"$(ruby -rjson -e 'r=JSON.parse(STDIN.read).fetch("workflow_runs").first; puts [r.fetch("id"),r.fetch("html_url")].join("\t")' <<<"$run_json")"
-    break
-  fi
+  for candidate_event in "${run_events[@]}"; do
+    run_json="$(gh api --method GET "repos/$tap_repository/actions/workflows/tests.yml/runs" \
+      -f event="$candidate_event" -f branch=main -f head_sha="$tap_commit" -f per_page=10)"
+    count="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("workflow_runs").length' <<<"$run_json")"
+    if (( count >= 1 )); then
+      IFS=$'\t' read -r run_id run_url <<<"$(ruby -rjson -e 'r=JSON.parse(STDIN.read).fetch("workflow_runs").first; puts [r.fetch("id"),r.fetch("html_url")].join("\t")' <<<"$run_json")"
+      run_event="$candidate_event"
+      break 2
+    fi
+  done
   sleep 2
 done
 
@@ -149,8 +157,9 @@ ruby -rjson -e '
   abort "tap run identity mismatch" unless run.dig("repository","full_name") == "SijanC147/homebrew-hextap"
   abort "tap run path mismatch" unless run.fetch("path") == ".github/workflows/tests.yml"
   abort "tap run commit mismatch" unless run.fetch("head_sha") == ARGV[0]
+  abort "tap run event mismatch" unless run.fetch("event") == ARGV[1]
   abort "tap run failed" unless run.fetch("status") == "completed" && run.fetch("conclusion") == "success"
-' "$tap_commit" <<<"$run_state"
+' "$tap_commit" "$run_event" <<<"$run_state"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
