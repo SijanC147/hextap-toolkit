@@ -209,6 +209,19 @@ func TestPublishHomebrewNewPublicationRequiresAutomaticPushGate(t *testing.T) {
 	}
 }
 
+func TestPublishHomebrewRejectsMismatchedTapGateEvent(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		tapRunMode:    "workflow_dispatch",
+		tapStateEvent: "push",
+	})
+	if result.err == nil {
+		t.Fatal("publish-homebrew.sh accepted a tap run with a mismatched event")
+	}
+	if !strings.Contains(result.stderr, "tap run event mismatch") {
+		t.Fatalf("stderr = %q, want event identity failure", result.stderr)
+	}
+}
+
 func TestPublishHomebrewFailsFastWithPushDiagnostic(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -289,9 +302,10 @@ type publisherResult struct {
 }
 
 type publisherOptions struct {
-	gitChanged bool
-	pushMode   string
-	tapRunMode string
+	gitChanged    bool
+	pushMode      string
+	tapRunMode    string
+	tapStateEvent string
 }
 
 func runPublisher(t *testing.T, sourceManifest, tapManifest string) publisherResult {
@@ -354,7 +368,7 @@ if [[ "$1" == api ]]; then
 	  printf '{"workflow_runs":[]}\n'
 	fi
   elif [[ "$endpoint" == */actions/runs/42 ]]; then
-	printf '{"repository":{"full_name":"SijanC147/homebrew-hextap"},"path":".github/workflows/tests.yml","head_sha":"%s","event":"%s","status":"completed","conclusion":"success"}\n' "$TEST_TAP_SHA" "$TEST_TAP_RUN_MODE"
+	printf '{"repository":{"full_name":"SijanC147/homebrew-hextap"},"path":".github/workflows/tests.yml","head_sha":"%s","event":"%s","status":"completed","conclusion":"success"}\n' "$TEST_TAP_SHA" "$TEST_TAP_STATE_EVENT"
   else
     printf 'unexpected gh api endpoint: %s\n' "$endpoint" >&2
     exit 1
@@ -426,6 +440,10 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 	if tapRunMode == "" {
 		tapRunMode = "push"
 	}
+	tapStateEvent := options.tapStateEvent
+	if tapStateEvent == "" {
+		tapStateEvent = tapRunMode
+	}
 	command.Env = append(os.Environ(),
 		"PATH="+stubDirectory+":/usr/bin:/bin",
 		"GH_TOKEN=test-token",
@@ -437,6 +455,7 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 		"TEST_GIT_CHANGED="+gitChanged,
 		"TEST_PUSH_MODE="+options.pushMode,
 		"TEST_TAP_RUN_MODE="+tapRunMode,
+		"TEST_TAP_STATE_EVENT="+tapStateEvent,
 		"TEST_PUSH_COUNT="+pushCountPath,
 		"TEST_SLEEP_LOG="+sleepLogPath,
 	)
