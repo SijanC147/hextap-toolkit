@@ -2,14 +2,18 @@
 package brewcli
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 
 	"github.com/SijanC147/hextap-toolkit/internal/onboard"
+	"github.com/SijanC147/hextap-toolkit/internal/skillinstall"
 )
 
 const (
@@ -21,6 +25,7 @@ Commands:
   onboard     Plan or create local Hextap onboarding artifacts
   validate    Validate local onboarding artifacts; optionally smoke-build
   doctor      Check local prerequisites; optionally inspect GitHub read-only
+  skills      Install the bundled Hextap skill for explicit agent targets
 `
 )
 
@@ -51,7 +56,7 @@ func Run(args []string, stdout, stderr io.Writer, version, commit string) int {
 		return 0
 	}
 	if len(args) == 0 {
-		return fail(stderr, "command required; expected version, onboard, validate, or doctor")
+		return fail(stderr, "command required; expected version, onboard, validate, doctor, or skills")
 	}
 	switch args[0] {
 	case "version":
@@ -66,8 +71,10 @@ func Run(args []string, stdout, stderr io.Writer, version, commit string) int {
 		return runValidate(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr)
+	case "skills":
+		return runSkills(args[1:], stdout, stderr)
 	default:
-		return fail(stderr, "unknown command; expected version, onboard, validate, or doctor")
+		return fail(stderr, "unknown command; expected version, onboard, validate, doctor, or skills")
 	}
 }
 
@@ -195,6 +202,154 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "OK %s\n", check)
 	}
 	return 0
+}
+
+func runSkills(args []string, stdout, stderr io.Writer) int {
+	if isHelpRequest(args) {
+		_, _ = io.WriteString(stdout, "usage: brew-hextap skills <install|status|targets> [options]\n")
+		return 0
+	}
+	if len(args) == 0 {
+		return fail(stderr, "skills: subcommand required; expected install, status, or targets")
+	}
+	switch args[0] {
+	case "install":
+		return runSkillsInstall(args[1:], stdout, stderr)
+	case "status":
+		return runSkillsStatus(args[1:], stdout, stderr)
+	case "targets":
+		if len(args) != 1 {
+			return fail(stderr, "skills targets: unexpected arguments")
+		}
+		for _, target := range skillinstall.Targets() {
+			if target.Virtual {
+				fmt.Fprintf(stdout, "TARGET %s virtual\n", target.ID)
+			} else {
+				fmt.Fprintf(stdout, "TARGET %s user=%s project=%s\n", target.ID, target.UserSkillsDir, target.ProjectSkillsDir)
+			}
+		}
+		return 0
+	default:
+		return fail(stderr, "skills: unknown subcommand %q; expected install, status, or targets", args[0])
+	}
+}
+
+func runSkillsInstall(args []string, stdout, stderr io.Writer) int {
+	if isHelpRequest(args) {
+		_, _ = io.WriteString(stdout, "usage: brew-hextap skills install --agent ID [--agent ID ...] --scope user|project [--project PATH] [--dry-run] [--allow-overlapping-discovery]\n")
+		return 0
+	}
+	flags := newFlagSet("skills install")
+	var agents stringList
+	flags.Var(&agents, "agent", "agent target ID (repeatable)")
+	scope := flags.String("scope", "", "required installation scope: user or project")
+	project := flags.String("project", ".", "project root for project scope")
+	dryRun := flags.Bool("dry-run", false, "report without writing")
+	allowOverlap := flags.Bool("allow-overlapping-discovery", false, "acknowledge shared Cursor discovery roots")
+	if err := flags.Parse(args); err != nil {
+		return fail(stderr, "skills install: invalid arguments")
+	}
+	if flags.NArg() != 0 {
+		return fail(stderr, "skills install: unexpected positional arguments")
+	}
+	selectedScope := skillinstall.Scope(*scope)
+	home, projectRoot, err := resolveSkillsRoots(selectedScope, *project)
+	if err != nil {
+		return fail(stderr, "skills install: %v", err)
+	}
+	result, err := skillinstall.Install(skillinstall.Options{
+		Agents:                    agents,
+		Scope:                     selectedScope,
+		HomeDir:                   home,
+		ProjectDir:                projectRoot,
+		DryRun:                    *dryRun,
+		AllowOverlappingDiscovery: *allowOverlap,
+	})
+	if err != nil {
+		return fail(stderr, "skills install: %v", err)
+	}
+	for _, entry := range result.Entries {
+		fmt.Fprintf(stdout, "%s %s %s\n", entry.Action, entry.Agent, entry.Path)
+	}
+	return 0
+}
+
+func runSkillsStatus(args []string, stdout, stderr io.Writer) int {
+	if isHelpRequest(args) {
+		_, _ = io.WriteString(stdout, "usage: brew-hextap skills status --agent ID [--agent ID ...] --scope user|project [--project PATH] [--allow-overlapping-discovery]\n")
+		return 0
+	}
+	flags := newFlagSet("skills status")
+	var agents stringList
+	flags.Var(&agents, "agent", "agent target ID (repeatable)")
+	scope := flags.String("scope", "", "required installation scope: user or project")
+	project := flags.String("project", ".", "project root for project scope")
+	allowOverlap := flags.Bool("allow-overlapping-discovery", false, "acknowledge shared Cursor discovery roots")
+	if err := flags.Parse(args); err != nil {
+		return fail(stderr, "skills status: invalid arguments")
+	}
+	if flags.NArg() != 0 {
+		return fail(stderr, "skills status: unexpected positional arguments")
+	}
+	selectedScope := skillinstall.Scope(*scope)
+	home, projectRoot, err := resolveSkillsRoots(selectedScope, *project)
+	if err != nil {
+		return fail(stderr, "skills status: %v", err)
+	}
+	result, err := skillinstall.Status(skillinstall.Options{
+		Agents:                    agents,
+		Scope:                     selectedScope,
+		HomeDir:                   home,
+		ProjectDir:                projectRoot,
+		AllowOverlappingDiscovery: *allowOverlap,
+	})
+	if err != nil {
+		return fail(stderr, "skills status: %v", err)
+	}
+	for _, entry := range result.Entries {
+		fmt.Fprintf(stdout, "%s %s %s\n", entry.State, entry.Agent, entry.Path)
+	}
+	return 0
+}
+
+func resolveSkillsRoots(scope skillinstall.Scope, project string) (home, projectRoot string, err error) {
+	switch scope {
+	case skillinstall.UserScope:
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return "", "", fmt.Errorf("resolve user home: %w", err)
+		}
+		return home, "", nil
+	case skillinstall.ProjectScope:
+		command := exec.Command("git", "-C", project, "rev-parse", "--show-toplevel")
+		command.Stdin = nil
+		command.Stderr = io.Discard
+		output, commandErr := command.Output()
+		if commandErr != nil {
+			return "", "", fmt.Errorf("resolve project Git top-level")
+		}
+		projectRoot, commandErr = parseGitTopLevelRecord(output)
+		if commandErr != nil {
+			return "", "", fmt.Errorf("resolve project Git top-level: %w", commandErr)
+		}
+		return "", projectRoot, nil
+	default:
+		return "", project, nil
+	}
+}
+
+func parseGitTopLevelRecord(output []byte) (string, error) {
+	if len(output) == 0 || output[len(output)-1] != '\n' {
+		return "", fmt.Errorf("missing record terminator")
+	}
+	record := output[:len(output)-1]
+	if len(record) == 0 {
+		return "", fmt.Errorf("empty record")
+	}
+	if bytes.ContainsAny(record, "\x00\n") {
+		return "", fmt.Errorf("unexpected extra or invalid record")
+	}
+	return string(record), nil
 }
 
 func newFlagSet(name string) *flag.FlagSet {

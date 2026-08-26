@@ -110,6 +110,68 @@ doctor or the generated setup commands. Readiness also requires the entire
 Formula to equal the deterministic manifest rendering for its validated
 current stable URLs and SHA-256 metadata, not merely a matching class line.
 
+## Agent skill installation
+
+`brew-hextap` embeds one portable Agent Skills package under the stable name
+`hextap`. Inspect the reviewed target registry before writing:
+
+```sh
+brew hextap skills targets
+```
+
+Installations require an explicit agent and scope. User scope writes below the
+selected user skill root; project scope resolves the supplied path to its Git
+top level before planning any file:
+
+```sh
+brew hextap skills install --agent codex --scope user --dry-run
+brew hextap skills install --agent codex --scope user
+
+brew hextap skills install --agent claude-code --scope project --project . --dry-run
+brew hextap skills install --agent claude-code --scope project --project .
+```
+
+Supported targets are `agents`, `codex`, `claude-code`, `cursor`, and the
+virtual `all` target. Codex and the portable `agents` target share
+`.agents/skills`; Claude Code uses `.claude/skills`; Cursor's native root is
+`.cursor/skills`. Cursor also discovers the shared and Claude roots, so
+multi-root selections fail closed unless the caller explicitly acknowledges
+overlapping discovery:
+
+```sh
+brew hextap skills install \
+  --agent all \
+  --scope user \
+  --allow-overlapping-discovery
+```
+
+The acknowledged `all` plan writes one shared `.agents` copy and one Claude
+copy; it deliberately omits a redundant Cursor-native copy. Installation is
+copy-only and refuses symlinked parents, unmanaged destinations, drifted
+managed files, or a different managed bundle. Every destination carries a
+canonical `.hextap-install.json` ownership marker with a strict bundle version
+and per-file hashes. Existing exact installations are idempotent and metadata
+timestamps are left unchanged.
+
+Inspect state without writing:
+
+```sh
+brew hextap skills status --agent codex --scope user
+brew hextap skills status --agent cursor --scope project --project .
+```
+
+The first installer release intentionally does not update or uninstall an
+existing different bundle. Those mutations require a separately reviewed
+version-ordering, backup, and removal contract; manually deleting or
+overwriting an owned or unmanaged skill is not an installer fallback.
+
+If installation reports a partial state, its exact `claimed directories` and
+`published files` are the durable create-only prefix that Hextap itself
+created. Preserve and reconcile those explicitly reported paths. Never infer
+that another unmarked or unreported path is safe to delete: it may contain
+concurrent or otherwise unmanaged user content, and pathname rollback is not a
+recovery mechanism.
+
 ## Managed reusable workflow
 
 Generated callers pin the full commit SHA of an exact stable toolkit release;
