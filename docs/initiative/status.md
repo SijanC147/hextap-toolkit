@@ -1,7 +1,7 @@
 # Initiative status and roadmap
 
-Snapshot: 2026-08-25 (Europe/Malta). This is implementation status, not live
-publication proof.
+Snapshot: 2026-08-27 (Europe/Malta). Historical release evidence must still be
+checked live before mutation.
 
 ## Implemented in this branch
 
@@ -16,6 +16,8 @@ publication proof.
 | Toolkit self-release source | Complete locally | Strict self-manifest, one-binary adapter, same-commit relative caller, four native targets. |
 | Local onboarding | Complete locally | Seven artifacts, create-only rooted transaction, idempotent rerun, zero remote mutation. |
 | Read-only online doctor | Complete with fake integration | Main, immutable releases, secret name, exact rulesets, stable tag SHA, tap Project/Formula canonical content. |
+| Portable agent skill inventory/upgrade | Complete locally | All-location version inventory, JSON, forward-only intact managed upgrade, retained recovery copy. |
+| Toolkit developer orchestration | Complete locally | Status, quick/full validation, SemVer plan, protected PR/merge, exact main/release run correlation, Hextap-only install. |
 
 ## External gates before adopter publication
 

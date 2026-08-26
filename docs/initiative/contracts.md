@@ -7,7 +7,7 @@
 | `SijanC147/hextap-toolkit` | Schema, `hextapctl`, `brew-hextap`, reusable workflow, publisher scripts | Versioned as one reviewed commit; reusable jobs self-check out that commit. |
 | Adopter source repository | `.hextap.json`, build adapter, caller workflow, `main`, stable tags, rulesets, `OP_SERVICE_ACCOUNT_TOKEN` secret name | Manifest repository must equal the caller; tags must resolve to canonical `main`; adapter is trusted project code. |
 | `SijanC147/homebrew-hextap` | `Projects/<formula>.json`, `Formula/<formula>.rb`, `.github/workflows/tests.yml`, direct `main` history | Project JSON is the canonical Formula registry; Formula metadata changes are validated and CI-bound to the exact push SHA. |
-| Coordinator / repository owner | Merges, immutable-release setting, secret entry, ruleset application, tap registration, first tag/release, live recovery | Reviews exact deltas and performs live mutations outside this branch. |
+| Coordinator / repository owner | Authorization for merges, tags/releases, local installation, immutable-release setting, secret entry, ruleset application, tap registration, and recovery | Reviews exact deltas and may delegate deterministic authorized mutations to `brew hextap dev`. |
 
 ## Manifest identity
 
@@ -77,11 +77,16 @@ or toolkit memory. `secrets: inherit` is forbidden.
 
 ## Live-operations boundary
 
-This toolkit branch may generate local payloads and perform read-only doctor
-queries. It does not merge PRs, create or move tags, publish releases, set
-secrets, apply rulesets, write tap registration, push tap `main`, restart
-services, or modify user/machine configuration. Those actions require explicit
-coordinator ownership and live evidence.
+Default Hextap commands generate local payloads or perform read-only queries.
+The toolkit-specific `dev` state machine may push its feature branch, merge
+through the protected path, create one confirmed unused tag, and trigger the
+existing release workflow only when the caller passes `--execute` and the exact
+computed `--confirm-tag`. It never applies admin/auto bypass, resolves review
+threads, sets secrets/rulesets, force-pushes, or mutates immutable history.
+
+`dev install` is a distinct local boundary: it upgrades only the Hextap Formula
+through its owning Homebrew tree and only named intact managed skill copies. It
+never invokes services or changes another package or runtime.
 
 Coordinator-provided cross-stream evidence on 2026-08-25 records adopter PR #4
 at `dc576a749a5c6e0dfbd63647b34dbb93f1d75009` and tap PR #5 at
