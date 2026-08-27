@@ -144,6 +144,39 @@ func TestRunProfileRejectsRuntimeVersionDriftBeforeInstall(t *testing.T) {
 	}
 }
 
+func TestRunProfileResolvesRelativeBunCacheBeforeChangingCommandDirectory(t *testing.T) {
+	source, manifestPath := writeProfileBuildFixture(t)
+	bin := t.TempDir()
+	callerDirectory := t.TempDir()
+	cacheDirectory := filepath.Join(callerDirectory, "cache")
+	if err := os.Mkdir(cacheDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writePrefetchingFakeBun(t, bin, "1.3.14")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(callerDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(workingDirectory) })
+	if err := RunProfile(ProfileOptions{
+		ManifestPath: manifestPath,
+		SourceDir:    source,
+		Phase:        ProfileBuild,
+		BunCacheDir:  "cache",
+	}); err != nil {
+		t.Fatalf("RunProfile(relative cache) error = %v", err)
+	}
+	for _, target := range []string{"bun-darwin-arm64", "bun-darwin-x64", "bun-linux-arm64", "bun-linux-x64", "bun-windows-x64"} {
+		if _, err := os.Stat(filepath.Join(cacheDirectory, target+"-v1.3.14")); err != nil {
+			t.Errorf("resolved cache lacks %s: %v", target, err)
+		}
+	}
+}
+
 func TestRunProfileBuildPrefetchesFreshBunCacheBeforeOfflineFiveTargetAdapter(t *testing.T) {
 	source, manifestPath := writeProfileBuildFixture(t)
 	bin := t.TempDir()

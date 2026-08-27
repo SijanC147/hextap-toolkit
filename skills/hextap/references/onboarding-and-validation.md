@@ -54,6 +54,8 @@ tap payload, rulesets, and setup document. Schema 2 requires:
 - Darwin arm64/amd64 targets, paired optional Linux, and optional Windows amd64;
 - explicit raw/archive names and archive contents;
 - a tap-owned `homebrew.formula_profile` plus `service_enabled`, not copied Ruby;
+  its tap registration must pair with reviewed
+  `packaging/<formula_profile>.rb.tmpl` bytes before stable publication;
 - exact normalized version and commit embedded in every target executable.
 
 Review the complete lexical plan. `CREATE` means absent managed content will be

@@ -117,8 +117,10 @@ execution.
 
 Schema-2 Formula profiles are update-only: source/tap manifests carry the
 profile name and service-enabled status, but the tap owns service, caveats,
-tests, comments, and formatting. Routine stable publication may still replace
-only the two Darwin URLs and two SHA-256 values. Project preparation must
+tests, comments, and formatting in a reviewed
+`packaging/<formula_profile>.rb.tmpl`. Publication requires exact byte equality
+with that template rendered using current canonical metadata and renders the
+new Formula solely from its four Darwin URL/SHA tokens. Project preparation must
 prefetch pinned Bun cross-target runtimes into an explicit dedicated cache.
 The reusable Ubuntu build runs the adapter as the original runner user inside
 a root-created network namespace. Hosted CI must prove an empty cache fails and

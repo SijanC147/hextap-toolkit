@@ -75,7 +75,10 @@ checksums.
   and two SHA-256 values after validating the supported metadata structure.
 - A tap-owned Formula profile cannot be rendered from source. Its profile name
   and service-enabled status remain in the equal source/tap manifest while the
-  tap owns service, caveats, tests, comments, and formatting.
+  tap owns service, caveats, tests, comments, and formatting. Publication binds
+  the Formula to the reviewed regular, non-symlink
+  `packaging/<formula_profile>.rb.tmpl`, requires exact current-render bytes,
+  and renders only the four canonical Darwin URL/SHA tokens from that template.
 - Tap pushes are direct, non-force updates to `main`; non-fast-forward races
   retry from a fresh clone, while authorization or ruleset failures stop with
   the real diagnostic.

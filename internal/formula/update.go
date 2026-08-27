@@ -62,6 +62,9 @@ func Update(original []byte, project manifest.Manifest, version, arm64SHA, amd64
 	if err := project.Validate(); err != nil {
 		return nil, UpdateResult{}, err
 	}
+	if project.Homebrew.FormulaProfile != "" {
+		return nil, UpdateResult{}, errors.New("tap-owned Formula profile template is required")
+	}
 	if err := validateReleaseMetadata(version, arm64SHA, amd64SHA); err != nil {
 		return nil, UpdateResult{}, err
 	}
@@ -112,6 +115,44 @@ func UpdateFile(path string, project manifest.Manifest, version, arm64SHA, amd64
 		return UpdateResult{}, fmt.Errorf("update Formula: read %q: %w", path, err)
 	}
 	updated, result, err := Update(original, project, version, arm64SHA, amd64SHA)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	if !result.Changed {
+		return result, nil
+	}
+	if err := atomicfile.Write(path, updated, info.Mode().Perm()); err != nil {
+		return UpdateResult{}, fmt.Errorf("update Formula: %w", err)
+	}
+	return result, nil
+}
+
+// UpdateFileWithTemplate atomically updates a schema-2 Formula after requiring
+// exact equality with its regular non-symlink tap-owned template rendering.
+func UpdateFileWithTemplate(path, templatePath string, project manifest.Manifest, version, arm64SHA, amd64SHA string) (UpdateResult, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return UpdateResult{}, fmt.Errorf("update Formula: inspect %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return UpdateResult{}, fmt.Errorf("update Formula: %q is not a regular file", path)
+	}
+	templateInfo, err := os.Lstat(templatePath)
+	if err != nil {
+		return UpdateResult{}, fmt.Errorf("update Formula: inspect template %q: %w", templatePath, err)
+	}
+	if !templateInfo.Mode().IsRegular() {
+		return UpdateResult{}, fmt.Errorf("update Formula: template %q is not a regular file", templatePath)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return UpdateResult{}, fmt.Errorf("update Formula: read %q: %w", path, err)
+	}
+	template, err := os.ReadFile(templatePath)
+	if err != nil {
+		return UpdateResult{}, fmt.Errorf("update Formula: read template %q: %w", templatePath, err)
+	}
+	updated, result, err := UpdateWithTemplate(original, template, project, version, arm64SHA, amd64SHA)
 	if err != nil {
 		return UpdateResult{}, err
 	}

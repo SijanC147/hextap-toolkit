@@ -329,6 +329,7 @@ func runFormulaUpdate(args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("formula update")
 	common := addFormulaFlags(flags)
 	formulaPath := flags.String("formula", "", "existing Formula path")
+	templatePath := flags.String("template", "", "tap-owned Formula profile template path")
 	if err := flags.Parse(args); err != nil {
 		return fail(stderr, "formula update: %v", err)
 	}
@@ -342,7 +343,18 @@ func runFormulaUpdate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, "update Formula: %v", err)
 	}
-	result, err := formula.UpdateFile(*formulaPath, project, *common.version, *common.arm64SHA, *common.amd64SHA)
+	var result formula.UpdateResult
+	if project.Homebrew.FormulaProfile != "" {
+		if *templatePath == "" {
+			return fail(stderr, "update Formula: --template is required for tap-owned Formula profile %s", project.Homebrew.FormulaProfile)
+		}
+		result, err = formula.UpdateFileWithTemplate(*formulaPath, *templatePath, project, *common.version, *common.arm64SHA, *common.amd64SHA)
+	} else {
+		if *templatePath != "" {
+			return fail(stderr, "update Formula: --template requires a tap-owned Formula profile")
+		}
+		result, err = formula.UpdateFile(*formulaPath, project, *common.version, *common.arm64SHA, *common.amd64SHA)
+	}
 	if err != nil {
 		return fail(stderr, "update Formula: %v", err)
 	}

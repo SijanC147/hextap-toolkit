@@ -116,7 +116,9 @@ CGO_ENABLED=0 GOOS="$HEXTAP_TARGET_OS" GOARCH="$HEXTAP_TARGET_ARCH" go build -tr
 		t.Fatal(err)
 	}
 	manifestPath = filepath.Join(source, ".hextap.json")
-	if _, err := Build(buildOptions(source, manifestPath, output)); err != nil {
+	options := buildOptions(source, manifestPath, output)
+	options.BunCacheDir = t.TempDir()
+	if _, err := Build(options); err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
 	return manifestPath, output
