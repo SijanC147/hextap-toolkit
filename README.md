@@ -276,6 +276,12 @@ matrix from `release.linux`; schema 2 exports its validated matrix, including
 optional Windows amd64, from the sealed manifest. Per-repository release runs
 use a non-canceling queued concurrency group.
 
+On Windows native runners, Hextap converts the native `RUNNER_TEMP` value once
+to an absolute Git Bash path before testing the downloaded manifest or invoking
+the verifier. The manifest file/type/digest assertions emit distinct diagnostics
+without printing paths or digest values, and hosted `windows-2025` toolkit CI
+proves the normalized path remains usable by the built `hextapctl.exe`.
+
 Full mode accepts stable and prerelease tags and produces an exact immutable
 GitHub release. Only stable releases may enter Homebrew. `homebrew-only` is a
 stable recovery mode for an existing immutable verified release only while the

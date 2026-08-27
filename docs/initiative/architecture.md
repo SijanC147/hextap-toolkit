@@ -65,7 +65,10 @@ manifest selects pinned Bun setup, direct project-owned quality/preparation
 argv, explicit targets, and packaging per target. One adapter executable may
 produce a raw asset, a canonical archive, or both; both representations must be
 byte-identical. Windows amd64 is verified as PE32+ and executed on a Windows
-runner. A named tap-owned Formula profile keeps nonmetadata Ruby outside source
+runner. Its native temporary directory is normalized once for Git Bash and
+reused for the sealed manifest, verifier executable, and downloaded assets;
+hosted Windows toolkit CI proves that handoff before the required Toolkit gate.
+A named tap-owned Formula profile keeps nonmetadata Ruby outside source
 and binds it to a reviewed tap template. The publisher first proves full current
 Formula equality with the current-metadata rendering, then renders only the two
 Darwin URLs and SHA-256 values from that same template.

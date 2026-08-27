@@ -73,6 +73,9 @@ checksums.
   mismatch` before Formula mutation.
 - Formula updates preserve every nonmetadata byte and change only the two URLs
   and two SHA-256 values after validating the supported metadata structure.
+- Native Windows verification normalizes the runner's native temporary path to
+  one absolute Git Bash path before manifest checks or executable invocation.
+  Missing/type/symlink/hash failures remain distinct and do not print values.
 - A tap-owned Formula profile cannot be rendered from source. Its profile name
   and service-enabled status remain in the equal source/tap manifest while the
   tap owns service, caveats, tests, comments, and formatting. Publication binds
