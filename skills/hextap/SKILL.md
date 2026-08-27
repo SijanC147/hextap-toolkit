@@ -4,7 +4,7 @@ description: "This skill should be used when onboarding a GitHub project to Hext
 compatibility: "Requires Homebrew and the brew hextap external command."
 license: MIT
 metadata:
-  hextap-skill-version: "1.1.0"
+  hextap-skill-version: "1.1.1"
 ---
 
 # Hextap

@@ -53,6 +53,7 @@ func Status(options Options) (StatusResult, error) {
 		entries = append(entries, StatusEntry{
 			State:            inspection.state,
 			Agent:            target.agent,
+			DiscoveredBy:     append([]string(nil), target.discoveredBy...),
 			Path:             inspection.absoluteDir,
 			InstalledVersion: installedVersion,
 			AvailableVersion: bundle.version,

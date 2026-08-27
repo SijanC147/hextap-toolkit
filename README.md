@@ -162,8 +162,10 @@ brew hextap skills status --agent cursor --scope project --project .
 ```
 
 Inventory defaults to every concrete location in the selected scope and reports
-the installed/available versions plus its safe recommendation. JSON is intended
-for agents and automation:
+the installed/available versions, physical target, discovering agents, and safe
+recommendation. JSON is intended for agents and automation; `discovered_by`
+distinguishes Cursor discovery of shared `.agents`/`.claude` copies from its
+optional native `.cursor` location:
 
 ```sh
 brew hextap skills status --scope user
