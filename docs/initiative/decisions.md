@@ -113,7 +113,9 @@ artifacts. Darwin targets remain required for Homebrew, Linux remains paired,
 and Windows amd64 is optional. One adapter invocation creates one executable;
 the toolkit derives declared raw/archive representations and verifies their
 identity. Windows executables must be PE32+ amd64 and pass native version/commit
-execution.
+execution. Windows runner-native temporary paths are converted once to absolute
+Git Bash paths before manifest verification and reused through native execution;
+a hosted `windows-2025` prerequisite gates the existing `Toolkit` CI context.
 
 Schema-2 Formula profiles are update-only: source/tap manifests carry the
 profile name and service-enabled status, but the tap owns service, caveats,

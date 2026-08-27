@@ -10,10 +10,59 @@ permissions:
   contents: read
 
 jobs:
+  windows-runner-temp:
+    name: Windows runner temp
+    runs-on: windows-2025
+    steps:
+      - name: Check out toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: go.mod
+
+      - name: Prove Git Bash runner temp handoff
+        shell: bash
+        run: |
+          normalized_runner_temp="$(scripts/normalize-runner-temp.sh "$RUNNER_OS" "$RUNNER_TEMP")"
+          mkdir "$normalized_runner_temp/validated-manifest"
+          validated_manifest="$normalized_runner_temp/validated-manifest/project-manifest.json"
+          cp examples/better-ccflare.json "$validated_manifest"
+          expected_sha256="$(sha256sum "$validated_manifest" | cut -d ' ' -f 1)"
+          scripts/verify-validated-manifest.sh "$validated_manifest" "$expected_sha256"
+          {
+            printf 'HEXTAP_RUNNER_TEMP=%s\n' "$normalized_runner_temp"
+            printf 'VALIDATED_MANIFEST=%s\n' "$validated_manifest"
+            printf 'EXPECTED_MANIFEST_SHA256=%s\n' "$expected_sha256"
+          } >> "$GITHUB_ENV"
+
+      - name: Execute through normalized Git Bash paths
+        shell: bash
+        run: |
+          scripts/verify-validated-manifest.sh \
+            "$VALIDATED_MANIFEST" "$EXPECTED_MANIFEST_SHA256"
+          go build -trimpath -o "$HEXTAP_RUNNER_TEMP/hextapctl.exe" ./cmd/hextapctl
+          "$HEXTAP_RUNNER_TEMP/hextapctl.exe" manifest validate --file "$VALIDATED_MANIFEST"
+
   verify:
     name: Toolkit
+    needs: windows-runner-temp
+    if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Require Windows runner temp proof
+        env:
+          WINDOWS_RUNNER_TEMP_RESULT: ${{ needs.windows-runner-temp.result }}
+        run: |
+          if [[ "$WINDOWS_RUNNER_TEMP_RESULT" != success ]]; then
+            echo "::error title=Windows runner temp::hosted proof did not succeed" >&2
+            exit 1
+          fi
+
       - name: Check out toolkit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

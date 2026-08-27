@@ -111,6 +111,46 @@ func TestReleaseWorkflowConsumesValidatedNativeMatrix(t *testing.T) {
 	assertNotContains(t, workflow, "RELEASE_LINUX:")
 }
 
+func TestNativeVerificationUsesNormalizedRunnerTempAndDiagnosesManifestFailures(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	nativeJob := textBetween(t, workflow, "  native-verify:\n", "\n  release:\n")
+	manifestStep := textBetween(t, nativeJob, "      - name: Verify validated manifest\n", "      - name: Download release assets by ID\n")
+	verifyStep := textBetween(t, nativeJob+"\n  release:\n", "      - name: Verify and execute native binary\n", "\n  release:\n")
+
+	assertContains(t, manifestStep, `normalized_runner_temp="$(toolkit/scripts/normalize-runner-temp.sh "$RUNNER_OS" "$RUNNER_TEMP")"`)
+	assertContains(t, manifestStep, `validated_manifest="$normalized_runner_temp/validated-manifest/project-manifest.json"`)
+	assertContains(t, manifestStep, `toolkit/scripts/verify-validated-manifest.sh \`)
+	assertContains(t, manifestStep, `"$validated_manifest" "$EXPECTED_MANIFEST_SHA256"`)
+	assertContains(t, manifestStep, `printf 'HEXTAP_RUNNER_TEMP=%s\n' "$normalized_runner_temp"`)
+	assertContains(t, manifestStep, `printf 'VALIDATED_MANIFEST=%s\n' "$validated_manifest"`)
+	assertContains(t, verifyStep, `hextapctl="$HEXTAP_RUNNER_TEMP/hextapctl"`)
+	assertContains(t, verifyStep, `--dir "$HEXTAP_RUNNER_TEMP/dist"`)
+	assertNotContains(t, verifyStep, `$RUNNER_TEMP/hextapctl`)
+	assertNotContains(t, verifyStep, `$RUNNER_TEMP/dist`)
+}
+
+func TestCIRequiresHostedWindowsRunnerTempProofBeforeToolkitGate(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/ci.yml")
+	windowsJob := textBetween(t, workflow, "  windows-runner-temp:\n", "\n  verify:\n")
+	verifyJob := textBetween(t, workflow+"\n  end-of-workflow:\n", "  verify:\n", "\n  end-of-workflow:\n")
+
+	assertContains(t, windowsJob, "name: Windows runner temp")
+	assertContains(t, windowsJob, "runs-on: windows-2025")
+	assertContains(t, windowsJob, `shell: bash`)
+	assertContains(t, windowsJob, `scripts/normalize-runner-temp.sh "$RUNNER_OS" "$RUNNER_TEMP"`)
+	assertContains(t, windowsJob, `scripts/verify-validated-manifest.sh "$validated_manifest" "$expected_sha256"`)
+	assertContains(t, windowsJob, `scripts/verify-validated-manifest.sh \`)
+	assertContains(t, windowsJob, `printf 'HEXTAP_RUNNER_TEMP=%s\n' "$normalized_runner_temp"`)
+	assertContains(t, windowsJob, `printf 'VALIDATED_MANIFEST=%s\n' "$validated_manifest"`)
+	assertContains(t, windowsJob, `go build -trimpath -o "$HEXTAP_RUNNER_TEMP/hextapctl.exe" ./cmd/hextapctl`)
+	assertContains(t, windowsJob, `"$HEXTAP_RUNNER_TEMP/hextapctl.exe" manifest validate --file "$VALIDATED_MANIFEST"`)
+	assertContains(t, verifyJob, "needs: windows-runner-temp")
+	assertContains(t, verifyJob, "if: always()")
+	assertContains(t, verifyJob, `WINDOWS_RUNNER_TEMP_RESULT: ${{ needs.windows-runner-temp.result }}`)
+	assertContains(t, verifyJob, `[[ "$WINDOWS_RUNNER_TEMP_RESULT" != success ]]`)
+	assertContains(t, verifyJob, `::error title=Windows runner temp::hosted proof did not succeed`)
+}
+
 func TestReleaseWorkflowRunsPinnedBunProfileAndPreservesTaggedSource(t *testing.T) {
 	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
 
