@@ -47,6 +47,58 @@ func TestUpdateChangesOnlyReleaseMetadata(t *testing.T) {
 	}
 }
 
+func TestUpdateTapOwnedProfilePreservesServiceCaveatsTestsAndFormatting(t *testing.T) {
+	project := loadProfileManifest(t)
+	original := []byte(`class BetterCcflare < Formula
+  desc "Claude API proxy with intelligent load balancing across multiple accounts"
+  homepage "https://github.com/SijanC147/better-ccflare"
+  license "MIT"
+
+  if Hardware::CPU.arm?
+    url "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz"
+    sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  else
+    url "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-x86_64.tar.gz"
+    sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  end
+
+  # Tap-owned install and service contract.
+  def install
+    bin.install "better-ccflare"
+  end
+
+  service do
+    run [opt_bin/"better-ccflare", "serve"]
+    keep_alive successful_exit: false, crashed: true
+    environment_variables BETTER_CCFLARE_LOG_DIR: var/"log/better-ccflare"
+  end
+
+  def caveats
+    <<~EOS
+      Configuration remains tap-owned.
+    EOS
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/better-ccflare --version")
+  end
+end
+`)
+	updated, result, err := Update(original, project, "3.8.2", newArmSHA, newAmdSHA)
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	want := strings.ReplaceAll(string(original), "/v3.8.1/", "/v3.8.2/")
+	want = strings.Replace(want, strings.Repeat("a", 64), newArmSHA, 1)
+	want = strings.Replace(want, strings.Repeat("b", 64), newAmdSHA, 1)
+	if string(updated) != want {
+		t.Fatalf("updated Formula changed nonmetadata bytes:\n%s", updated)
+	}
+	if !result.Changed || result.PreviousVersion != "3.8.1" || result.Version != "3.8.2" {
+		t.Fatalf("Update() result = %#v", result)
+	}
+}
+
 func stripReleaseMetadata(value string) string {
 	metadata := regexp.MustCompile(`(?m)^(\s*)(url|sha256) "[^"]*"(\r?\n|$)`)
 	return metadata.ReplaceAllString(value, "${1}${2} <metadata>${3}")

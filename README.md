@@ -67,9 +67,13 @@ brew hextap onboard \
 Use `--dry-run` to print the complete `CREATE` / `UNCHANGED` / `VALIDATED`
 plan without writing. Onboarding preflights every target before its first
 write and never replaces an existing managed file or valid custom adapter.
-It creates the strict manifest, fixed Go build adapter, pinned reusable
+For a new Go project it creates the strict schema-1 manifest, fixed Go build adapter, pinned reusable
 workflow caller, exact tap-registration payload, two reviewable ruleset API
 bodies, and `.hextap/SETUP.md` with the remaining owner-controlled steps.
+For a Bun/TypeScript project, add and review an authoritative schema-2 manifest
+and executable project-owned adapter first; onboarding preserves both and
+creates the same managed caller, registration, ruleset, and setup artifacts
+without requiring fake Go package or linker-symbol metadata.
 An authoritative existing manifest is preserved byte-for-byte, including a
 valid document without a trailing newline, and a custom adapter may contain
 arbitrary executable bytes. Final-newline checks apply only to
@@ -95,7 +99,9 @@ brew hextap doctor --project .
 brew hextap doctor --project . --online
 ```
 
-Default doctor never executes the project adapter and never calls GitHub.
+Default doctor never executes the project adapter and never calls GitHub. It
+requires `go` for schema 1 and the pinned profile runtime (`bun` today) for
+schema 2.
 Online doctor adds bounded, read-only `gh` queries for authentication, `main`,
 immutable releases, the required secret name, owned active rulesets, stable
 toolkit provenance, and the paired tap registration plus Formula. Rulesets
@@ -107,9 +113,12 @@ value or repairs remote state. Remote Formula validation fails closed: after
 an optional blank/comment/block-comment prelude, the first semantic Ruby line
 must be the exact registered top-level Formula class declaration.
 Every `gh` call is explicitly pinned to `github.com`; `GH_HOST` cannot redirect
-doctor or the generated setup commands. Readiness also requires the entire
-Formula to equal the deterministic manifest rendering for its validated
-current stable URLs and SHA-256 metadata, not merely a matching class line.
+doctor or the generated setup commands. For schema 1, readiness also requires
+the entire Formula to equal the deterministic manifest rendering for its
+validated current stable URLs and SHA-256 metadata, not merely a matching class
+line. For a schema-2 tap-owned profile, doctor validates the class and exact
+architecture metadata structure; the tap's own whole-Formula/profile gate
+remains authoritative for nonmetadata bytes.
 
 ## Agent skill installation
 
@@ -254,7 +263,7 @@ changes another Formula, proxy, certificate, port, or runtime configuration.
 ## Managed reusable workflow
 
 Generated callers pin the full commit SHA of an exact stable toolkit release;
-they never call mutable `@main`. Within the called workflow, all five toolkit
+they never call mutable `@main`. Within the called workflow, all six toolkit
 checkouts use GitHub's server-resolved `job.workflow_sha` so YAML, Go code, and
 publisher scripts come from one commit.
 
@@ -262,8 +271,10 @@ The validate job resolves and detaches the requested source tag before reading
 the tracked manifest. That exact validated file is uploaded once, identified by
 artifact ID, and bound to an explicit content SHA-256. Build, native verify,
 release, and Homebrew jobs download and recheck the same bytes. Source quality
-is a hard publication dependency, `release.linux` controls the native matrix,
-and per-repository release runs use a non-canceling queued concurrency group.
+is a hard publication dependency. Schema 1 derives the original Darwin/Linux
+matrix from `release.linux`; schema 2 exports its validated matrix, including
+optional Windows amd64, from the sealed manifest. Per-repository release runs
+use a non-canceling queued concurrency group.
 
 Full mode accepts stable and prerelease tags and produces an exact immutable
 GitHub release. Only stable releases may enter Homebrew. `homebrew-only` is a
@@ -299,29 +310,34 @@ immutable-release setting is created by this source change.
 
 ## Project manifest schema
 
-Every project is described by one strict JSON document. The current schema is
-`1`; duplicate object keys at any nesting level, mis-cased/case-fold aliases,
+Every project is described by one strict JSON document. Schema `1` is the
+unchanged Go/Darwin/Linux contract; schema `2` adds a pinned Bun profile,
+project-owned direct argv commands, explicit multi-artifact targets, optional
+Windows amd64, and a tap-owned Formula profile. Duplicate object keys at any nesting level, mis-cased/case-fold aliases,
 invalid or lossy Unicode, unknown fields, missing required fields, multiple
 JSON documents, unsafe paths, and values that could escape generated Ruby are
 rejected. Filesystem basenames/components are limited to 255 ASCII bytes,
 relative paths to 1024 bytes, and formula names reserve enough room for every
 generated Darwin/Linux archive and tap-registration suffix.
 
-The canonical example is
-[`examples/claude-rc-proxy.json`](examples/claude-rc-proxy.json). The checked-in
+The canonical examples are the legacy Go
+[`examples/claude-rc-proxy.json`](examples/claude-rc-proxy.json) and Bun profile
+[`examples/better-ccflare.json`](examples/better-ccflare.json). The checked-in
 [Draft 2020-12 JSON Schema](schema/project-manifest.schema.json) provides a
 machine-readable contract for editors and other tooling without adding a
 runtime dependency. The checked-in standard-library conformance suite runs one
 shared valid/invalid corpus through both the schema evaluator and
 `manifest.Parse`, and rejects schema keywords the evaluator does not implement.
-The Go validator remains authoritative. JSON Schema cannot express five
-schema-1/input checks exactly: `formula.class` derived from `formula.name`,
+The Go validator remains authoritative. JSON Schema cannot express every
+cross-field/input check exactly: `formula.class` derived from `formula.name`,
 distinct arm64/amd64 asset values, the caveats rule that only `{{home}}` and
 `{{var}}` placeholders are accepted, and the raw-input requirement that a file
 contain no duplicate object keys and exactly one JSON document with no
-trailing value. Call `hextapctl manifest validate` before rendering or
+trailing value. Schema 2 additionally requires paired Linux targets, Darwin
+archive equality with `formula.assets`, unique asset names, frozen Bun install,
+and a `.exe` Windows binary. Call `hextapctl manifest validate` before rendering or
 publishing even when an editor reports
-that the JSON Schema is valid. The schema has this stable shape:
+that the JSON Schema is valid. Schema 1 retains this stable shape:
 
 ```json
 {
@@ -367,11 +383,21 @@ that the JSON Schema is valid. The schema has this stable shape:
 }
 ```
 
+Schema 2 keeps `formula` unchanged and replaces `release.linux` with a profile
+and explicit target map. Commands are named argv arrays executed directly,
+never shell strings. Each target declares a raw `binary`, an `archive`, or both;
+`archive_contents` must explicitly select `binary` (single executable) or
+`bundle` (executable plus `LICENSE` and `README.md`). Darwin arm64/amd64 are
+required, Linux arm64/amd64 are optional as a pair, and Windows amd64 is an
+optional raw `.exe`. `homebrew.formula_profile` names the tap-owned Formula
+template and `service_enabled` records service status without copying its Ruby
+service, caveats, tests, comments, or formatting into source metadata.
+
 ### Field contract
 
 | Field | Contract |
 |---|---|
-| `schema` | Must be exactly `1`. |
+| `schema` | `1` selects the legacy Go target contract; `2` selects the Bun/profile target contract. |
 | `formula.name` | Lowercase kebab-case name whose segments each begin with a letter, so class derivation is unambiguous. |
 | `formula.class` | Must exactly equal the PascalCase class derived from `formula.name`; `claude-rc-proxy` therefore requires `ClaudeRcProxy`. |
 | `formula.description` | Required, one line, and safe for a Ruby string. All Ruby interpolation introducers (`#{`, `#@`, and `#$`) are rejected. |
@@ -382,6 +408,9 @@ that the JSON Schema is valid. The schema has this stable shape:
 | `formula.assets` | Distinct safe `.tar.gz` basenames for Darwin arm64 and amd64. |
 | `release.build_script` | Clean repository-relative path; absolute paths, traversal, backslashes, and unsafe path components are rejected. |
 | `release.linux` | Required boolean recording whether the future release workflow should also build Linux archives. |
+| `release.profile` | Schema 2 only. Requires `runtime: bun`, a pinned stable `runtime_version`, exact frozen-lock install argv, named quality argv, and named build-preparation argv. |
+| `release.targets` | Schema 2 only. Requires Darwin arm64/amd64; permits paired Linux arm64/amd64 and optional Windows amd64. Asset basenames must be globally unique after case-folding and may not use reserved `SHA256SUMS`. |
+| `target.binary` / `archive` | Explicit raw executable and/or canonical `.tar.gz` output derived from one adapter invocation. `archive_contents` is required with an archive. |
 | `homebrew.macos_only` | Must be `true` in schema 1 because its Formula contract defines only Darwin assets. Rendering always adds `depends_on :macos`. |
 | `homebrew.test_args` | One or more shell-safe arguments used by the Formula test. |
 | `homebrew.service` | Optional. Use `null`, omit it, or set only `{"enabled": false}` to disable service generation. |
@@ -391,6 +420,7 @@ that the JSON Schema is valid. The schema has this stable shape:
 | `service.environment` | Required object for an enabled service; keys must be uppercase environment identifiers and values must be single-line Ruby-safe strings with no `#{`, `#@`, or `#$` interpolation. May be empty. Output is sorted by key. |
 | `service.log_path` / `error_log_path` | Clean paths relative to Homebrew `var`; never absolute and never traversal paths. |
 | `homebrew.caveats` | Safe heredoc text. `{{home}}` and `{{var}}` are the only accepted placeholders and render to fixed toolkit-owned expressions. Other placeholders, literal `#{`/`#@`/`#$` interpolation, carriage returns, and an `EOS` terminator line are rejected. |
+| `homebrew.formula_profile` / `service_enabled` | Schema 2 only. The profile must equal `formula.name`; the tap owns all nonmetadata Formula bytes. Source publication may update only the two Darwin URLs and SHA-256 values and cannot render this Formula. |
 
 Stable versions accepted by Formula commands are strict `X.Y.Z` SemVer:
 
@@ -447,6 +477,9 @@ arm64_asset
 amd64_asset
 build_script
 linux
+runtime
+native_matrix
+runtime_version # schema 2 only
 ```
 
 `--github-output` must name the existing regular, non-symlink file created by
@@ -477,7 +510,38 @@ provided, the command appends `tag`, normalized `version`, `stable`,
 `prerelease`, and `mode`. Omitting it skips the output-file append; either form
 prints one deterministic summary line to standard output.
 
-### Build deterministic release archives
+### Run project-owned release profile commands
+
+```sh
+hextapctl release profile \
+  --manifest /path/to/project/.hextap.json \
+  --source /path/to/project \
+  --phase quality
+```
+
+Build preparation uses an explicit cache:
+
+```sh
+mkdir /path/to/private-bun-runtime-cache
+BUN_INSTALL_CACHE_DIR=/path/to/private-bun-runtime-cache \
+  hextapctl release profile \
+    --manifest /path/to/project/.hextap.json \
+    --source /path/to/project \
+    --phase build
+```
+
+Schema 2 exposes `quality` and `build` phases. Both run the pinned-runtime
+install argv first after requiring the actual Bun binary to equal
+`runtime_version`; `quality` then runs the ordered quality commands. `build`
+requires an existing real directory in `BUN_INSTALL_CACHE_DIR`, compiles one
+private probe for every declared target to populate that dedicated runtime
+cache, then runs the ordered preparation commands. Arguments are passed
+directly to the executable with no shell evaluation and a
+Bun/cache/process allowlist that excludes ambient credentials. The reusable workflow runs a
+tracked-source diff after quality and again after all adapter builds, so lock,
+generated dashboard/worker, or other tracked-source drift fails the tag.
+
+### Build deterministic release assets
 
 ```sh
 mkdir /path/to/project/dist
@@ -494,15 +558,16 @@ output directory must already exist and be empty. The manifest must resolve
 inside the source tree. The source must contain regular `LICENSE` and
 `README.md` files and the manifest's executable `release.build_script`.
 
-The builder invokes the adapter once for each Darwin target and, when
-`release.linux` is true, once for each Linux target. It packages the resulting
-binary with `LICENSE` and `README.md` into the declared `.tar.gz` asset names,
-then writes a sorted `SHA256SUMS`. Tar and gzip metadata, member order, modes,
-owners, and timestamps are canonical, so identical adapter output produces
-byte-identical release files. A failed target leaves the output directory
-empty.
+For schema 1, the builder invokes the adapter once for each Darwin target and,
+when `release.linux` is true, once for each Linux target, preserving the
+four-target bundle archives. For schema 2 it invokes the adapter once per
+declared target and derives every raw/archive asset for that target from the
+same executable bytes. It then writes a sorted `SHA256SUMS`. Tar and gzip
+metadata, member order, modes, owners, and timestamps are canonical, so
+identical adapter output produces byte-identical release files. A failed target
+leaves the output directory empty.
 
-### Verify release archives
+### Verify release assets
 
 ```sh
 hextapctl release verify \
@@ -512,12 +577,14 @@ hextapctl release verify \
   --dir /path/to/project/dist
 ```
 
-Verification derives the exact archive set from the manifest, checks the
+Verification derives the exact asset set from the manifest, checks the
 strict sorted `SHA256SUMS` file, and validates every gzip/tar header, member,
 mode, owner, timestamp, size, and executable format. Darwin archives must
-contain a single-architecture Mach-O executable; Linux archives must contain
-a 64-bit x86_64 or aarch64 ELF executable. The distribution directory is
-read-only to the verifier. On a matching host, an optional target check also
+contain a single-architecture Mach-O executable; Linux assets must contain a
+64-bit x86_64 or aarch64 ELF executable; Windows amd64 must be a PE32+
+executable image whose entry lies in an executable section. Raw and archive
+assets for one target must contain byte-identical executables. The distribution
+directory is read-only to the verifier. On a matching host, an optional target check also
 extracts only that target's binary into a private temporary directory and
 requires its exact version output:
 
@@ -527,8 +594,11 @@ hextapctl release verify \
   --version 1.2.3 \
   --commit 0123456789abcdef0123456789abcdef01234567 \
   --dir /path/to/project/dist \
---execute-target darwin-arm64
+  --execute-target darwin-arm64
 ```
+
+Windows native execution normalizes only a single terminal `\r\n` to `\n`;
+all other stdout bytes, empty stderr, version, and commit remain exact.
 
 The verification runner executes from a private temporary working directory
 with a minimal environment. Stdout and stderr are bounded live in memory to
@@ -545,25 +615,32 @@ toolchain/OS allowlist from the parent plus exactly these Hextap variables:
 
 | Variable | Meaning |
 |---|---|
-| `HEXTAP_TARGET_OS` | `darwin` or `linux`. |
+| `HEXTAP_TARGET_OS` | `darwin`, `linux`, or optional `windows`. |
 | `HEXTAP_TARGET_ARCH` | `arm64` or `amd64`. |
 | `HEXTAP_OUTPUT` | Absolute path at which the adapter must write the target binary. |
 | `HEXTAP_VERSION` | Validated normalized SemVer without a leading `v`. |
-| `HEXTAP_COMMIT` | Validated lowercase source commit, 7–64 hexadecimal characters. |
+| `HEXTAP_COMMIT` | Validated lowercase source commit. Schema 1 accepts 7–64 hexadecimal characters; schema 2 requires the full 40- or 64-character identity. |
 
 The inherited allowlist is limited to compiler/toolchain and basic process
-variables: `CC`, `CGO_ENABLED`, `CXX`, `DEVELOPER_DIR`, `GOCACHE`, `GOENV`,
+variables: `BUN_INSTALL_CACHE_DIR`, `CC`, `CGO_ENABLED`, `CXX`, `DEVELOPER_DIR`, `GOCACHE`, `GOENV`,
 `GOMODCACHE`, `GOPATH`, `GOPROXY`, `GOROOT`, `GOSUMDB`, `GOTOOLCHAIN`, `HOME`,
 `LANG`, `LC_ALL`, `LOGNAME`, `PATH`, `SDKROOT`, `SHELL`, `SYSTEMROOT`, `TEMP`,
 `TERM`, `TMP`, `TMPDIR`, `TZ`, and `USER`. Other parent variables, including
 credentials, are not inherited.
 
-For each invocation, the adapter must create exactly the file named by
+For Windows the output basename ends in `.exe`. For each invocation, the adapter must create exactly the file named by
 `HEXTAP_OUTPUT` and no other entry in its isolated staging directory. That file
 must be a regular, non-symlink, single-link binary no larger than 256 MiB. The
 toolkit normalizes its archived mode to `0755`; the adapter must embed
-`HEXTAP_VERSION` and `HEXTAP_COMMIT` itself when the project exposes build
-metadata. Each adapter invocation has a 15-minute timeout.
+`HEXTAP_VERSION` and `HEXTAP_COMMIT` and make `--version` print exactly
+`BINARY VERSION (commit COMMIT)`. Each adapter invocation has a 15-minute timeout.
+Schema-2 preparation prefetches every pinned Bun cross-target runtime into the
+dedicated cache before adapter execution. The reusable Ubuntu build then runs
+`hextapctl release build` as the original runner user inside a root-created
+network namespace, so the adapter has no network interface while retaining
+access to only the warmed cache. Toolkit PR CI proves that an empty cache fails
+inside this boundary and the warmed five-target matrix succeeds. Project checks
+remain responsible for deterministic application resources and source cleanliness.
 Adapters must not daemonize or intentionally leave child processes behind;
 they must finish all work before the adapter process exits. On timeout, the
 toolkit kills only the adapter leader and waits for it; child-process cleanup
@@ -644,7 +721,7 @@ scripts/check-actionlint.sh
 GitHub currently documents `concurrency.queue: max` and the reusable-job
 `job.workflow_sha` identity fields. Actionlint 1.7.12 predates both. The checker
 script does not suppress diagnostics broadly: for the pinned 1.7.12 version it
-requires a nonzero result containing exactly the reviewed one queue plus five
+requires a nonzero result containing exactly the reviewed one queue plus six
 workflow-SHA schema-lag diagnostics, and fails on a clean/no-op, missing,
 additional, changed, or differently versioned result. A future Actionlint
 upgrade must update that expectation explicitly.

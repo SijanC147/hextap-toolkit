@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -264,6 +265,23 @@ func validateBuildSmoke(root string, project manifest.Manifest) error {
 	if err := os.Chmod(temporary, 0o700); err != nil {
 		return fmt.Errorf("secure build smoke directory: %w", err)
 	}
+	bunCacheDir := ""
+	if project.Schema == manifest.ProfileSchema {
+		bunCacheDir = filepath.Join(temporary, "bun-runtime-cache")
+		if err := os.Mkdir(bunCacheDir, 0o700); err != nil {
+			return fmt.Errorf("create private Bun runtime cache: %w", err)
+		}
+		if err := release.RunProfile(release.ProfileOptions{
+			ManifestPath: filepath.Join(root, manifestPath),
+			SourceDir:    root,
+			Phase:        release.ProfileBuild,
+			BunCacheDir:  bunCacheDir,
+			Stdout:       io.Discard,
+			Stderr:       io.Discard,
+		}); err != nil {
+			return fmt.Errorf("profile build preparation: %w", err)
+		}
+	}
 	output := filepath.Join(temporary, "dist")
 	if err := os.Mkdir(output, 0o700); err != nil {
 		return fmt.Errorf("create build smoke output: %w", err)
@@ -275,6 +293,7 @@ func validateBuildSmoke(root string, project manifest.Manifest) error {
 		Commit:       smokeCommit,
 		SourceDir:    root,
 		OutputDir:    output,
+		BunCacheDir:  bunCacheDir,
 	}); err != nil {
 		return fmt.Errorf("adapter build smoke: %w", err)
 	}
@@ -292,10 +311,17 @@ func validateBuildSmoke(root string, project manifest.Manifest) error {
 }
 
 func hostDeclaredTarget(project manifest.Manifest) string {
+	if project.Schema == manifest.ProfileSchema {
+		key := runtime.GOOS + "_" + runtime.GOARCH
+		if _, exists := project.Release.Targets[key]; exists {
+			return runtime.GOOS + "-" + runtime.GOARCH
+		}
+		return ""
+	}
 	if runtime.GOOS == "darwin" && (runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64") {
 		return runtime.GOOS + "-" + runtime.GOARCH
 	}
-	if runtime.GOOS == "linux" && project.Release.Linux && (runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64") {
+	if runtime.GOOS == "linux" && project.Release.LinuxEnabled() && (runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64") {
 		return runtime.GOOS + "-" + runtime.GOARCH
 	}
 	return ""

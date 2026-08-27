@@ -42,7 +42,7 @@ func TestToolkitSelfManifestContract(t *testing.T) {
 	if got, want := project.Formula.Assets.DarwinAMD64, "hextap-darwin-amd64.tar.gz"; got != want {
 		t.Fatalf("Darwin amd64 asset = %q, want %q", got, want)
 	}
-	if project.Release.BuildScript != "scripts/hextap-build" || !project.Release.Linux {
+	if project.Release.BuildScript != "scripts/hextap-build" || !project.Release.LinuxEnabled() {
 		t.Fatalf("release contract = %#v", project.Release)
 	}
 	if len(project.Homebrew.TestArgs) != 1 || project.Homebrew.TestArgs[0] != "--version" {

@@ -19,6 +19,9 @@ func Render(project manifest.Manifest, version, arm64SHA, amd64SHA string) ([]by
 	if err := project.Validate(); err != nil {
 		return nil, err
 	}
+	if project.Homebrew.FormulaProfile != "" {
+		return nil, errors.New("tap-owned Formula profiles cannot be rendered from a source manifest")
+	}
 	if err := validateReleaseMetadata(version, arm64SHA, amd64SHA); err != nil {
 		return nil, err
 	}

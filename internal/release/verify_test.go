@@ -77,6 +77,72 @@ func buildRealVerifyFixture(t *testing.T, linux bool) (manifestPath, output stri
 	return manifestPath, output
 }
 
+func buildRealProfileVerifyFixture(t *testing.T) (manifestPath, output string) {
+	t.Helper()
+	source := t.TempDir()
+	for name, contents := range map[string]string{
+		".hextap.json": profileBuildManifest,
+		"LICENSE":      "license\n",
+		"README.md":    "readme\n",
+		"go.mod":       "module example.com/profile-verify\n\ngo 1.26\n",
+		"main.go": `package main
+
+import "fmt"
+
+var version = "dev"
+var commit = "unknown"
+
+func main() { fmt.Printf("better-ccflare %s (commit %s)\n", version, commit) }
+`,
+		"scripts/hextap-build": `#!/bin/sh
+set -eu
+CGO_ENABLED=0 GOOS="$HEXTAP_TARGET_OS" GOARCH="$HEXTAP_TARGET_ARCH" go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=$HEXTAP_VERSION -X main.commit=$HEXTAP_COMMIT" -o "$HEXTAP_OUTPUT" ./main.go
+`,
+	} {
+		path := filepath.Join(source, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mode := os.FileMode(0o600)
+		if name == "scripts/hextap-build" {
+			mode = 0o700
+		}
+		if err := os.WriteFile(path, []byte(contents), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output = filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath = filepath.Join(source, ".hextap.json")
+	if _, err := Build(buildOptions(source, manifestPath, output)); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	return manifestPath, output
+}
+
+func TestVerifyProfileRawArchivesAndWindowsPE(t *testing.T) {
+	manifestPath, output := buildRealProfileVerifyFixture(t)
+	executeTarget := ""
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
+		executeTarget = runtime.GOOS + "-" + runtime.GOARCH
+	}
+	result, err := Verify(VerifyOptions{
+		ManifestPath:  manifestPath,
+		Version:       "1.2.3",
+		Commit:        testCommit,
+		Directory:     output,
+		ExecuteTarget: executeTarget,
+	})
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if len(result.Assets) != 7 || result.ExecutedTarget != executeTarget {
+		t.Fatalf("Verify() = %#v", result)
+	}
+}
+
 func TestVerifyAcceptsBuildOutputAndRejectsDirectoryMutations(t *testing.T) {
 	manifestPath, output := buildRealVerifyFixture(t, false)
 	options := VerifyOptions{ManifestPath: manifestPath, Version: "1.2.3", Commit: testCommit, Directory: output}
@@ -352,7 +418,7 @@ func TestVerifyRejectsTarPaddingByCanonicalByteComparison(t *testing.T) {
 func TestExecuteUsesPrivateWorkingDirectory(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "cwd")
 	script := []byte("#!/bin/sh\npwd > " + marker + "\nprintf 'tool 1.2.3 (commit " + testCommit + ")\\n'\n")
-	if err := executeVerifiedBinaryWithTimeout("tool", "1.2.3", testCommit, "tool.tar.gz", script, time.Second); err != nil {
+	if err := executeVerifiedBinaryWithTimeout("tool", "tool", "1.2.3", testCommit, "tool.tar.gz", script, time.Second); err != nil {
 		t.Fatalf("executeVerifiedBinaryWithTimeout() error = %v", err)
 	}
 	data, err := os.ReadFile(marker)
@@ -371,10 +437,39 @@ func TestExecuteUsesPrivateWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestExecuteSeparatesPlatformFilenameFromVersionIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix script fixture")
+	}
+	script := []byte("#!/bin/sh\nprintf 'tool 1.2.3 (commit " + testCommit + ")\\n'\n")
+	if err := executeVerifiedBinaryWithTimeout("tool.exe", "tool", "1.2.3", testCommit, "tool.exe", script, time.Second); err != nil {
+		t.Fatalf("executeVerifiedBinaryWithTimeout() error = %v", err)
+	}
+}
+
+func TestNormalizeVersionOutputAllowsOnlyWindowsTerminalCRLF(t *testing.T) {
+	if got := string(normalizeVersionOutput("windows", []byte("tool 1.2.3\r\n"))); got != "tool 1.2.3\n" {
+		t.Fatalf("normalized output = %q", got)
+	}
+	for _, test := range []struct {
+		os    string
+		input string
+		want  string
+	}{
+		{"linux", "tool 1.2.3\r\n", "tool 1.2.3\r\n"},
+		{"windows", "tool\r\n1.2.3\r\n", "tool\r\n1.2.3\n"},
+		{"windows", "tool 1.2.3\n\n", "tool 1.2.3\n\n"},
+	} {
+		if got := string(normalizeVersionOutput(test.os, []byte(test.input))); got != test.want {
+			t.Fatalf("normalizeVersionOutput(%q, %q) = %q", test.os, test.input, got)
+		}
+	}
+}
+
 func TestExecuteTimeoutDoesNotWaitForDescendantOutputDescriptor(t *testing.T) {
 	script := []byte("#!/bin/sh\n(sleep 1) &\nsleep 5\n")
 	started := time.Now()
-	err := executeVerifiedBinaryWithTimeout("tool", "1.2.3", testCommit, "tool.tar.gz", script, 100*time.Millisecond)
+	err := executeVerifiedBinaryWithTimeout("tool", "tool", "1.2.3", testCommit, "tool.tar.gz", script, 100*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("execute timeout error = %v", err)
 	}
@@ -386,7 +481,7 @@ func TestExecuteTimeoutDoesNotWaitForDescendantOutputDescriptor(t *testing.T) {
 func TestExecuteStopsAtLiveOutputLimit(t *testing.T) {
 	script := []byte("#!/bin/sh\nyes x | head -c 200000\nsleep 2\n")
 	started := time.Now()
-	err := executeVerifiedBinaryWithTimeout("tool", "1.2.3", testCommit, "tool.tar.gz", script, 5*time.Second)
+	err := executeVerifiedBinaryWithTimeout("tool", "tool", "1.2.3", testCommit, "tool.tar.gz", script, 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "output limit") {
 		t.Fatalf("output limit error = %v", err)
 	}

@@ -46,6 +46,196 @@ func writeGoProject(t *testing.T) string {
 	return root
 }
 
+func writeBunProfileProject(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	manifestData, err := os.ReadFile(filepath.Join("..", "..", "examples", "better-ccflare.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		".hextap.json": string(manifestData),
+		"package.json": `{"name":"better-ccflare","scripts":{"typecheck":"tsc --noEmit","test":"bun test","build:dashboard":"bun run dashboard"}}`,
+		"bun.lock":     "lockfile\n",
+		"go.mod":       "module example.com/bun-profile-smoke\n\ngo 1.26\n",
+		"main.go": `package main
+
+import "fmt"
+
+var version = "dev"
+var commit = "unknown"
+
+func main() { fmt.Printf("better-ccflare %s (commit %s)\n", version, commit) }
+`,
+		"LICENSE":   "MIT License\n",
+		"README.md": "# Better CCFlare\n",
+		"scripts/hextap-build": `#!/bin/sh
+set -eu
+CGO_ENABLED=0 GOOS="$HEXTAP_TARGET_OS" GOARCH="$HEXTAP_TARGET_ARCH" go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=$HEXTAP_VERSION -X main.commit=$HEXTAP_COMMIT" -o "$HEXTAP_OUTPUT" ./main.go
+`,
+	}
+	for name, contents := range files {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mode := os.FileMode(0o644)
+		if name == "scripts/hextap-build" {
+			mode = 0o755
+		}
+		if err := os.WriteFile(path, []byte(contents), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"remote", "add", "origin", "git@github.com:SijanC147/better-ccflare.git"},
+	} {
+		command := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	return root
+}
+
+func TestBunProfileBuildValidationRunsInstallAndPrepare(t *testing.T) {
+	root := writeBunProfileProject(t)
+	if _, err := Onboard(Options{
+		Project:        root,
+		ToolkitVersion: "v1.2.3",
+		ToolkitSHA:     testToolkitSHA,
+		RequiredChecks: []string{"Bun and release tooling", "Hextap release contract"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "bun.log")
+	if err := os.WriteFile(filepath.Join(bin, "bun"), []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$(dirname "$0")/bun.log"
+if [ "${1:-}" = --version ]; then
+  printf '1.3.14\n'
+  exit 0
+fi
+if [ "${1:-}" = build ]; then
+  output=""
+  for argument in "$@"; do
+    case "$argument" in
+      --outfile=*) output="${argument#--outfile=}" ;;
+    esac
+  done
+  [ -n "$output" ]
+  mkdir -p "$(dirname "$output")"
+  printf 'prefetch\n' > "$output"
+  chmod 755 "$output"
+fi
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	previousCache, hadCache := os.LookupEnv("BUN_INSTALL_CACHE_DIR")
+	if err := os.Unsetenv("BUN_INSTALL_CACHE_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadCache {
+			_ = os.Setenv("BUN_INSTALL_CACHE_DIR", previousCache)
+		} else {
+			_ = os.Unsetenv("BUN_INSTALL_CACHE_DIR")
+		}
+	})
+	result, err := Validate(ValidateOptions{Project: root, Build: true})
+	if err != nil {
+		t.Fatalf("Validate(build) error = %v", err)
+	}
+	if !result.BuildVerified {
+		t.Fatal("build smoke was not reported as verified")
+	}
+	if _, exists := os.LookupEnv("BUN_INSTALL_CACHE_DIR"); exists {
+		t.Fatal("schema-2 build validation did not restore the absent Bun cache environment")
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	if !strings.HasPrefix(log, "--version\ninstall --frozen-lockfile\n") || !strings.HasSuffix(log, "run build:dashboard\n") {
+		t.Fatalf("Bun profile log = %q", log)
+	}
+	for _, target := range []string{"bun-darwin-arm64", "bun-darwin-x64", "bun-linux-arm64", "bun-linux-x64", "bun-windows-x64"} {
+		if !strings.Contains(log, "--target="+target) {
+			t.Errorf("Bun profile log lacks %s: %q", target, log)
+		}
+	}
+}
+
+func TestBunProfileOnboardPreservesAdapterAndDoctorRequiresBunNotGo(t *testing.T) {
+	root := writeBunProfileProject(t)
+	adapterPath := filepath.Join(root, "scripts", "hextap-build")
+	adapterBefore, err := os.ReadFile(adapterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		Project:        root,
+		ToolkitVersion: "v1.2.3",
+		ToolkitSHA:     testToolkitSHA,
+		RequiredChecks: []string{"Bun and release tooling", "Hextap release contract"},
+	}
+	legacyFlags := options
+	legacyFlags.Linux = false
+	legacyFlags.LinuxSet = true
+	if _, err := Onboard(legacyFlags); err == nil || !strings.Contains(err.Error(), "schema 1 generation flag") {
+		t.Fatalf("Onboard(schema 2 with --linux=false) error = %v", err)
+	}
+	goFlags := options
+	goFlags.GoPackage = "."
+	goFlags.GoPackageSet = true
+	if _, err := Onboard(goFlags); err == nil || !strings.Contains(err.Error(), "Go adapter generation flags") {
+		t.Fatalf("Onboard(schema 2 with --go-package) error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, workflowPath)); !os.IsNotExist(err) {
+		t.Fatalf("conflicting schema-1 flag wrote managed workflow: %v", err)
+	}
+	if _, err := Onboard(options); err != nil {
+		t.Fatalf("Onboard() error = %v", err)
+	}
+	if _, err := Validate(ValidateOptions{Project: root}); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	adapterAfter, err := os.ReadFile(adapterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(adapterAfter, adapterBefore) {
+		t.Fatal("custom Bun adapter changed during onboarding")
+	}
+
+	toolDir := t.TempDir()
+	for _, name := range []string{"git", "gh"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("LookPath(%s): %v", name, err)
+		}
+		if err := os.Symlink(path, filepath.Join(toolDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "bun"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", toolDir)
+	doctor, err := Doctor(DoctorOptions{Project: root})
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+	joined := strings.Join(doctor.Checks, "\n")
+	if !strings.Contains(joined, "tool bun") || strings.Contains(joined, "tool go") {
+		t.Fatalf("doctor checks = %v", doctor.Checks)
+	}
+}
+
 func TestGeneratedAdapterBuildsAndVerifiesPrerelease(t *testing.T) {
 	project := writeGoProject(t)
 	if _, err := Onboard(validOptions(project)); err != nil {

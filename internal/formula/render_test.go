@@ -27,6 +27,25 @@ func loadManifest(t *testing.T) manifest.Manifest {
 	return m
 }
 
+func loadProfileManifest(t *testing.T) manifest.Manifest {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "examples", "better-ccflare.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(profile manifest): %v", err)
+	}
+	project, err := manifest.Parse(data)
+	if err != nil {
+		t.Fatalf("manifest.Parse(profile): %v", err)
+	}
+	return project
+}
+
+func TestRenderRejectsTapOwnedFormulaProfile(t *testing.T) {
+	if _, err := Render(loadProfileManifest(t), "3.8.2", armSHA, amdSHA); err == nil {
+		t.Fatal("Render() unexpectedly regenerated a tap-owned Formula profile")
+	}
+}
+
 func TestRenderMatchesGoldenFile(t *testing.T) {
 	got, err := Render(loadManifest(t), "0.1.0", armSHA, amdSHA)
 	if err != nil {

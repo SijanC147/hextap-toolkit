@@ -192,8 +192,9 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 		return nil, manifest.Manifest{}, false, errors.New("--license is required when .hextap.json is absent")
 	}
 	owner, name, _ := parseRepository(repository)
+	linux := options.Linux
 	project := manifest.Manifest{
-		Schema: manifest.CurrentSchema,
+		Schema: manifest.LegacySchema,
 		Formula: manifest.Formula{
 			Name:        formula,
 			Class:       classForFormula(formula),
@@ -207,7 +208,7 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 				DarwinAMD64: formula + "-darwin-amd64.tar.gz",
 			},
 		},
-		Release: manifest.Release{BuildScript: defaultAdapterPath, Linux: options.Linux},
+		Release: manifest.Release{BuildScript: defaultAdapterPath, Linux: &linux},
 		Homebrew: manifest.Homebrew{
 			MacOSOnly: true,
 			TestArgs:  []string{"--version"},
@@ -229,6 +230,9 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 }
 
 func generationFlagsAgree(project manifest.Manifest, options Options) error {
+	if project.Schema == manifest.ProfileSchema && (options.GoPackageSet || options.VersionSymbolSet || options.CommitSymbolSet) {
+		return errors.New("Go adapter generation flags cannot be used with an authoritative schema 2 manifest")
+	}
 	tests := []struct {
 		name     string
 		provided string
@@ -245,8 +249,11 @@ func generationFlagsAgree(project manifest.Manifest, options Options) error {
 			return fmt.Errorf("%s conflicts with authoritative .hextap.json", test.name)
 		}
 	}
-	if options.LinuxSet && options.Linux != project.Release.Linux {
-		return fmt.Errorf("--linux value conflicts with authoritative .hextap.json value %t", project.Release.Linux)
+	if project.Schema == manifest.ProfileSchema && options.LinuxSet {
+		return errors.New("--linux is a schema 1 generation flag and cannot be used with an authoritative schema 2 manifest")
+	}
+	if options.LinuxSet && options.Linux != project.Release.LinuxEnabled() {
+		return fmt.Errorf("--linux value conflicts with authoritative .hextap.json value %t", project.Release.LinuxEnabled())
 	}
 	return nil
 }

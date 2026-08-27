@@ -105,6 +105,11 @@ func runManifestExport(args []string, stdout, stderr io.Writer) int {
 		{Key: "amd64_asset", Value: values.AMD64Asset},
 		{Key: "build_script", Value: values.BuildScript},
 		{Key: "linux", Value: strconv.FormatBool(values.Linux)},
+		{Key: "runtime", Value: values.Runtime},
+		{Key: "native_matrix", Value: values.NativeMatrix},
+	}
+	if values.RuntimeVersion != "" {
+		fields = append(fields, githuboutput.Field{Key: "runtime_version", Value: values.RuntimeVersion})
 	}
 	if err := githuboutput.Append(*githubOutput, fields); err != nil {
 		return fail(stderr, "export manifest: %v", err)
@@ -115,18 +120,46 @@ func runManifestExport(args []string, stdout, stderr io.Writer) int {
 
 func runRelease(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return fail(stderr, "release subcommand required; expected metadata, build, or verify")
+		return fail(stderr, "release subcommand required; expected metadata, profile, build, or verify")
 	}
 	switch args[0] {
 	case "metadata":
 		return runReleaseMetadata(args[1:], stdout, stderr)
 	case "build":
 		return runReleaseBuild(args[1:], stdout, stderr)
+	case "profile":
+		return runReleaseProfile(args[1:], stdout, stderr)
 	case "verify":
 		return runReleaseVerify(args[1:], stdout, stderr)
 	default:
-		return fail(stderr, "unknown release subcommand %q; expected metadata, build, or verify", args[0])
+		return fail(stderr, "unknown release subcommand %q; expected metadata, profile, build, or verify", args[0])
 	}
+}
+
+func runReleaseProfile(args []string, stdout, stderr io.Writer) int {
+	flags := newFlagSet("release profile")
+	manifestPath := flags.String("manifest", "", "project manifest path")
+	source := flags.String("source", "", "source directory")
+	phase := flags.String("phase", "", "quality or build command phase")
+	if err := flags.Parse(args); err != nil {
+		return fail(stderr, "release profile: %v", err)
+	}
+	if flags.NArg() != 0 {
+		return fail(stderr, "release profile: unexpected positional arguments")
+	}
+	if missing := missingFlags([]namedValue{{"--manifest", *manifestPath}, {"--source", *source}, {"--phase", *phase}}); len(missing) != 0 {
+		return fail(stderr, "release profile: required flag missing: %s", strings.Join(missing, ", "))
+	}
+	if err := release.RunProfile(release.ProfileOptions{
+		ManifestPath: *manifestPath,
+		SourceDir:    *source,
+		Phase:        release.ProfilePhase(*phase),
+		Stdout:       stdout,
+		Stderr:       stderr,
+	}); err != nil {
+		return fail(stderr, "release profile: %v", err)
+	}
+	return 0
 }
 
 func runReleaseVerify(args []string, stdout, stderr io.Writer) int {
@@ -161,9 +194,9 @@ func runReleaseVerify(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "release verify: %v", err)
 	}
 	if result.ExecutedTarget != "" {
-		fmt.Fprintf(stdout, "release verified: %s (%s %s, %d archives, executed %s)\n", *directory, result.Formula, result.Version, len(result.Assets), result.ExecutedTarget)
+		fmt.Fprintf(stdout, "release verified: %s (%s %s, %d assets, executed %s)\n", *directory, result.Formula, result.Version, len(result.Assets), result.ExecutedTarget)
 	} else {
-		fmt.Fprintf(stdout, "release verified: %s (%s %s, %d archives)\n", *directory, result.Formula, result.Version, len(result.Assets))
+		fmt.Fprintf(stdout, "release verified: %s (%s %s, %d assets)\n", *directory, result.Formula, result.Version, len(result.Assets))
 	}
 	return 0
 }
@@ -200,7 +233,7 @@ func runReleaseBuild(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, "release build: %v", err)
 	}
-	fmt.Fprintf(stdout, "release built: %s (%s %s, %d archives)\n", *output, result.Formula, result.Version, len(result.Assets))
+	fmt.Fprintf(stdout, "release built: %s (%s %s, %d assets)\n", *output, result.Formula, result.Version, len(result.Assets))
 	return 0
 }
 

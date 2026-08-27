@@ -29,8 +29,21 @@ such as `vX.Y.Z-rc.1` for prereleases. Build metadata is unsupported.
 
 The generated tag-triggered caller selects `full`. It validates the resolved tag
 source, runs source quality, builds every declared native target, verifies the
-exact deterministic archives, creates or resumes a draft, attests assets, and
+exact deterministic assets, creates or resumes a draft, attests assets, and
 publishes one immutable GitHub release.
+
+Schema-2 Bun releases use the manifest-pinned Bun version, execute only the
+project-owned direct argv phases, and require tracked source to remain unchanged
+after quality and after building. The complete asset graph may include raw
+Linux executables, raw plus single-binary Darwin archives, and optional raw
+Windows amd64 `.exe`; Windows receives PE32+ structural verification and native
+`--version` execution. Every raw/archive representation of a target must contain
+the same executable bytes.
+Before the adapter boundary, Hextap compiles a private probe for every declared
+target into a fresh dedicated Bun runtime cache. The reusable Ubuntu build runs
+the complete adapter matrix inside a network namespace as the original runner
+user. Do not release when the CI proof for empty-cache failure and warmed-cache
+offline success is absent or skipped.
 
 - A prerelease publishes an immutable GitHub prerelease and intentionally skips
   Homebrew. A missing Formula update is success, not a recovery condition.
@@ -47,8 +60,10 @@ An unregistered project's first stable release can correctly reach an immutable
 source release and then stop at the tap registry gate. Preserve that release.
 
 1. Verify the immutable release and its `SHA256SUMS`.
-2. Use the trusted pinned toolkit and real release URLs/checksums to render the
-   exact Formula. Never invent or placeholder a checksum.
+2. For schema 1, use the trusted pinned toolkit and real release URLs/checksums
+   to render the exact Formula. For a schema-2 tap-owned Formula profile, pair
+   the manifest with the already reviewed tap template; never render or coerce
+   its service/caveats/tests from source. Never invent a checksum.
 3. Open one protected tap PR containing both the byte-exact
    `Projects/FORMULA.json` registration and `Formula/FORMULA.rb`.
 4. Require whole-tap PR CI, merge through protection, and require tap-main CI.

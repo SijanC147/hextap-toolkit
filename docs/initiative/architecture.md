@@ -60,6 +60,19 @@ reverified.
    registration, changes only Formula URL/SHA metadata, pushes tap `main`
    without force, and waits for the tap test workflow at the exact pushed SHA.
 
+Schema 2 extends this graph without adding another publisher. The validated
+manifest selects pinned Bun setup, direct project-owned quality/preparation
+argv, explicit targets, and packaging per target. One adapter executable may
+produce a raw asset, a canonical archive, or both; both representations must be
+byte-identical. Windows amd64 is verified as PE32+ and executed on a Windows
+runner. A named tap-owned Formula profile keeps nonmetadata Ruby outside source
+while the publisher still patches only the two Darwin URLs and SHA-256 values.
+Build preparation warms a fresh explicit Bun runtime cache with one private
+probe per declared target. The Ubuntu asset build then drops back to the runner
+user inside a root-created network namespace, making the warmed cache the only
+available runtime source. Toolkit CI proves empty-cache failure and warmed-cache
+five-target success for this boundary.
+
 Schema 1 intentionally has neither field exceptions nor versioned tap
 registries. A historical `homebrew-only` request outside the equality window
 fails with `tap/source manifest mismatch` before any Formula change. In
@@ -97,7 +110,7 @@ never bypasses protection or resolves review feedback.
   onboarding transactions, fake-`gh` online doctor flows, and native process
   limits.
 - `actionlint` 1.7.12 predates two current GitHub schema additions. The
-  repository checker requires its exact nonzero one-plus-five known diagnostics
+  repository checker requires its exact nonzero one-plus-six known diagnostics
   and rejects a clean/no-op or anything else. A future checker upgrade must
   change the pinned expectation in a reviewed PR.
 - Hosted runners, immutable-release settings, 1Password authorization, direct

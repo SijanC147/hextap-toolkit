@@ -1,4 +1,4 @@
-name: Managed Go release
+name: Managed release
 
 on:
   workflow_call:
@@ -21,6 +21,10 @@ concurrency:
   cancel-in-progress: false
   queue: max
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   validate:
     name: Validate release
@@ -36,7 +40,9 @@ jobs:
       sha: ${{ steps.source.outputs.sha }}
       formula: ${{ steps.manifest.outputs.formula }}
       linux: ${{ steps.manifest.outputs.linux }}
-      native_matrix: ${{ steps.native-matrix.outputs.matrix }}
+      runtime: ${{ steps.manifest.outputs.runtime }}
+      runtime_version: ${{ steps.manifest.outputs.runtime_version }}
+      native_matrix: ${{ steps.manifest.outputs.native_matrix }}
       manifest_artifact_id: ${{ steps.manifest-artifact.outputs.artifact-id }}
       manifest_sha256: ${{ steps.manifest.outputs.sha256 }}
     steps:
@@ -136,31 +142,26 @@ jobs:
           [[ "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
           printf 'sha256=%s\n' "$manifest_sha256" >> "$GITHUB_OUTPUT"
 
-      - name: Select native verification matrix
-        id: native-matrix
-        env:
-          RELEASE_LINUX: ${{ steps.manifest.outputs.linux }}
-        run: |
-          darwin_matrix='{"include":[{"runner":"macos-15","target":"darwin-arm64"},{"runner":"macos-15-intel","target":"darwin-amd64"}]}'
-          if [[ "$RELEASE_LINUX" == true ]]; then
-            matrix='{"include":[{"runner":"ubuntu-24.04","target":"linux-amd64"},{"runner":"ubuntu-24.04-arm","target":"linux-arm64"},{"runner":"macos-15","target":"darwin-arm64"},{"runner":"macos-15-intel","target":"darwin-amd64"}]}'
-          elif [[ "$RELEASE_LINUX" != false ]]; then
-            echo "invalid validated release.linux value" >&2
-            exit 1
-          else
-            matrix="$darwin_matrix"
-          fi
-          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
-
       - name: Validate Homebrew-only release
         if: steps.metadata.outputs.mode == 'homebrew-only'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.source.outputs.sha }}
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease --jq '[.isDraft,.isImmutable,.isPrerelease] | @tsv')"
           [[ "$state" == $'false\ttrue\tfalse' ]]
           gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          mkdir "$RUNNER_TEMP/recovery-assets"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/recovery-assets"
+          "$RUNNER_TEMP/hextapctl" release verify \
+            --manifest "$RUNNER_TEMP/project-manifest.json" \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_SHA" \
+            --dir "$RUNNER_TEMP/recovery-assets"
 
       - name: Upload validated manifest
         id: manifest-artifact
@@ -183,19 +184,84 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.validate.outputs.runtime == 'bun'
+        with:
+          repository: SijanC147/hextap-toolkit
+          ref: ${{ job.workflow_sha }}
+          path: toolkit
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.validate.outputs.runtime == 'go'
         with:
           cache: false
-          go-version-file: go.mod
-      - name: Test tagged source
+          go-version-file: source/go.mod
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.validate.outputs.runtime == 'bun'
+        with:
+          cache: false
+          go-version-file: toolkit/go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: needs.validate.outputs.runtime == 'bun'
+        with:
+          bun-version: ${{ needs.validate.outputs.runtime_version }}
+      - name: Download validated manifest by ID
+        if: needs.validate.outputs.runtime == 'bun'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
+          path: ${{ runner.temp }}/validated-manifest
+          digest-mismatch: error
+          merge-multiple: true
+      - name: Verify validated profile manifest
+        if: needs.validate.outputs.runtime == 'bun'
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
+        run: |
+          validated_manifest="$RUNNER_TEMP/validated-manifest/project-manifest.json"
+          [[ -f "$validated_manifest" && ! -L "$validated_manifest" ]]
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          actual_sha256="$(sha256sum "$validated_manifest" | cut -d ' ' -f 1)"
+          [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
+
+          umask 077
+          manifest_directory="$(mktemp -d "$GITHUB_WORKSPACE/source/.hextap-manifest.XXXXXX")"
+          [[ -d "$manifest_directory" && ! -L "$manifest_directory" ]]
+          chmod 700 "$manifest_directory"
+          installed_manifest="$manifest_directory/project-manifest.json"
+          install -m 600 "$validated_manifest" "$installed_manifest"
+          installed_sha256="$(sha256sum "$installed_manifest" | cut -d ' ' -f 1)"
+          [[ "$installed_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
+          printf 'VALIDATED_MANIFEST=%s\n' "$installed_manifest" >> "$GITHUB_ENV"
+      - name: Test tagged Go source
+        if: needs.validate.outputs.runtime == 'go'
         run: |
           test -z "$(gofmt -l .)"
           go test -count=1 ./...
           go test -race -count=1 ./...
           go vet ./...
           go build -trimpath ./...
-          git diff --exit-code
+        working-directory: source
+      - name: Run tagged Bun profile
+        if: needs.validate.outputs.runtime == 'bun'
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
+          "$RUNNER_TEMP/hextapctl" release profile \
+            --manifest "$VALIDATED_MANIFEST" \
+            --source "$GITHUB_WORKSPACE/source" \
+            --phase quality
+          actual_sha256="$(sha256sum "$VALIDATED_MANIFEST" | cut -d ' ' -f 1)"
+          [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
+        working-directory: toolkit
+      - name: Verify tagged source is unchanged
+        run: |
+          git -C "$GITHUB_WORKSPACE/source" diff --exit-code
+          git -C "$GITHUB_WORKSPACE/source" diff --cached --exit-code
+          test -z "$(git -C "$GITHUB_WORKSPACE/source" status --porcelain --untracked-files=no)"
 
   build:
     name: Build release assets
@@ -222,6 +288,10 @@ jobs:
         with:
           cache: false
           go-version-file: toolkit/go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: needs.validate.outputs.runtime == 'bun'
+        with:
+          bun-version: ${{ needs.validate.outputs.runtime_version }}
       - name: Download validated manifest by ID
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -236,7 +306,7 @@ jobs:
           downloaded_manifest="$RUNNER_TEMP/validated-manifest/project-manifest.json"
           [[ -f "$downloaded_manifest" && ! -L "$downloaded_manifest" ]]
           [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          actual_sha256="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$downloaded_manifest")"
+          actual_sha256="$(sha256sum "$downloaded_manifest" | cut -d ' ' -f 1)"
           [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
 
           umask 077
@@ -245,22 +315,56 @@ jobs:
           chmod 700 "$manifest_directory"
           installed_manifest="$manifest_directory/project-manifest.json"
           install -m 600 "$downloaded_manifest" "$installed_manifest"
-          installed_sha256="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$installed_manifest")"
+          installed_sha256="$(sha256sum "$installed_manifest" | cut -d ' ' -f 1)"
           [[ "$installed_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
           printf 'VALIDATED_MANIFEST=%s\n' "$installed_manifest" >> "$GITHUB_ENV"
-      - name: Build toolkit and archives
+      - name: Build toolkit and release assets
         env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_SHA: ${{ needs.validate.outputs.sha }}
         run: |
           go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
+          if [[ "${{ needs.validate.outputs.runtime }}" == bun ]]; then
+            BUN_INSTALL_CACHE_DIR="$RUNNER_TEMP/bun-runtime-cache"
+            mkdir "$BUN_INSTALL_CACHE_DIR"
+            chmod 700 "$BUN_INSTALL_CACHE_DIR"
+            export BUN_INSTALL_CACHE_DIR
+            "$RUNNER_TEMP/hextapctl" release profile \
+              --manifest "$VALIDATED_MANIFEST" \
+              --source "$GITHUB_WORKSPACE/source" \
+              --phase build
+          fi
+          actual_sha256="$(sha256sum "$VALIDATED_MANIFEST" | cut -d ' ' -f 1)"
+          [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
           mkdir "$RUNNER_TEMP/dist"
-          "$RUNNER_TEMP/hextapctl" release build \
-            --manifest "$VALIDATED_MANIFEST" \
-            --version "$RELEASE_VERSION" \
-            --commit "$RELEASE_SHA" \
-            --source "$GITHUB_WORKSPACE/source" \
+          build_command=(
+            "$RUNNER_TEMP/hextapctl" release build
+            --manifest "$VALIDATED_MANIFEST"
+            --version "$RELEASE_VERSION"
+            --commit "$RELEASE_SHA"
+            --source "$GITHUB_WORKSPACE/source"
             --output "$RUNNER_TEMP/dist"
+          )
+          if [[ "${{ needs.validate.outputs.runtime }}" == bun ]]; then
+            sudo -n unshare --net -- \
+              sudo -n -u "$USER" env \
+                HOME="$HOME" \
+                PATH="$PATH" \
+                BUN_INSTALL_CACHE_DIR="$BUN_INSTALL_CACHE_DIR" \
+                LANG="${LANG:-C}" \
+                LC_ALL="${LC_ALL:-C}" \
+                TMPDIR="${TMPDIR:-/tmp}" \
+                TZ="${TZ:-UTC}" \
+                USER="$USER" \
+                LOGNAME="${LOGNAME:-$USER}" \
+                "${build_command[@]}"
+          else
+            "${build_command[@]}"
+          fi
+          git -C "$GITHUB_WORKSPACE/source" diff --exit-code
+          git -C "$GITHUB_WORKSPACE/source" diff --cached --exit-code
+          test -z "$(git -C "$GITHUB_WORKSPACE/source" status --porcelain --untracked-files=no)"
         working-directory: toolkit
       - name: Upload release assets
         id: release-assets
@@ -307,7 +411,7 @@ jobs:
           validated_manifest="$RUNNER_TEMP/validated-manifest/project-manifest.json"
           [[ -f "$validated_manifest" && ! -L "$validated_manifest" ]]
           [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          actual_sha256="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$validated_manifest")"
+          actual_sha256="$(sha256sum "$validated_manifest" | cut -d ' ' -f 1)"
           [[ "$actual_sha256" == "$EXPECTED_MANIFEST_SHA256" ]]
           printf 'VALIDATED_MANIFEST=%s\n' "$validated_manifest" >> "$GITHUB_ENV"
       - name: Download release assets by ID
@@ -323,8 +427,12 @@ jobs:
           RELEASE_SHA: ${{ needs.validate.outputs.sha }}
           EXECUTE_TARGET: ${{ matrix.target }}
         run: |
-          go build -trimpath -o "$RUNNER_TEMP/hextapctl" ./cmd/hextapctl
-          "$RUNNER_TEMP/hextapctl" release verify \
+          hextapctl="$RUNNER_TEMP/hextapctl"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            hextapctl="$hextapctl.exe"
+          fi
+          go build -trimpath -o "$hextapctl" ./cmd/hextapctl
+          "$hextapctl" release verify \
             --manifest "$VALIDATED_MANIFEST" \
             --version "$RELEASE_VERSION" \
             --commit "$RELEASE_SHA" \

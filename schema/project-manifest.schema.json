@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/SijanC147/hextap-toolkit/schema/project-manifest.schema.json",
   "title": "Hextap project manifest",
-  "description": "Declarative project metadata consumed by hextapctl. Go validation remains authoritative for derived formula.class, distinct architecture assets, and exact caveats placeholder grammar.",
+  "description": "Declarative project metadata consumed by hextapctl. Schema 1 preserves Go archives; schema 2 adds a pinned Bun profile, explicit targets, optional Windows amd64, and a tap-owned Formula profile. Go validation remains authoritative for cross-field identity.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,7 +13,14 @@
   ],
   "properties": {
     "schema": {
-      "const": 1
+      "oneOf": [
+        {
+          "const": 1
+        },
+        {
+          "const": 2
+        }
+      ]
     },
     "formula": {
       "$ref": "#/$defs/formula"
@@ -25,6 +32,40 @@
       "$ref": "#/$defs/homebrew"
     }
   },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": 1
+            },
+            "release": {
+              "$ref": "#/$defs/releaseLegacy"
+            },
+            "homebrew": {
+              "$ref": "#/$defs/homebrewLegacy"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": 2
+            },
+            "release": {
+              "$ref": "#/$defs/releaseProfileContract"
+            },
+            "homebrew": {
+              "$ref": "#/$defs/homebrewProfile"
+            }
+          }
+        }
+      ]
+    }
+  ],
   "$defs": {
     "formulaName": {
       "type": "string",
@@ -68,6 +109,21 @@
     "argument": {
       "type": "string",
       "pattern": "^[-A-Za-z0-9_./:=+,%@]+$"
+    },
+    "commandName": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "commandArgument": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\x00-\\x1F]+$"
+    },
+    "runtimeVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
     },
     "rubyLine": {
       "type": "string",
@@ -218,6 +274,27 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "build_script"
+      ],
+      "properties": {
+        "build_script": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "linux": {
+          "type": "boolean"
+        },
+        "profile": {
+          "$ref": "#/$defs/releaseProfile"
+        },
+        "targets": {
+          "$ref": "#/$defs/releaseTargets"
+        }
+      }
+    },
+    "releaseLegacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
         "build_script",
         "linux"
       ],
@@ -227,6 +304,128 @@
         },
         "linux": {
           "type": "boolean"
+        }
+      }
+    },
+    "releaseProfileContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build_script",
+        "profile",
+        "targets"
+      ],
+      "properties": {
+        "build_script": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "profile": {
+          "$ref": "#/$defs/releaseProfile"
+        },
+        "targets": {
+          "$ref": "#/$defs/releaseTargets"
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "argv"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/commandName"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/commandArgument"
+          }
+        }
+      }
+    },
+    "releaseProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "runtime_version",
+        "install",
+        "quality",
+        "prepare"
+      ],
+      "properties": {
+        "runtime": {
+          "const": "bun"
+        },
+        "runtime_version": {
+          "$ref": "#/$defs/runtimeVersion"
+        },
+        "install": {
+          "$ref": "#/$defs/command"
+        },
+        "quality": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "prepare": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        }
+      }
+    },
+    "targetArtifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "$ref": "#/$defs/fileName"
+        },
+        "archive": {
+          "$ref": "#/$defs/assetName"
+        },
+        "archive_contents": {
+          "oneOf": [
+            {
+              "const": "binary"
+            },
+            {
+              "const": "bundle"
+            }
+          ]
+        }
+      }
+    },
+    "releaseTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "darwin_arm64",
+        "darwin_amd64"
+      ],
+      "properties": {
+        "darwin_arm64": {
+          "$ref": "#/$defs/targetArtifacts"
+        },
+        "darwin_amd64": {
+          "$ref": "#/$defs/targetArtifacts"
+        },
+        "linux_arm64": {
+          "$ref": "#/$defs/targetArtifacts"
+        },
+        "linux_amd64": {
+          "$ref": "#/$defs/targetArtifacts"
+        },
+        "windows_amd64": {
+          "$ref": "#/$defs/targetArtifacts"
         }
       }
     },
@@ -341,6 +540,38 @@
       "additionalProperties": false,
       "required": [
         "macos_only",
+        "test_args"
+      ],
+      "properties": {
+        "macos_only": {
+          "const": true
+        },
+        "test_args": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/argument"
+          }
+        },
+        "service": {
+          "$ref": "#/$defs/service"
+        },
+        "caveats": {
+          "$ref": "#/$defs/caveats"
+        },
+        "formula_profile": {
+          "$ref": "#/$defs/formulaName"
+        },
+        "service_enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "homebrewLegacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "macos_only",
         "test_args",
         "caveats"
       ],
@@ -360,6 +591,34 @@
         },
         "caveats": {
           "$ref": "#/$defs/caveats"
+        }
+      }
+    },
+    "homebrewProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "macos_only",
+        "test_args",
+        "formula_profile",
+        "service_enabled"
+      ],
+      "properties": {
+        "macos_only": {
+          "const": true
+        },
+        "test_args": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/argument"
+          }
+        },
+        "formula_profile": {
+          "$ref": "#/$defs/formulaName"
+        },
+        "service_enabled": {
+          "type": "boolean"
         }
       }
     }

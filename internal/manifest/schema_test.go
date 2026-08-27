@@ -42,6 +42,9 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 	assertStructProperties(t, definition(t, definitions, "repository"), reflect.TypeOf(Repository{}))
 	assertStructProperties(t, definition(t, definitions, "assets"), reflect.TypeOf(Assets{}))
 	assertStructProperties(t, definition(t, definitions, "release"), reflect.TypeOf(Release{}))
+	assertStructProperties(t, definition(t, definitions, "releaseProfile"), reflect.TypeOf(ReleaseProfile{}))
+	assertStructProperties(t, definition(t, definitions, "command"), reflect.TypeOf(Command{}))
+	assertStructProperties(t, definition(t, definitions, "targetArtifacts"), reflect.TypeOf(TargetArtifacts{}))
 	assertStructProperties(t, definition(t, definitions, "homebrew"), reflect.TypeOf(Homebrew{}))
 	assertStructProperties(t, definition(t, definitions, "serviceEnabled"), reflect.TypeOf(Service{}))
 	for _, name := range []string{
@@ -49,7 +52,15 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 		"repository",
 		"assets",
 		"release",
+		"releaseLegacy",
+		"releaseProfileContract",
+		"releaseProfile",
+		"command",
+		"targetArtifacts",
+		"releaseTargets",
 		"homebrew",
+		"homebrewLegacy",
+		"homebrewProfile",
 		"serviceEnabled",
 		"serviceDisabled",
 		"keepAliveSuccessfulExit",
@@ -74,13 +85,17 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 	assertRequired(t, definition(t, definitions, "formula"), "name", "class", "description", "homepage", "license", "repository", "binary", "assets")
 	assertRequired(t, definition(t, definitions, "repository"), "owner", "name")
 	assertRequired(t, definition(t, definitions, "assets"), "darwin_arm64", "darwin_amd64")
-	assertRequired(t, definition(t, definitions, "release"), "build_script", "linux")
-	assertRequired(t, definition(t, definitions, "homebrew"), "macos_only", "test_args", "caveats")
+	assertRequired(t, definition(t, definitions, "release"), "build_script")
+	assertRequired(t, definition(t, definitions, "releaseProfile"), "runtime", "runtime_version", "install", "quality", "prepare")
+	assertRequired(t, definition(t, definitions, "command"), "name", "argv")
+	assertRequired(t, definition(t, definitions, "releaseTargets"), "darwin_arm64", "darwin_amd64")
+	assertRequired(t, definition(t, definitions, "homebrew"), "macos_only", "test_args")
 	assertRequired(t, definition(t, definitions, "serviceEnabled"), "enabled", "run_args", "keep_alive", "restart_delay", "environment", "log_path", "error_log_path")
 	assertRequired(t, definition(t, definitions, "serviceDisabled"), "enabled")
 
-	if got := nestedNumber(t, schema, "properties", "schema", "const"); got != CurrentSchema {
-		t.Fatalf("schema const = %v, Go schema = %d", got, CurrentSchema)
+	schemaVersions := object(t, schema["properties"], "properties")["schema"].(map[string]any)["oneOf"].([]any)
+	if len(schemaVersions) != 2 || nestedNumber(t, schemaVersions[0].(map[string]any), "const") != LegacySchema || nestedNumber(t, schemaVersions[1].(map[string]any), "const") != ProfileSchema {
+		t.Fatalf("schema versions = %#v", schemaVersions)
 	}
 	assertDefinitionPattern(t, definitions, "formulaName", formulaNamePattern.String())
 	assertDefinitionPattern(t, definitions, "className", classNamePattern.String())
@@ -100,6 +115,20 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 		if got := nestedNumber(t, definitions, name, "maxLength"); got != expected {
 			t.Fatalf("$defs.%s.maxLength = %d, want %d", name, got, expected)
 		}
+	}
+}
+
+func TestBunProfileFixtureConformsToGoAndMachineSchema(t *testing.T) {
+	if _, err := Parse([]byte(bunProfileManifest)); err != nil {
+		t.Fatalf("Go manifest validation failed: %v", err)
+	}
+	var fixture any
+	if err := json.Unmarshal([]byte(bunProfileManifest), &fixture); err != nil {
+		t.Fatal(err)
+	}
+	schema := loadProjectSchema(t)
+	if err := validateFixtureShape(schema, schema, fixture, "$"); err != nil {
+		t.Fatalf("machine schema rejected Bun profile: %v", err)
 	}
 }
 

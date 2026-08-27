@@ -196,7 +196,7 @@ func TestReleaseBuildCommand(t *testing.T) {
 	if exitCode != 0 || stderr != "" {
 		t.Fatalf("Run(release build) = code %d, stdout %q, stderr %q", exitCode, stdout, stderr)
 	}
-	want := "release built: " + output + " (claude-rc-proxy 1.2.3, 2 archives)\n"
+	want := "release built: " + output + " (claude-rc-proxy 1.2.3, 2 assets)\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
@@ -229,9 +229,39 @@ func TestManifestExportCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantOutput := "formula=claude-rc-proxy\nbinary=claude-rc-proxy\nowner=SijanC147\nrepository_name=claude-rc-proxy\nrepository=SijanC147/claude-rc-proxy\narm64_asset=claude-rc-proxy-darwin-arm64.tar.gz\namd64_asset=claude-rc-proxy-darwin-amd64.tar.gz\nbuild_script=scripts/hextap-build\nlinux=true\n"
+	wantOutput := "formula=claude-rc-proxy\nbinary=claude-rc-proxy\nowner=SijanC147\nrepository_name=claude-rc-proxy\nrepository=SijanC147/claude-rc-proxy\narm64_asset=claude-rc-proxy-darwin-arm64.tar.gz\namd64_asset=claude-rc-proxy-darwin-amd64.tar.gz\nbuild_script=scripts/hextap-build\nlinux=true\nruntime=go\nnative_matrix={\"include\":[{\"runner\":\"ubuntu-24.04\",\"target\":\"linux-amd64\"},{\"runner\":\"ubuntu-24.04-arm\",\"target\":\"linux-arm64\"},{\"runner\":\"macos-15\",\"target\":\"darwin-arm64\"},{\"runner\":\"macos-15-intel\",\"target\":\"darwin-amd64\"}]}\n"
 	if string(data) != wantOutput {
 		t.Fatalf("GitHub output = %q, want %q", data, wantOutput)
+	}
+}
+
+func TestManifestExportBunProfileIncludesPinnedRuntimeAndWindowsMatrix(t *testing.T) {
+	manifestPath := filepath.Join("..", "..", "examples", "better-ccflare.json")
+	output := filepath.Join(t.TempDir(), "github-output")
+	if err := os.WriteFile(output, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exitCode, _, stderr := execute(
+		"manifest", "export",
+		"--file", manifestPath,
+		"--repository", "SijanC147/better-ccflare",
+		"--github-output", output,
+	)
+	if exitCode != 0 || stderr != "" {
+		t.Fatalf("manifest export = code %d, stderr %q", exitCode, stderr)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"runtime=bun\n",
+		"runtime_version=1.3.14\n",
+		`{"runner":"windows-2025","target":"windows-amd64"}`,
+	} {
+		if !strings.Contains(string(data), expected) {
+			t.Fatalf("GitHub output %q lacks %q", data, expected)
+		}
 	}
 }
 
