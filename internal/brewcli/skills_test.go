@@ -38,7 +38,7 @@ func TestSkillsInstallAndStatusCLIUseTemporaryUserHome(t *testing.T) {
 		"--agent", "claude-code",
 		"--scope", "user",
 	)
-	if code != 0 || stderr != "" || !strings.Contains(stdout, "CURRENT claude-code installed=1.1.0 available=1.1.0 action=NONE ") {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "CURRENT claude-code discovered_by=claude-code,cursor installed=1.1.1 available=1.1.1 action=NONE ") {
 		t.Fatalf("Run(skills status) = %d, %q, %q", code, stdout, stderr)
 	}
 }
@@ -55,9 +55,9 @@ func TestSkillsStatusDefaultsToCompleteUserInventoryAndSupportsJSON(t *testing.T
 		t.Fatalf("status = %d, %q, %q", code, stdout, stderr)
 	}
 	for _, expected := range []string{
-		"CURRENT agents+codex installed=1.1.0 available=1.1.0 action=NONE ",
-		"NOT_INSTALLED claude-code installed=- available=1.1.0 action=INSTALL ",
-		"NOT_INSTALLED cursor installed=- available=1.1.0 action=INSTALL ",
+		"CURRENT agents+codex discovered_by=agents,codex,cursor installed=1.1.1 available=1.1.1 action=NONE ",
+		"NOT_INSTALLED claude-code discovered_by=claude-code,cursor installed=- available=1.1.1 action=INSTALL ",
+		"NOT_INSTALLED cursor discovered_by=cursor installed=- available=1.1.1 action=INSTALL ",
 	} {
 		if !strings.Contains(stdout, expected) {
 			t.Errorf("human inventory %q is missing %q", stdout, expected)
@@ -72,17 +72,18 @@ func TestSkillsStatusDefaultsToCompleteUserInventoryAndSupportsJSON(t *testing.T
 		Schema  int    `json:"schema"`
 		Scope   string `json:"scope"`
 		Entries []struct {
-			State            string `json:"state"`
-			Agent            string `json:"agent"`
-			InstalledVersion string `json:"installed_version"`
-			AvailableVersion string `json:"available_version"`
-			Recommendation   string `json:"recommendation"`
+			State            string   `json:"state"`
+			Agent            string   `json:"agent"`
+			DiscoveredBy     []string `json:"discovered_by"`
+			InstalledVersion string   `json:"installed_version"`
+			AvailableVersion string   `json:"available_version"`
+			Recommendation   string   `json:"recommendation"`
 		} `json:"entries"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &document); err != nil {
 		t.Fatalf("decode status JSON %q: %v", stdout, err)
 	}
-	if document.Schema != 1 || document.Scope != "user" || len(document.Entries) != 3 || document.Entries[0].Agent != "agents+codex" || document.Entries[0].InstalledVersion != "1.1.0" {
+	if document.Schema != 1 || document.Scope != "user" || len(document.Entries) != 3 || document.Entries[0].Agent != "agents+codex" || strings.Join(document.Entries[0].DiscoveredBy, ",") != "agents,codex,cursor" || document.Entries[0].InstalledVersion != "1.1.1" {
 		t.Fatalf("status JSON = %#v", document)
 	}
 }
@@ -94,7 +95,7 @@ func TestSkillsUpgradeCLIPlansAndAppliesManagedForwardUpgrade(t *testing.T) {
 	writeOldManagedSkillFixture(t, skillDir)
 
 	code, stdout, stderr := execute("dev", "unknown", "skills", "upgrade", "--agent", "claude-code", "--scope", "user", "--dry-run")
-	if code != 0 || stderr != "" || !strings.Contains(stdout, "UPGRADE claude-code from=0.9.0 to=1.1.0 ") || strings.Contains(stdout, "backup=") {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "UPGRADE claude-code from=0.9.0 to=1.1.1 ") || strings.Contains(stdout, "backup=") {
 		t.Fatalf("upgrade dry-run = %d, %q, %q", code, stdout, stderr)
 	}
 	data, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
@@ -103,11 +104,11 @@ func TestSkillsUpgradeCLIPlansAndAppliesManagedForwardUpgrade(t *testing.T) {
 	}
 
 	code, stdout, stderr = execute("dev", "unknown", "skills", "upgrade", "--agent", "claude-code", "--scope", "user")
-	if code != 0 || stderr != "" || !strings.Contains(stdout, "UPGRADE claude-code from=0.9.0 to=1.1.0 ") || !strings.Contains(stdout, " backup=") {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "UPGRADE claude-code from=0.9.0 to=1.1.1 ") || !strings.Contains(stdout, " backup=") {
 		t.Fatalf("upgrade = %d, %q, %q", code, stdout, stderr)
 	}
 	code, statusOutput, stderr := execute("dev", "unknown", "skills", "status", "--agent", "claude-code", "--scope", "user")
-	if code != 0 || stderr != "" || !strings.Contains(statusOutput, "CURRENT claude-code installed=1.1.0 available=1.1.0 action=NONE ") {
+	if code != 0 || stderr != "" || !strings.Contains(statusOutput, "CURRENT claude-code discovered_by=claude-code,cursor installed=1.1.1 available=1.1.1 action=NONE ") {
 		t.Fatalf("post-upgrade status = %d, %q, %q", code, statusOutput, stderr)
 	}
 }

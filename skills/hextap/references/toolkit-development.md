@@ -130,6 +130,10 @@ brew hextap skills status --scope user
 brew hextap skills status --scope user --json
 ```
 
+Treat `agent` as the physical installation target and `discovered_by` as the
+agents that load that path. Cursor may therefore be covered by a current shared
+`.agents` copy even when its separate native `.cursor` target is not installed.
+
 An installed lower marker version reports `UPDATE_AVAILABLE`. Upgrade only an
 intact marker-owned target after reviewing the dry-run:
 

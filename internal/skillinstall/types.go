@@ -85,6 +85,7 @@ const (
 type StatusEntry struct {
 	State            State          `json:"state"`
 	Agent            string         `json:"agent"`
+	DiscoveredBy     []string       `json:"discovered_by"`
 	Path             string         `json:"path"`
 	InstalledVersion string         `json:"installed_version,omitempty"`
 	AvailableVersion string         `json:"available_version"`

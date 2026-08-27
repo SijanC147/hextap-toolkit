@@ -24,5 +24,5 @@ func Hextap() Bundle {
 	if err != nil {
 		panic("embedded Hextap skill is unavailable: " + err.Error())
 	}
-	return Bundle{Name: "hextap", Version: "1.1.0", Files: files}
+	return Bundle{Name: "hextap", Version: "1.1.1", Files: files}
 }

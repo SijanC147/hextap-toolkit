@@ -18,19 +18,23 @@ import (
 func TestTargetsMatchReviewedPortableRegistry(t *testing.T) {
 	targets := Targets()
 	want := []Target{
-		{ID: "agents", UserSkillsDir: ".agents/skills", ProjectSkillsDir: ".agents/skills"},
+		{ID: "agents", UserSkillsDir: ".agents/skills", ProjectSkillsDir: ".agents/skills", DiscoveredBy: []string{"agents", "codex", "cursor"}},
 		{ID: "all", Virtual: true},
-		{ID: "claude-code", UserSkillsDir: ".claude/skills", ProjectSkillsDir: ".claude/skills"},
-		{ID: "codex", UserSkillsDir: ".agents/skills", ProjectSkillsDir: ".agents/skills"},
-		{ID: "cursor", UserSkillsDir: ".cursor/skills", ProjectSkillsDir: ".cursor/skills"},
+		{ID: "claude-code", UserSkillsDir: ".claude/skills", ProjectSkillsDir: ".claude/skills", DiscoveredBy: []string{"claude-code", "cursor"}},
+		{ID: "codex", UserSkillsDir: ".agents/skills", ProjectSkillsDir: ".agents/skills", DiscoveredBy: []string{"codex", "cursor"}},
+		{ID: "cursor", UserSkillsDir: ".cursor/skills", ProjectSkillsDir: ".cursor/skills", DiscoveredBy: []string{"cursor"}},
 	}
 	if !reflect.DeepEqual(targets, want) {
 		t.Fatalf("Targets() = %#v, want %#v", targets, want)
 	}
 	copyOfTargets := Targets()
 	copyOfTargets[0].ID = "mutated"
+	copyOfTargets[0].DiscoveredBy[0] = "mutated"
 	if Targets()[0].ID == "mutated" {
 		t.Fatal("Targets exposed mutable registry storage")
+	}
+	if Targets()[0].DiscoveredBy[0] == "mutated" {
+		t.Fatal("Targets exposed mutable discovery registry storage")
 	}
 	for _, target := range targets {
 		if target.Virtual {
@@ -667,9 +671,9 @@ func TestStatusWithoutAgentsInventoriesEveryConcretePhysicalTargetReadOnly(t *te
 		t.Fatalf("Status(all targets) error = %v", err)
 	}
 	want := []StatusEntry{
-		{State: NotInstalledState, Agent: "agents+codex", Path: filepath.Join(home, ".agents", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
-		{State: NotInstalledState, Agent: "claude-code", Path: filepath.Join(home, ".claude", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
-		{State: NotInstalledState, Agent: "cursor", Path: filepath.Join(home, ".cursor", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
+		{State: NotInstalledState, Agent: "agents+codex", DiscoveredBy: []string{"agents", "codex", "cursor"}, Path: filepath.Join(home, ".agents", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
+		{State: NotInstalledState, Agent: "claude-code", DiscoveredBy: []string{"claude-code", "cursor"}, Path: filepath.Join(home, ".claude", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
+		{State: NotInstalledState, Agent: "cursor", DiscoveredBy: []string{"cursor"}, Path: filepath.Join(home, ".cursor", "skills", "hextap"), AvailableVersion: toolskills.Hextap().Version, Recommendation: InstallRecommendation},
 	}
 	if !reflect.DeepEqual(result.Entries, want) {
 		t.Fatalf("Status(all targets) = %#v, want %#v", result.Entries, want)

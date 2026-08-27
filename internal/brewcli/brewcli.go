@@ -374,7 +374,7 @@ func runSkillsStatus(args []string, stdout, stderr io.Writer) int {
 		if installed == "" {
 			installed = "-"
 		}
-		fmt.Fprintf(stdout, "%s %s installed=%s available=%s action=%s %s\n", entry.State, entry.Agent, installed, entry.AvailableVersion, entry.Recommendation, entry.Path)
+		fmt.Fprintf(stdout, "%s %s discovered_by=%s installed=%s available=%s action=%s %s\n", entry.State, entry.Agent, strings.Join(entry.DiscoveredBy, ","), installed, entry.AvailableVersion, entry.Recommendation, entry.Path)
 	}
 	return 0
 }

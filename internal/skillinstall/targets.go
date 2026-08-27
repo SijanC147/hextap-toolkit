@@ -18,27 +18,32 @@ type Target struct {
 	ID               string
 	UserSkillsDir    string
 	ProjectSkillsDir string
+	DiscoveredBy     []string
 	Virtual          bool
 }
 
 var targetRegistry = []Target{
-	{ID: "agents", UserSkillsDir: ".agents/skills", ProjectSkillsDir: ".agents/skills"},
+	{ID: "agents", UserSkillsDir: ".agents/skills", ProjectSkillsDir: ".agents/skills", DiscoveredBy: []string{"agents", "codex", "cursor"}},
 	{ID: "all", Virtual: true},
-	{ID: "claude-code", UserSkillsDir: ".claude/skills", ProjectSkillsDir: ".claude/skills"},
-	{ID: "codex", UserSkillsDir: ".agents/skills", ProjectSkillsDir: ".agents/skills"},
-	{ID: "cursor", UserSkillsDir: ".cursor/skills", ProjectSkillsDir: ".cursor/skills"},
+	{ID: "claude-code", UserSkillsDir: ".claude/skills", ProjectSkillsDir: ".claude/skills", DiscoveredBy: []string{"claude-code", "cursor"}},
+	{ID: "codex", UserSkillsDir: ".agents/skills", ProjectSkillsDir: ".agents/skills", DiscoveredBy: []string{"codex", "cursor"}},
+	{ID: "cursor", UserSkillsDir: ".cursor/skills", ProjectSkillsDir: ".cursor/skills", DiscoveredBy: []string{"cursor"}},
 }
 
 // Targets returns a sorted copy of every supported agent target.
 func Targets() []Target {
 	result := make([]Target, len(targetRegistry))
-	copy(result, targetRegistry)
+	for index, target := range targetRegistry {
+		result[index] = target
+		result[index].DiscoveredBy = append([]string(nil), target.DiscoveredBy...)
+	}
 	return result
 }
 
 type resolvedTarget struct {
-	agent     string
-	skillsDir string
+	agent        string
+	skillsDir    string
+	discoveredBy []string
 }
 
 func resolveTargets(options Options) ([]resolvedTarget, error) {
@@ -57,8 +62,8 @@ func resolveTargets(options Options) ([]resolvedTarget, error) {
 			return nil, overlapError()
 		}
 		return []resolvedTarget{
-			{agent: "agents", skillsDir: pathForScope(mustTarget("agents"), options.Scope)},
-			{agent: "claude-code", skillsDir: pathForScope(mustTarget("claude-code"), options.Scope)},
+			resolvedTargetFor("agents", pathForScope(mustTarget("agents"), options.Scope), options.Scope),
+			resolvedTargetFor("claude-code", pathForScope(mustTarget("claude-code"), options.Scope), options.Scope),
 		}, nil
 	}
 
@@ -89,7 +94,7 @@ func resolveTargets(options Options) ([]resolvedTarget, error) {
 	result := make([]resolvedTarget, 0, len(directories))
 	for _, directory := range directories {
 		agents := deduplicateSorted(paths[directory])
-		result = append(result, resolvedTarget{agent: strings.Join(agents, "+"), skillsDir: directory})
+		result = append(result, resolvedTargetFor(strings.Join(agents, "+"), directory, options.Scope))
 	}
 	return result, nil
 }
@@ -125,12 +130,27 @@ func resolveStatusTargets(options Options) ([]resolvedTarget, error) {
 	directories := sortedMapKeys(paths)
 	result := make([]resolvedTarget, 0, len(directories))
 	for _, directory := range directories {
-		result = append(result, resolvedTarget{
-			agent:     strings.Join(deduplicateSorted(paths[directory]), "+"),
-			skillsDir: directory,
-		})
+		result = append(result, resolvedTargetFor(strings.Join(deduplicateSorted(paths[directory]), "+"), directory, options.Scope))
 	}
 	return result, nil
+}
+
+func resolvedTargetFor(agent, directory string, scope Scope) resolvedTarget {
+	discoverers := make(map[string]bool)
+	for _, target := range targetRegistry {
+		if target.Virtual || pathForScope(target, scope) != directory {
+			continue
+		}
+		for _, discoveredBy := range target.DiscoveredBy {
+			discoverers[discoveredBy] = true
+		}
+	}
+	ordered := make([]string, 0, len(discoverers))
+	for discoveredBy := range discoverers {
+		ordered = append(ordered, discoveredBy)
+	}
+	sort.Strings(ordered)
+	return resolvedTarget{agent: agent, skillsDir: directory, discoveredBy: ordered}
 }
 
 func normalizeAgentIDs(requested []string) ([]string, error) {
