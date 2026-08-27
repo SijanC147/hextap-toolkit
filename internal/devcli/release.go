@@ -178,7 +178,7 @@ func (service Service) verifyImmutableRelease(ctx context.Context, project, tag 
 		return "", err
 	}
 	expected := []string{"SHA256SUMS", projectManifest.Formula.Assets.DarwinAMD64, projectManifest.Formula.Assets.DarwinARM64}
-	if projectManifest.Release.Linux {
+	if projectManifest.Release.LinuxEnabled() {
 		expected = append(expected, projectManifest.Formula.Name+"-linux-amd64.tar.gz", projectManifest.Formula.Name+"-linux-arm64.tar.gz")
 	}
 	sort.Strings(expected)

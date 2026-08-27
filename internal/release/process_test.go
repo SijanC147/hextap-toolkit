@@ -26,7 +26,7 @@ func TestRunAdapterDoesNotKillCompletedAdapter(t *testing.T) {
 			adapter := writeAdapterScript(t, test.script)
 			var terminateCalls atomic.Int32
 			timeout := make(chan time.Time)
-			err := runAdapterWithControl(adapter, t.TempDir(), filepath.Join(t.TempDir(), "output"), target{OS: "darwin", Arch: "arm64"}, "1.2.3", testCommit, timeout, func(*exec.Cmd) {
+			err := runAdapterWithControl(adapter, t.TempDir(), filepath.Join(t.TempDir(), "output"), target{OS: "darwin", Arch: "arm64"}, "1.2.3", testCommit, "", timeout, func(*exec.Cmd) {
 				terminateCalls.Add(1)
 			})
 			if test.want == "" {
@@ -49,7 +49,7 @@ func TestRunAdapterKillsAndReapsLeaderOnlyOnTimeout(t *testing.T) {
 	var killedCommand *exec.Cmd
 	timeout := make(chan time.Time, 1)
 	timeout <- time.Now()
-	err := runAdapterWithControl(adapter, t.TempDir(), filepath.Join(t.TempDir(), "output"), target{OS: "darwin", Arch: "arm64"}, "1.2.3", testCommit, timeout, func(command *exec.Cmd) {
+	err := runAdapterWithControl(adapter, t.TempDir(), filepath.Join(t.TempDir(), "output"), target{OS: "darwin", Arch: "arm64"}, "1.2.3", testCommit, "", timeout, func(command *exec.Cmd) {
 		terminateCalls.Add(1)
 		killedCommand = command
 		if command.Process == nil {

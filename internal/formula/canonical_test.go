@@ -42,3 +42,27 @@ func TestValidateCanonicalRejectsClassCorrectHostileStaleAndNoncanonicalFormulae
 		})
 	}
 }
+
+func TestValidateCanonicalAcceptsTapOwnedProfileMetadataWithoutRendering(t *testing.T) {
+	project := loadProfileManifest(t)
+	formula := []byte(`class BetterCcflare < Formula
+  if Hardware::CPU.arm?
+    url "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz"
+    sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  else
+    url "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-x86_64.tar.gz"
+    sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  end
+  service do
+    keep_alive successful_exit: false, crashed: true
+  end
+end
+`)
+	metadata, err := ValidateCanonical(formula, project)
+	if err != nil {
+		t.Fatalf("ValidateCanonical(profile) error = %v", err)
+	}
+	if metadata.Version != "3.8.1" || metadata.ARM64SHA256 != armSHA || metadata.AMD64SHA256 != amdSHA {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+}

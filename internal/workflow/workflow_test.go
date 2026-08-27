@@ -41,8 +41,8 @@ func TestReleaseWorkflowTrustedHandoffContract(t *testing.T) {
 	assertContains(t, workflow, "group: hextap-release-${{ github.repository }}")
 	assertContains(t, workflow, "cancel-in-progress: false")
 	assertContains(t, workflow, "queue: max")
-	assertCount(t, workflow, "repository: SijanC147/hextap-toolkit", 5)
-	assertCount(t, workflow, "ref: ${{ job.workflow_sha }}", 5)
+	assertCount(t, workflow, "repository: SijanC147/hextap-toolkit", 6)
+	assertCount(t, workflow, "ref: ${{ job.workflow_sha }}", 6)
 	assertNotContains(t, workflow, "ref: main")
 	assertNotContains(t, workflow, "github.workflow_sha")
 	assertNotContains(t, workflow, "examples/")
@@ -73,14 +73,14 @@ func TestReleaseWorkflowTrustedHandoffContract(t *testing.T) {
 	assertContains(t, workflow, "manifest_artifact_id: ${{ steps.manifest-artifact.outputs.artifact-id }}")
 	assertContains(t, workflow, "manifest_sha256: ${{ steps.manifest.outputs.sha256 }}")
 	assertContains(t, workflow, "release_assets_artifact_id: ${{ steps.release-assets.outputs.artifact-id }}")
-	assertCount(t, workflow, "artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}", 4)
+	assertCount(t, workflow, "artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}", 5)
 	assertCount(t, workflow, "artifact-ids: ${{ needs.build.outputs.release_assets_artifact_id }}", 2)
-	assertCount(t, workflow, "digest-mismatch: error", 6)
-	assertCount(t, workflow, "merge-multiple: true", 6)
+	assertCount(t, workflow, "digest-mismatch: error", 7)
+	assertCount(t, workflow, "merge-multiple: true", 7)
 	assertCount(t, workflow, "overwrite: false", 2)
 	assertContains(t, workflow, "manifest-${{ github.run_id }}-${{ github.run_attempt }}-${{ job.check_run_id }}")
 	assertContains(t, workflow, "release-assets-${{ github.run_id }}-${{ github.run_attempt }}-${{ job.check_run_id }}")
-	assertCount(t, workflow, "EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}", 4)
+	assertCount(t, workflow, "EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}", 7)
 	assertContains(t, workflow, `mktemp -d "$GITHUB_WORKSPACE/source/.hextap-manifest.XXXXXX"`)
 
 	homebrewCheckAt := strings.Index(workflow, "Validate Homebrew-only release")
@@ -101,21 +101,81 @@ func TestReleaseWorkflowTrustedHandoffContract(t *testing.T) {
 	assertContains(t, workflow, `if state="$(gh release view "$RELEASE_TAG"`)
 }
 
-func TestReleaseWorkflowNativeMatrixHonorsManifestLinux(t *testing.T) {
+func TestReleaseWorkflowConsumesValidatedNativeMatrix(t *testing.T) {
 	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
 
 	assertContains(t, workflow, "linux: ${{ steps.manifest.outputs.linux }}")
-	assertContains(t, workflow, "native_matrix: ${{ steps.native-matrix.outputs.matrix }}")
-	assertContains(t, workflow, "RELEASE_LINUX: ${{ steps.manifest.outputs.linux }}")
+	assertContains(t, workflow, "native_matrix: ${{ steps.manifest.outputs.native_matrix }}")
 	assertContains(t, workflow, "matrix: ${{ fromJSON(needs.validate.outputs.native_matrix) }}")
-	assertContains(t, workflow, `if [[ "$RELEASE_LINUX" == true ]]; then`)
-	assertContains(t, workflow, `elif [[ "$RELEASE_LINUX" != false ]]; then`)
+	assertNotContains(t, workflow, "Select native verification matrix")
+	assertNotContains(t, workflow, "RELEASE_LINUX:")
+}
 
-	matrixStep := textBetween(t, workflow, "- name: Select native verification matrix", "- name: Validate Homebrew-only release")
-	assertCount(t, matrixStep, `"target":"linux-amd64"`, 1)
-	assertCount(t, matrixStep, `"target":"linux-arm64"`, 1)
-	assertCount(t, matrixStep, `"target":"darwin-arm64"`, 2)
-	assertCount(t, matrixStep, `"target":"darwin-amd64"`, 2)
+func TestReleaseWorkflowRunsPinnedBunProfileAndPreservesTaggedSource(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+
+	assertContains(t, workflow, "name: Managed release")
+	assertContains(t, workflow, "runtime: ${{ steps.manifest.outputs.runtime }}")
+	assertContains(t, workflow, "runtime_version: ${{ steps.manifest.outputs.runtime_version }}")
+	assertContains(t, workflow, "native_matrix: ${{ steps.manifest.outputs.native_matrix }}")
+	assertContains(t, workflow, "matrix: ${{ fromJSON(needs.validate.outputs.native_matrix) }}")
+	assertCount(t, workflow, "uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0", 2)
+	assertCount(t, workflow, "bun-version: ${{ needs.validate.outputs.runtime_version }}", 2)
+	assertContains(t, workflow, "if: needs.validate.outputs.runtime == 'bun'")
+	assertContains(t, workflow, `--phase quality`)
+	assertContains(t, workflow, `--phase build`)
+	assertCount(t, workflow, "diff --exit-code", 2)
+	assertCount(t, workflow, "diff --cached --exit-code", 2)
+	assertCount(t, workflow, "status --porcelain --untracked-files=no", 2)
+	assertNotContains(t, workflow, "bun-version: latest")
+	assertNotContains(t, workflow, "bun install")
+}
+
+func TestBunBuildPrefetchesBeforeNetworkNamespaceAdapterBoundary(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	step := textBetween(t, workflow, "- name: Build toolkit and release assets", "- name: Upload release assets")
+	prefetchAt := strings.Index(step, `--phase build`)
+	commandAt := strings.Index(step, `build_command=(`)
+	offlineAt := strings.Index(step, `sudo -n unshare --net --`)
+	invokeAt := strings.Index(step, `"${build_command[@]}"`)
+	if prefetchAt == -1 || commandAt == -1 || offlineAt == -1 || invokeAt == -1 || !(prefetchAt < commandAt && commandAt < offlineAt && offlineAt < invokeAt) {
+		t.Fatalf("Bun prefetch/offline/build order is not enforced:\n%s", step)
+	}
+	assertContains(t, step, `sudo -n -u "$USER" env`)
+	assertContains(t, step, `BUN_INSTALL_CACHE_DIR="$RUNNER_TEMP/bun-runtime-cache"`)
+	assertCount(t, step, `BUN_INSTALL_CACHE_DIR="$BUN_INSTALL_CACHE_DIR"`, 1)
+	assertContains(t, step, `if [[ "${{ needs.validate.outputs.runtime }}" == bun ]]; then`)
+	assertContains(t, step, `else`)
+	assertContains(t, step, `"${build_command[@]}"`)
+}
+
+func TestCIProvesFreshBunCacheAndOfflineNamespace(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/ci.yml")
+	assertContains(t, workflow, "uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0")
+	assertContains(t, workflow, `bun-version: "1.3.14"`)
+	step := textBetween(t, workflow, "- name: Prove Bun runtime cache and offline namespace", "- name: Verify toolkit")
+	for _, target := range []string{"bun-linux-x64", "bun-linux-arm64", "bun-darwin-x64", "bun-darwin-arm64", "bun-windows-x64"} {
+		assertContains(t, step, target)
+	}
+	for _, cache := range []string{"bun-linux-aarch64-v1.3.14", "bun-darwin-x64-v1.3.14", "bun-darwin-aarch64-v1.3.14", "bun-windows-x64-v1.3.14"} {
+		assertContains(t, step, cache)
+	}
+	assertContains(t, step, `if sudo -n unshare --net --`)
+	assertContains(t, step, `empty cache unexpectedly compiled without network`)
+	assertContains(t, step, `sudo -n unshare --net --`)
+	assertContains(t, step, `BUN_INSTALL_CACHE_DIR="$warm_cache"`)
+}
+
+func TestHomebrewOnlyReverifiesCompleteImmutableAssetSet(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	step := textBetween(t, workflow, "- name: Validate Homebrew-only release", "- name: Upload validated manifest")
+	assertContains(t, step, `gh release download "$RELEASE_TAG"`)
+	assertContains(t, step, `--dir "$RUNNER_TEMP/recovery-assets"`)
+	assertContains(t, step, `"$RUNNER_TEMP/hextapctl" release verify`)
+	assertContains(t, step, `--manifest "$RUNNER_TEMP/project-manifest.json"`)
+	assertContains(t, step, `--version "$RELEASE_VERSION"`)
+	assertContains(t, step, `--commit "$RELEASE_SHA"`)
+	assertContains(t, step, `--dir "$RUNNER_TEMP/recovery-assets"`)
 }
 
 func TestPublishHomebrewContract(t *testing.T) {

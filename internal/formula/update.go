@@ -129,7 +129,7 @@ func inspect(data []byte, project manifest.Manifest) (metadata, error) {
 	if len(lines) == 0 {
 		return metadata{}, errors.New("inspect Formula: file is empty")
 	}
-	codeLines, err := formulaCodeLines(lines, project.Homebrew.Caveats != "")
+	codeLines, err := formulaCodeLines(lines, project.Homebrew.Caveats != "", project.Homebrew.FormulaProfile != "")
 	if err != nil {
 		return metadata{}, err
 	}
@@ -206,7 +206,7 @@ func inspect(data []byte, project manifest.Manifest) (metadata, error) {
 	return metadata{version: armVersion, armURL: armURL, armSHA: armSHA, amdURL: amdURL, amdSHA: amdSHA}, nil
 }
 
-func formulaCodeLines(lines []line, expectCaveats bool) ([]bool, error) {
+func formulaCodeLines(lines []line, expectCaveats, tapOwnedProfile bool) ([]bool, error) {
 	result := make([]bool, len(lines))
 	caveatsBlocks := 0
 	for index := 0; index < len(lines); index++ {
@@ -245,6 +245,9 @@ func formulaCodeLines(lines []line, expectCaveats bool) ([]bool, error) {
 		if strings.Contains(current.body, "<<") {
 			return nil, errors.New("inspect Formula: unsupported heredoc operator outside generated caveats")
 		}
+	}
+	if tapOwnedProfile {
+		return result, nil
 	}
 	if expectCaveats && caveatsBlocks != 1 {
 		return nil, errors.New("inspect Formula: manifest requires exactly one generated caveats block")

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"debug/elf"
 	"debug/macho"
+	"debug/pe"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -73,6 +74,9 @@ func verifyWithHook(options VerifyOptions, afterChecksums func()) (VerifyResult,
 	if err != nil {
 		return VerifyResult{}, err
 	}
+	if err := validateProfileCommit(project, options.Commit); err != nil {
+		return VerifyResult{}, err
+	}
 	targets, err := buildTargets(project)
 	if err != nil {
 		return VerifyResult{}, err
@@ -85,15 +89,17 @@ func verifyWithHook(options VerifyOptions, afterChecksums func()) (VerifyResult,
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	assets := make([]string, 0, len(targets))
+	assets := make([]string, 0, len(targets)*2)
 	for _, item := range targets {
-		assets = append(assets, item.Asset)
+		for _, artifact := range item.Artifacts {
+			assets = append(assets, artifact.Name)
+		}
 	}
 	sort.Strings(assets)
 	if err := verifyDirectoryEntries(directory, append(append([]string(nil), assets...), "SHA256SUMS")); err != nil {
 		return VerifyResult{}, err
 	}
-	archiveBytes, err := verifyChecksums(directory, assets)
+	assetBytes, err := verifyChecksums(directory, assets)
 	if err != nil {
 		return VerifyResult{}, err
 	}
@@ -102,15 +108,37 @@ func verifyWithHook(options VerifyOptions, afterChecksums func()) (VerifyResult,
 	}
 
 	binaries := make(map[string][]byte, len(targets))
+	executionAssets := make(map[string]string, len(targets))
 	for _, item := range targets {
-		binary, err := verifyArchive(archiveBytes[item.Asset], project.Formula.Binary, item.OS, item.Arch)
-		if err != nil {
-			return VerifyResult{}, fmt.Errorf("verify %s: %w", item.Asset, err)
+		key := item.OS + "-" + item.Arch
+		var targetBinary []byte
+		for _, artifact := range item.Artifacts {
+			var binary []byte
+			var err error
+			switch artifact.Format {
+			case artifactBinary:
+				binary, err = verifyRawBinary(assetBytes[artifact.Name], item.OS, item.Arch)
+			case artifactBinaryArchive, artifactBundleArchive:
+				binary, err = verifyArchive(assetBytes[artifact.Name], project.Formula.Binary, item.OS, item.Arch, artifact.Format)
+			default:
+				err = fmt.Errorf("unsupported artifact format %q", artifact.Format)
+			}
+			if err != nil {
+				return VerifyResult{}, fmt.Errorf("verify %s: %w", artifact.Name, err)
+			}
+			if targetBinary != nil && !bytes.Equal(targetBinary, binary) {
+				return VerifyResult{}, fmt.Errorf("verify %s: executable bytes differ across %s-%s assets", artifact.Name, item.OS, item.Arch)
+			}
+			targetBinary = binary
+			if executionAssets[key] == "" || artifact.Format == artifactBinary {
+				executionAssets[key] = artifact.Name
+			}
 		}
-		binaries[item.Asset] = binary
+		binaries[key] = targetBinary
 	}
 	if selected != nil {
-		if err := executeVerifiedBinary(project.Formula.Binary, options.Version, options.Commit, selected.Asset, binaries[selected.Asset]); err != nil {
+		key := selected.OS + "-" + selected.Arch
+		if err := executeVerifiedBinary(selected.Executable, project.Formula.Binary, options.Version, options.Commit, executionAssets[key], binaries[key]); err != nil {
 			return VerifyResult{}, err
 		}
 	}
@@ -320,7 +348,17 @@ func isLowerHex(value string) bool {
 	return true
 }
 
-func verifyArchive(raw []byte, binaryName, targetOS, targetArch string) ([]byte, error) {
+func verifyRawBinary(raw []byte, targetOS, targetArch string) ([]byte, error) {
+	if len(raw) > maxBinarySize {
+		return nil, fmt.Errorf("binary exceeds %d bytes", maxBinarySize)
+	}
+	if err := verifyExecutable(raw, targetOS, targetArch); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func verifyArchive(raw []byte, binaryName, targetOS, targetArch, format string) ([]byte, error) {
 	var err error
 	rawReader := bytes.NewReader(raw)
 	gzipReader, err := gzip.NewReader(rawReader)
@@ -349,9 +387,15 @@ func verifyArchive(raw []byte, binaryName, targetOS, targetArch string) ([]byte,
 	}
 	tarData := bytes.NewReader(payload)
 	tarReader := tar.NewReader(tarData)
+	expectedNames := []string{binaryName}
+	if format == artifactBundleArchive {
+		expectedNames = append(expectedNames, "LICENSE", "README.md")
+	} else if format != artifactBinaryArchive {
+		return nil, fmt.Errorf("unsupported archive format %q", format)
+	}
 	var binary []byte
-	members := make([][]byte, 3)
-	for index, expected := range []string{binaryName, "LICENSE", "README.md"} {
+	members := make([][]byte, len(expectedNames))
+	for index, expected := range expectedNames {
 		header, err := tarReader.Next()
 		if err != nil {
 			return nil, fmt.Errorf("read tar member %d: %w", index+1, err)
@@ -406,7 +450,13 @@ func verifyArchive(raw []byte, binaryName, targetOS, targetArch string) ([]byte,
 func canonicalTarPayload(binaryName string, members [][]byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := tar.NewWriter(&buffer)
-	for index, name := range []string{binaryName, "LICENSE", "README.md"} {
+	names := []string{binaryName}
+	if len(members) == 3 {
+		names = append(names, "LICENSE", "README.md")
+	} else if len(members) != 1 {
+		return nil, fmt.Errorf("canonical tar requires one or three members, got %d", len(members))
+	}
+	for index, name := range names {
 		mode := int64(0o644)
 		if index == 0 {
 			mode = 0o755
@@ -511,6 +561,43 @@ func verifyExecutable(data []byte, targetOS, targetArch string) error {
 		// therefore the strongest entry-structure check available in stdlib.
 		return nil
 	}
+	if targetOS == "windows" {
+		if targetArch != "amd64" {
+			return fmt.Errorf("unsupported Windows architecture %q", targetArch)
+		}
+		file, err := pe.NewFile(bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("invalid PE binary: %w", err)
+		}
+		defer file.Close()
+		if file.Machine != pe.IMAGE_FILE_MACHINE_AMD64 || file.Characteristics&pe.IMAGE_FILE_EXECUTABLE_IMAGE == 0 {
+			return errors.New("PE binary is not an amd64 executable image")
+		}
+		header, ok := file.OptionalHeader.(*pe.OptionalHeader64)
+		if !ok || header.Magic != 0x20b || header.AddressOfEntryPoint == 0 {
+			return errors.New("PE binary is not PE32+ or has no entry point")
+		}
+		hasExecutableEntry := false
+		for _, section := range file.Sections {
+			if section.Characteristics&pe.IMAGE_SCN_MEM_EXECUTE == 0 {
+				continue
+			}
+			start := section.VirtualAddress
+			size := section.VirtualSize
+			if size < section.Size {
+				size = section.Size
+			}
+			end := start + size
+			if end >= start && header.AddressOfEntryPoint >= start && header.AddressOfEntryPoint < end {
+				hasExecutableEntry = true
+				break
+			}
+		}
+		if !hasExecutableEntry {
+			return errors.New("PE entry is not inside an executable section")
+		}
+		return nil
+	}
 	if targetOS != "linux" {
 		return fmt.Errorf("unsupported release target OS %q", targetOS)
 	}
@@ -555,8 +642,8 @@ func verifyExecutable(data []byte, targetOS, targetArch string) error {
 	return nil
 }
 
-func executeVerifiedBinary(binaryName, version, commit, asset string, data []byte) error {
-	return executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset, data, verifyCommandTimeout)
+func executeVerifiedBinary(executableName, identityName, version, commit, asset string, data []byte) error {
+	return executeVerifiedBinaryWithTimeout(executableName, identityName, version, commit, asset, data, verifyCommandTimeout)
 }
 
 type liveBoundedBuffer struct {
@@ -592,13 +679,13 @@ func (b *liveBoundedBuffer) Bytes() []byte {
 	return append([]byte(nil), b.data...)
 }
 
-func executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset string, data []byte, timeout time.Duration) error {
+func executeVerifiedBinaryWithTimeout(executableName, identityName, version, commit, asset string, data []byte, timeout time.Duration) error {
 	directory, err := os.MkdirTemp("", ".hextap-verify-*")
 	if err != nil {
 		return fmt.Errorf("create verification temporary directory: %w", err)
 	}
 	defer os.RemoveAll(directory)
-	path := filepath.Join(directory, binaryName)
+	path := filepath.Join(directory, executableName)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
 	if err != nil {
 		return fmt.Errorf("extract %s: %w", asset, err)
@@ -619,7 +706,7 @@ func executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset string,
 	stderr := &liveBoundedBuffer{maximum: maxVerifyCommandOutput, overflow: overflow}
 	command := exec.Command(path, "--version")
 	command.Dir = directory
-	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TZ=UTC"}
+	command.Env = verifiedCommandEnvironment()
 	command.Stdin = nil
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -653,7 +740,8 @@ func executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset string,
 	}
 	stdoutData := stdout.Bytes()
 	stderrData := stderr.Bytes()
-	want := binaryName + " " + version + " (commit " + commit + ")\n"
+	stdoutData = normalizeVersionOutput(runtime.GOOS, stdoutData)
+	want := identityName + " " + version + " (commit " + commit + ")\n"
 	if len(stderrData) != 0 {
 		return fmt.Errorf("execute %s: stderr was not empty", asset)
 	}
@@ -661,4 +749,25 @@ func executeVerifiedBinaryWithTimeout(binaryName, version, commit, asset string,
 		return fmt.Errorf("execute %s: stdout did not match expected version", asset)
 	}
 	return nil
+}
+
+func normalizeVersionOutput(targetOS string, data []byte) []byte {
+	if targetOS != "windows" || !bytes.HasSuffix(data, []byte("\r\n")) {
+		return data
+	}
+	result := append([]byte(nil), data[:len(data)-2]...)
+	return append(result, '\n')
+}
+
+func verifiedCommandEnvironment() []string {
+	if runtime.GOOS != "windows" {
+		return []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TZ=UTC"}
+	}
+	result := []string{"LANG=C", "LC_ALL=C", "TZ=UTC"}
+	for _, name := range []string{"PATH", "SYSTEMROOT", "TEMP", "TMP"} {
+		if value, exists := os.LookupEnv(name); exists {
+			result = append(result, name+"="+value)
+		}
+	}
+	return result
 }

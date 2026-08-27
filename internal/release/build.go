@@ -40,9 +40,10 @@ type BuildOptions struct {
 	Commit       string
 	SourceDir    string
 	OutputDir    string
+	BunCacheDir  string
 }
 
-// BuildResult lists the sorted release archive basenames written by Build.
+// BuildResult lists the sorted release asset basenames written by Build.
 type BuildResult struct {
 	Formula string
 	Version string
@@ -50,10 +51,22 @@ type BuildResult struct {
 }
 
 type target struct {
-	OS    string
-	Arch  string
-	Asset string
+	OS         string
+	Arch       string
+	Executable string
+	Artifacts  []targetArtifact
 }
+
+type targetArtifact struct {
+	Name   string
+	Format string
+}
+
+const (
+	artifactBinary        = "binary"
+	artifactBinaryArchive = "binary-tar.gz"
+	artifactBundleArchive = "bundle-tar.gz"
+)
 
 type archiveMember struct {
 	name string
@@ -73,7 +86,7 @@ type buildHooks struct {
 }
 
 // Build executes the project adapter exactly once per declared target and
-// creates canonical archives plus SHA256SUMS. OutputDir must already exist and
+// creates the declared canonical assets plus SHA256SUMS. OutputDir must already exist and
 // be empty. After a failed build, cleanup removes only output paths still
 // owned by that build.
 func Build(options BuildOptions) (result BuildResult, retErr error) {
@@ -109,6 +122,9 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 	}()
 	project, err := readManifestWithin(options.ManifestPath, sourceDir)
 	if err != nil {
+		return BuildResult{}, err
+	}
+	if err := validateProfileCommit(project, options.Commit); err != nil {
 		return BuildResult{}, err
 	}
 	targets, err := buildTargets(project)
@@ -148,23 +164,38 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 		if err := os.Mkdir(stageDir, 0o700); err != nil {
 			return BuildResult{}, fmt.Errorf("create %s-%s staging directory: %w", buildTarget.OS, buildTarget.Arch, err)
 		}
-		binaryPath := filepath.Join(stageDir, project.Formula.Binary)
-		if err := runAdapter(adapterPath, sourceDir, binaryPath, buildTarget, options.Version, options.Commit); err != nil {
+		binaryPath := filepath.Join(stageDir, buildTarget.Executable)
+		if err := runAdapter(adapterPath, sourceDir, binaryPath, buildTarget, options.Version, options.Commit, options.BunCacheDir); err != nil {
 			return BuildResult{}, err
 		}
-		binary, err := validateAdapterOutput(stageDir, binaryPath, project.Formula.Binary)
+		binary, err := validateAdapterOutput(stageDir, binaryPath, buildTarget.Executable)
 		if err != nil {
 			return BuildResult{}, fmt.Errorf("validate %s-%s adapter output: %w", buildTarget.OS, buildTarget.Arch, err)
 		}
-		members := []archiveMember{
+		bundleMembers := []archiveMember{
 			{name: project.Formula.Binary, mode: 0o755, data: binary},
 			{name: "LICENSE", mode: 0o644, data: license},
 			{name: "README.md", mode: 0o644, data: readme},
 		}
-		if err := writeArchive(filepath.Join(distDir, buildTarget.Asset), members); err != nil {
-			return BuildResult{}, fmt.Errorf("package %s-%s archive: %w", buildTarget.OS, buildTarget.Arch, err)
+		binaryMembers := bundleMembers[:1]
+		for _, artifact := range buildTarget.Artifacts {
+			path := filepath.Join(distDir, artifact.Name)
+			var packageErr error
+			switch artifact.Format {
+			case artifactBinary:
+				packageErr = writeBinary(path, binary)
+			case artifactBinaryArchive:
+				packageErr = writeArchive(path, binaryMembers)
+			case artifactBundleArchive:
+				packageErr = writeArchive(path, bundleMembers)
+			default:
+				packageErr = fmt.Errorf("unsupported artifact format %q", artifact.Format)
+			}
+			if packageErr != nil {
+				return BuildResult{}, fmt.Errorf("package %s-%s asset %s: %w", buildTarget.OS, buildTarget.Arch, artifact.Name, packageErr)
+			}
+			assets = append(assets, artifact.Name)
 		}
-		assets = append(assets, buildTarget.Asset)
 	}
 	sort.Strings(assets)
 	if err := writeChecksums(distDir, assets); err != nil {
@@ -233,6 +264,13 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 		return BuildResult{}, err
 	}
 	return BuildResult{Formula: project.Formula.Name, Version: options.Version, Assets: assets}, nil
+}
+
+func validateProfileCommit(project manifest.Manifest, commit string) error {
+	if project.Schema == manifest.ProfileSchema && len(commit) != 40 && len(commit) != 64 {
+		return errors.New("validate release commit: schema 2 requires a full 40- or 64-character source commit")
+	}
+	return nil
 }
 
 func acquireReleaseLock(outputDir string) (ownedOutput, error) {
@@ -398,22 +436,60 @@ func readManifestWithin(path, sourceDir string) (manifest.Manifest, error) {
 }
 
 func buildTargets(project manifest.Manifest) ([]target, error) {
-	result := []target{
-		{OS: "darwin", Arch: "arm64", Asset: project.Formula.Assets.DarwinARM64},
-		{OS: "darwin", Arch: "amd64", Asset: project.Formula.Assets.DarwinAMD64},
-	}
-	if project.Release.Linux {
+	result := make([]target, 0, 5)
+	if project.Schema == manifest.LegacySchema {
 		result = append(result,
-			target{OS: "linux", Arch: "arm64", Asset: project.Formula.Name + "-linux-arm64.tar.gz"},
-			target{OS: "linux", Arch: "amd64", Asset: project.Formula.Name + "-linux-amd64.tar.gz"},
+			target{OS: "darwin", Arch: "arm64", Executable: project.Formula.Binary, Artifacts: []targetArtifact{{Name: project.Formula.Assets.DarwinARM64, Format: artifactBundleArchive}}},
+			target{OS: "darwin", Arch: "amd64", Executable: project.Formula.Binary, Artifacts: []targetArtifact{{Name: project.Formula.Assets.DarwinAMD64, Format: artifactBundleArchive}}},
 		)
-	}
-	seen := make(map[string]struct{}, len(result))
-	for _, item := range result {
-		if _, exists := seen[item.Asset]; exists {
-			return nil, fmt.Errorf("validate release assets: duplicate asset name %q", item.Asset)
+		if project.Release.LinuxEnabled() {
+			result = append(result,
+				target{OS: "linux", Arch: "arm64", Executable: project.Formula.Binary, Artifacts: []targetArtifact{{Name: project.Formula.Name + "-linux-arm64.tar.gz", Format: artifactBundleArchive}}},
+				target{OS: "linux", Arch: "amd64", Executable: project.Formula.Binary, Artifacts: []targetArtifact{{Name: project.Formula.Name + "-linux-amd64.tar.gz", Format: artifactBundleArchive}}},
+			)
 		}
-		seen[item.Asset] = struct{}{}
+	} else {
+		for _, spec := range []struct {
+			name string
+			os   string
+			arch string
+		}{
+			{"darwin_arm64", "darwin", "arm64"},
+			{"darwin_amd64", "darwin", "amd64"},
+			{"linux_arm64", "linux", "arm64"},
+			{"linux_amd64", "linux", "amd64"},
+			{"windows_amd64", "windows", "amd64"},
+		} {
+			declared, exists := project.Release.Targets[spec.name]
+			if !exists {
+				continue
+			}
+			executable := project.Formula.Binary
+			if spec.os == "windows" {
+				executable += ".exe"
+			}
+			current := target{OS: spec.os, Arch: spec.arch, Executable: executable}
+			if declared.Binary != "" {
+				current.Artifacts = append(current.Artifacts, targetArtifact{Name: declared.Binary, Format: artifactBinary})
+			}
+			if declared.Archive != "" {
+				format := artifactBinaryArchive
+				if declared.ArchiveContents == "bundle" {
+					format = artifactBundleArchive
+				}
+				current.Artifacts = append(current.Artifacts, targetArtifact{Name: declared.Archive, Format: format})
+			}
+			result = append(result, current)
+		}
+	}
+	seen := make(map[string]struct{})
+	for _, item := range result {
+		for _, artifact := range item.Artifacts {
+			if _, exists := seen[artifact.Name]; exists {
+				return nil, fmt.Errorf("validate release assets: duplicate asset name %q", artifact.Name)
+			}
+			seen[artifact.Name] = struct{}{}
+		}
 	}
 	return result, nil
 }
@@ -447,10 +523,10 @@ func pathWithin(root, candidate string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }
 
-func runAdapter(adapterPath, sourceDir, binaryPath string, buildTarget target, version, commit string) error {
+func runAdapter(adapterPath, sourceDir, binaryPath string, buildTarget target, version, commit, bunCacheDir string) error {
 	timer := time.NewTimer(defaultBuildTimeout)
 	defer timer.Stop()
-	return runAdapterWithControl(adapterPath, sourceDir, binaryPath, buildTarget, version, commit, timer.C, terminateAdapter)
+	return runAdapterWithControl(adapterPath, sourceDir, binaryPath, buildTarget, version, commit, bunCacheDir, timer.C, terminateAdapter)
 }
 
 func terminateAdapter(command *exec.Cmd) {
@@ -463,10 +539,10 @@ func killAdapterLeader(process *os.Process) {
 	}
 }
 
-func runAdapterWithControl(adapterPath, sourceDir, binaryPath string, buildTarget target, version, commit string, timeout <-chan time.Time, terminate func(*exec.Cmd)) error {
+func runAdapterWithControl(adapterPath, sourceDir, binaryPath string, buildTarget target, version, commit, bunCacheDir string, timeout <-chan time.Time, terminate func(*exec.Cmd)) error {
 	command := exec.Command(adapterPath)
 	command.Dir = sourceDir
-	command.Env = buildEnvironment(buildTarget, binaryPath, version, commit)
+	command.Env = buildEnvironment(buildTarget, binaryPath, version, commit, bunCacheDir)
 	command.Stdin = nil
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
@@ -501,15 +577,19 @@ func runAdapterWithControl(adapterPath, sourceDir, binaryPath string, buildTarge
 	}
 }
 
-func buildEnvironment(buildTarget target, output, version, commit string) []string {
+func buildEnvironment(buildTarget target, output, version, commit, bunCacheDir string) []string {
 	allow := []string{
-		"CC", "CGO_ENABLED", "CXX", "DEVELOPER_DIR", "GOCACHE", "GOENV",
+		"BUN_INSTALL_CACHE_DIR", "CC", "CGO_ENABLED", "CXX", "DEVELOPER_DIR", "GOCACHE", "GOENV",
 		"GOMODCACHE", "GOPATH", "GOPROXY", "GOROOT", "GOSUMDB", "GOTOOLCHAIN",
 		"HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SDKROOT", "SHELL",
 		"SYSTEMROOT", "TEMP", "TERM", "TMP", "TMPDIR", "TZ", "USER",
 	}
 	result := make([]string, 0, len(allow)+5)
 	for _, name := range allow {
+		if name == "BUN_INSTALL_CACHE_DIR" && bunCacheDir != "" {
+			result = append(result, name+"="+bunCacheDir)
+			continue
+		}
 		if value, exists := os.LookupEnv(name); exists {
 			result = append(result, name+"="+value)
 		}
@@ -642,6 +722,29 @@ func hardLinked(info fs.FileInfo) bool {
 	default:
 		return false
 	}
+}
+
+func writeBinary(path string, data []byte) (retErr error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := file.Close(); retErr == nil && closeErr != nil {
+			retErr = closeErr
+		}
+		if retErr != nil {
+			_ = os.Remove(path)
+		}
+	}()
+	written, err := file.Write(data)
+	if err != nil {
+		return err
+	}
+	if written != len(data) {
+		return io.ErrShortWrite
+	}
+	return file.Sync()
 }
 
 func writeArchive(path string, members []archiveMember) (retErr error) {

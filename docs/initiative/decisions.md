@@ -79,7 +79,7 @@ Status: accepted until upstream release support lands.
 Current GitHub documentation supports `concurrency.queue: max` and the
 `job.workflow_*` identity fields. Latest released Actionlint 1.7.12 predates
 both and has open upstream work for them. The repository does not use a broad
-ignore: its pinned checker must return nonzero with exactly one queue and five
+ignore: its pinned checker must return nonzero with exactly one queue and six
 workflow-SHA diagnostics. Clean/no-op, missing, extra, changed, or differently
 versioned results fail. A future Actionlint upgrade must revise the expectation
 explicitly.
@@ -102,3 +102,24 @@ mutation requires `--execute` and the exact computed tag, never bypasses review
 or branch protection, and delegates final asset/tap publication to the existing
 immutable release workflow. Local installation is separately explicit and may
 change only Hextap and selected marker-owned Hextap skill copies.
+
+## D-011: Versioned runtime profiles and tap-owned Formula profiles
+
+Status: accepted.
+
+Schema 1 remains the exact Go four-target contract. Schema 2 is additive and
+uses a pinned Bun runtime, direct argv command phases, and explicit target
+artifacts. Darwin targets remain required for Homebrew, Linux remains paired,
+and Windows amd64 is optional. One adapter invocation creates one executable;
+the toolkit derives declared raw/archive representations and verifies their
+identity. Windows executables must be PE32+ amd64 and pass native version/commit
+execution.
+
+Schema-2 Formula profiles are update-only: source/tap manifests carry the
+profile name and service-enabled status, but the tap owns service, caveats,
+tests, comments, and formatting. Routine stable publication may still replace
+only the two Darwin URLs and two SHA-256 values. Project preparation must
+prefetch pinned Bun cross-target runtimes into an explicit dedicated cache.
+The reusable Ubuntu build runs the adapter as the original runner user inside
+a root-created network namespace. Hosted CI must prove an empty cache fails and
+the warmed five-target matrix succeeds before publication.

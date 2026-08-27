@@ -12,8 +12,8 @@ func TestHextapBundleContainsOnlySafeRelativeFiles(t *testing.T) {
 	if bundle.Name != "hextap" {
 		t.Fatalf("bundle name = %q, want hextap", bundle.Name)
 	}
-	if bundle.Version != "1.1.1" {
-		t.Fatalf("bundle version = %q, want 1.1.1", bundle.Version)
+	if bundle.Version != "1.2.0" {
+		t.Fatalf("bundle version = %q, want 1.2.0", bundle.Version)
 	}
 	foundSkill := false
 	err := fs.WalkDir(bundle.Files, ".", func(name string, entry fs.DirEntry, walkErr error) error {

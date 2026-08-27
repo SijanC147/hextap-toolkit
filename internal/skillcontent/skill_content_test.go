@@ -26,7 +26,7 @@ func readSkillFile(t *testing.T, relative string) string {
 
 func TestHextapSkillAgentSkillsFrontmatterAndContent(t *testing.T) {
 	content := readSkillFile(t, "SKILL.md")
-	frontmatter := regexp.MustCompile(`(?s)\A---\nname: hextap\ndescription: "[^"]+"\ncompatibility: "Requires Homebrew and the brew hextap external command\."\nlicense: MIT\nmetadata:\n  hextap-skill-version: "1\.1\.1"\n---\n`).FindString(content)
+	frontmatter := regexp.MustCompile(`(?s)\A---\nname: hextap\ndescription: "[^"]+"\ncompatibility: "Requires Homebrew and the brew hextap external command\."\nlicense: MIT\nmetadata:\n  hextap-skill-version: "1\.2\.0"\n---\n`).FindString(content)
 	if frontmatter == "" {
 		t.Fatal("SKILL.md frontmatter is not the lean canonical shape")
 	}

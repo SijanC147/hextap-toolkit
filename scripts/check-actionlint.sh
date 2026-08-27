@@ -35,10 +35,10 @@ queue_count="$(printf '%s\n' "$diagnostics" | grep -F -c "$queue_pattern" || tru
 workflow_count="$(printf '%s\n' "$diagnostics" | grep -F -c "$workflow_pattern" || true)"
 unexpected="$(printf '%s\n' "$diagnostics" | grep -F -v "$queue_pattern" | grep -F -v "$workflow_pattern" || true)"
 
-if [[ $status -eq 0 || "$queue_count" != 1 || "$workflow_count" != 5 || -n "$unexpected" ]]; then
+if [[ $status -eq 0 || "$queue_count" != 1 || "$workflow_count" != 6 || -n "$unexpected" ]]; then
   printf '%s\n' "$diagnostics" >&2
   echo "actionlint 1.7.12 diagnostics differ from the reviewed schema-lag set" >&2
   exit 1
 fi
 
-echo "actionlint 1.7.12: accepted exactly 1 concurrency.queue and 5 job.workflow_sha schema-lag diagnostics"
+echo "actionlint 1.7.12: accepted exactly 1 concurrency.queue and 6 job.workflow_sha schema-lag diagnostics"

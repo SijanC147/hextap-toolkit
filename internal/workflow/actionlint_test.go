@@ -12,7 +12,7 @@ import (
 func TestPinnedActionlintGateFailsClosed(t *testing.T) {
 	queueDiagnostic := `.github/workflows/release-go.yml:1:1: unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group" [syntax-check]`
 	workflowDiagnostic := `.github/workflows/release-go.yml:1:1: property "workflow_sha" is not defined in object type {status: string} [expression]`
-	exactDiagnostics := queueDiagnostic + "\n" + strings.Repeat(workflowDiagnostic+"\n", 5)
+	exactDiagnostics := queueDiagnostic + "\n" + strings.Repeat(workflowDiagnostic+"\n", 6)
 
 	tests := []struct {
 		name        string
@@ -20,10 +20,10 @@ func TestPinnedActionlintGateFailsClosed(t *testing.T) {
 		exitCode    int
 		wantSuccess bool
 	}{
-		{name: "exact six", diagnostics: exactDiagnostics, exitCode: 1, wantSuccess: true},
+		{name: "exact seven", diagnostics: exactDiagnostics, exitCode: 1, wantSuccess: true},
 		{name: "clean no-op", exitCode: 0},
 		{name: "silent failure", exitCode: 1},
-		{name: "missing diagnostic", diagnostics: queueDiagnostic + "\n" + strings.Repeat(workflowDiagnostic+"\n", 4), exitCode: 1},
+		{name: "missing diagnostic", diagnostics: queueDiagnostic + "\n" + strings.Repeat(workflowDiagnostic+"\n", 5), exitCode: 1},
 		{name: "extra diagnostic", diagnostics: exactDiagnostics + ".github/workflows/ci.yml:1:1: unexpected failure [syntax-check]\n", exitCode: 1},
 	}
 

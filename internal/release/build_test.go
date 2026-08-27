@@ -117,6 +117,18 @@ func TestBuildTargetMatrixAndLinuxToggle(t *testing.T) {
 	}
 }
 
+func TestBuildEnvironmentAllowsDedicatedBunRuntimeCacheButNotSecrets(t *testing.T) {
+	t.Setenv("SECRET_SHOULD_NOT_LEAK", "hidden")
+	environment := buildEnvironment(target{OS: "windows", Arch: "amd64"}, "/tmp/output.exe", "1.2.3", testCommit, "/tmp/hextap-bun-runtime-cache")
+	joined := strings.Join(environment, "\n")
+	if !strings.Contains(joined, "BUN_INSTALL_CACHE_DIR=/tmp/hextap-bun-runtime-cache") {
+		t.Fatalf("build environment lacks Bun cache: %v", environment)
+	}
+	if strings.Contains(joined, "SECRET_SHOULD_NOT_LEAK") || strings.Contains(joined, "hidden") {
+		t.Fatalf("build environment leaked secret: %v", environment)
+	}
+}
+
 func TestBuildPropagatesPrereleaseVersion(t *testing.T) {
 	source, manifestPath := writeBuildFixture(t, false, successfulAdapter)
 	output := filepath.Join(t.TempDir(), "dist")

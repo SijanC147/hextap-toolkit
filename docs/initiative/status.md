@@ -7,9 +7,9 @@ checked live before mutation.
 
 | Area | Status | Evidence boundary |
 |---|---|---|
-| Strict schema-1 manifest | Complete locally | Exact keys, duplicate/Unicode rejection, path/name limits, schema conformance tests. |
-| Deterministic build and verification | Complete locally | Darwin/Linux target control, canonical archives, checksums, live-bounded native execution. |
-| Reusable workflow versioning | Complete locally | Caller manifest artifact ID/SHA handoff; five `job.workflow_sha` self-checkouts; queued per-repository concurrency. |
+| Strict versioned manifests | Complete locally | Schema-1 Go compatibility plus schema-2 Bun commands/targets/Formula profile; exact keys, duplicate/Unicode rejection, conformance tests. |
+| Deterministic build and verification | Complete locally; hosted namespace proof pending | Darwin/Linux compatibility; explicit raw/archive assets; Windows PE32+; dedicated Bun runtime cache; offline adapter namespace; checksums; live-bounded native execution. |
+| Reusable workflow versioning | Complete locally | Caller manifest artifact ID/SHA handoff; six `job.workflow_sha` self-checkouts; queued per-repository concurrency. |
 | Release publication/recovery | Complete locally | Exact assets, draft resume, immutable published rerun acceptance, stable-only Homebrew. |
 | Tap publisher | Complete locally | Source/tap equality, manifest-declared assets, Formula-only stage, direct-push retry, exact tap CI SHA. |
 | `brew-hextap` command | Complete locally | `version`, `onboard`, `validate`, `doctor`; standard-library-only build. |

@@ -78,7 +78,7 @@ type gitTagResponse struct {
 // Online set, it adds only bounded read-only GitHub queries.
 func Doctor(options DoctorOptions) (DoctorResult, error) {
 	checks := make([]string, 0, 12)
-	for _, tool := range []string{"git", "gh", "go"} {
+	for _, tool := range []string{"git", "gh"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			return DoctorResult{}, fmt.Errorf("required tool %q was not found on PATH", tool)
 		}
@@ -88,7 +88,14 @@ func Doctor(options DoctorOptions) (DoctorResult, error) {
 	if err != nil {
 		return DoctorResult{}, err
 	}
-	checks = append(checks, "local onboarding contract")
+	runtimeTool := "go"
+	if validated.Manifest.Release.Profile != nil {
+		runtimeTool = validated.Manifest.Release.Profile.Runtime
+	}
+	if _, err := exec.LookPath(runtimeTool); err != nil {
+		return DoctorResult{}, fmt.Errorf("required tool %q was not found on PATH", runtimeTool)
+	}
+	checks = append(checks, "tool "+runtimeTool, "local onboarding contract")
 	if !options.Online {
 		return DoctorResult{Project: validated.Project, Checks: checks}, nil
 	}
@@ -142,7 +149,7 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		return nil, errors.New("online doctor: tap Formula fails canonical class validation")
 	}
 	if _, err := formulaengine.ValidateCanonical([]byte(formulaData), validated.Manifest); err != nil {
-		return nil, errors.New("online doctor: tap Formula is not the canonical manifest rendering")
+		return nil, errors.New("online doctor: tap Formula does not satisfy the manifest Formula contract")
 	}
 	return []string{
 		"GitHub authentication",
@@ -151,7 +158,7 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		"Actions secret name",
 		"owned active ruleset bodies",
 		"stable toolkit provenance",
-		"canonical tap registration and Formula bytes",
+		"canonical tap registration and Formula contract",
 	}, nil
 }
 
