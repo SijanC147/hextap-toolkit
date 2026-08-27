@@ -58,6 +58,21 @@ for attempt in 1 2 3; do
     exit 1
   }
 
+  formula_profile="$(ruby -rjson -e 'puts(JSON.parse(File.read(ARGV.fetch(0))).dig("homebrew", "formula_profile") || "")' "$manifest")"
+  if [[ -n "$formula_profile" ]]; then
+    [[ "$formula_profile" == "$formula" ]]
+    template_directory="$attempt_dir/packaging"
+    [[ -d "$template_directory" && ! -L "$template_directory" ]] || {
+      echo "tap-owned Formula template directory is missing or unsafe: packaging" >&2
+      exit 1
+    }
+    template_path="$template_directory/$formula_profile.rb.tmpl"
+    [[ -f "$template_path" && ! -L "$template_path" ]] || {
+      echo "tap-owned Formula template is missing: packaging/$formula_profile.rb.tmpl" >&2
+      exit 1
+    }
+  fi
+
   IFS=$'\t' read -r arm64_asset amd64_asset <<< "$(ruby -rjson -e '
     assets=JSON.parse(File.read(ARGV.fetch(0))).fetch("formula").fetch("assets")
     puts [assets.fetch("darwin_arm64"), assets.fetch("darwin_amd64")].join("\t")
@@ -75,9 +90,19 @@ for attempt in 1 2 3; do
   [[ "$arm64_sha" =~ ^[0-9a-f]{64}$ && "$amd64_sha" =~ ^[0-9a-f]{64}$ ]]
 
   if [[ -f "$formula_path" ]]; then
-    "$hextapctl" formula update --manifest "$manifest" --formula "$formula_path" \
-      --version "$version" --arm64-sha "$arm64_sha" --amd64-sha "$amd64_sha"
+    if [[ -n "$formula_profile" ]]; then
+      "$hextapctl" formula update --manifest "$manifest" --formula "$formula_path" \
+        --template "$template_path" --version "$version" \
+        --arm64-sha "$arm64_sha" --amd64-sha "$amd64_sha"
+    else
+      "$hextapctl" formula update --manifest "$manifest" --formula "$formula_path" \
+        --version "$version" --arm64-sha "$arm64_sha" --amd64-sha "$amd64_sha"
+    fi
   else
+    [[ -z "$formula_profile" ]] || {
+      echo "tap-owned Formula profile must already have a reviewed Formula" >&2
+      exit 1
+    }
     mkdir -p "$(dirname "$formula_path")"
     "$hextapctl" formula render --manifest "$manifest" --output "$formula_path" \
       --version "$version" --arm64-sha "$arm64_sha" --amd64-sha "$amd64_sha"

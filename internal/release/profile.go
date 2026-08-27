@@ -78,9 +78,11 @@ func RunProfile(options ProfileOptions) error {
 		if cacheDirectory == "" {
 			return errors.New("BUN_INSTALL_CACHE_DIR is required for Bun build preparation")
 		}
-		if _, err := validateDirectory(cacheDirectory, "Bun runtime cache", false); err != nil {
+		resolvedCache, err := validateDirectory(cacheDirectory, "Bun runtime cache", false)
+		if err != nil {
 			return err
 		}
+		cacheDirectory = resolvedCache
 	}
 	environment := profileEnvironment(cacheDirectory)
 	if err := requireProfileRuntimeVersion(sourceDir, project.Release.Profile.RuntimeVersion, environment, stdout); err != nil {

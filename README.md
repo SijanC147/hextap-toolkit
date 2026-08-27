@@ -422,6 +422,16 @@ service, caveats, tests, comments, or formatting into source metadata.
 | `homebrew.caveats` | Safe heredoc text. `{{home}}` and `{{var}}` are the only accepted placeholders and render to fixed toolkit-owned expressions. Other placeholders, literal `#{`/`#@`/`#$` interpolation, carriage returns, and an `EOS` terminator line are rejected. |
 | `homebrew.formula_profile` / `service_enabled` | Schema 2 only. The profile must equal `formula.name`; the tap owns all nonmetadata Formula bytes. Source publication may update only the two Darwin URLs and SHA-256 values and cannot render this Formula. |
 
+Each tap-owned Formula profile is bound to a reviewed regular, non-symlink
+`packaging/<formula_profile>.rb.tmpl` in the tap. That template must contain
+exactly one canonical Darwin architecture block and exactly one each of
+`@ARM64_URL@`, `@ARM64_SHA256@`, `@AMD64_URL@`, and `@AMD64_SHA256@`; every
+other token-like `@…@` placeholder is rejected. Before publication, the current
+Formula must be byte-identical to that template rendered with its canonical
+current URLs and lowercase checksums. Hextap then renders the new Formula solely
+from the same template, so service, caveats, tests, comments, Ruby expressions,
+and formatting remain reviewed tap-owned bytes without interpreting Ruby.
+
 Stable versions accepted by Formula commands are strict `X.Y.Z` SemVer:
 
 - no leading `v`
@@ -700,6 +710,24 @@ It then changes only the two quoted URL values and two quoted SHA values. Every
 other byte and the file mode are preserved. Downgrades and explicit `version`
 stanzas are rejected. An equal-version update is byte-idempotent when all
 metadata matches, while an equal-version checksum correction is permitted.
+
+For a schema-2 tap-owned Formula profile, pass the exact reviewed tap template:
+
+```sh
+hextapctl formula update \
+  --manifest Projects/better-ccflare.json \
+  --formula Formula/better-ccflare.rb \
+  --template packaging/better-ccflare.rb.tmpl \
+  --version 3.8.2 \
+  --arm64-sha cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --amd64-sha dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+```
+
+The profile template is the complete nonmetadata authority. Hextap refuses a
+symlink or non-regular template, missing/duplicate/misplaced metadata tokens,
+any additional token-like placeholder, noncanonical current URL or checksum,
+Formula/template byte drift, and version downgrades. Schema-1 Formula rendering
+and update behavior is unchanged.
 
 All errors use a concise `error: ...` message on stderr and a nonzero exit
 status. Successful validate, render, and update operations print one

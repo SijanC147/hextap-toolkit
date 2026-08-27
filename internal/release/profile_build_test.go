@@ -90,7 +90,10 @@ func TestProfileBuildPreservesExplicitRawAndSingleBinaryArchiveContract(t *testi
 	if err := os.Mkdir(output, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Build(buildOptions(source, manifestPath, output))
+	cacheDirectory := t.TempDir()
+	options := buildOptions(source, manifestPath, output)
+	options.BunCacheDir = cacheDirectory
+	result, err := Build(options)
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
@@ -131,7 +134,9 @@ func TestProfileBuildPreservesExplicitRawAndSingleBinaryArchiveContract(t *testi
 	if err := os.Mkdir(second, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Build(buildOptions(source, manifestPath, second)); err != nil {
+	secondOptions := buildOptions(source, manifestPath, second)
+	secondOptions.BunCacheDir = cacheDirectory
+	if _, err := Build(secondOptions); err != nil {
 		t.Fatalf("second Build() error = %v", err)
 	}
 	for _, name := range append(append([]string(nil), want...), "SHA256SUMS") {
@@ -159,5 +164,50 @@ func TestProfileBuildRequiresFullSourceCommitIdentity(t *testing.T) {
 	options.Commit = "abcdef1"
 	if _, err := Build(options); err == nil || !strings.Contains(err.Error(), "full 40- or 64-character") {
 		t.Fatalf("Build(short profile commit) error = %v", err)
+	}
+}
+
+func TestProfileBuildResolvesRelativeBunCacheForAdapterEnvironment(t *testing.T) {
+	source, manifestPath := writeProfileBuildFixture(t)
+	callerDirectory := t.TempDir()
+	cacheDirectory := filepath.Join(callerDirectory, "cache")
+	if err := os.Mkdir(cacheDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(callerDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(workingDirectory) })
+	adapter := `#!/bin/sh
+set -eu
+: "${BUN_INSTALL_CACHE_DIR:?}"
+printf '%s' "$BUN_INSTALL_CACHE_DIR" > "$HEXTAP_OUTPUT"
+`
+	if err := os.WriteFile(filepath.Join(source, "scripts", "hextap-build"), []byte(adapter), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options := buildOptions(source, manifestPath, output)
+	options.BunCacheDir = "cache"
+	if _, err := Build(options); err != nil {
+		t.Fatalf("Build(relative cache) error = %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(output, "better-ccflare-linux-amd64"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedCache, err := filepath.EvalSymlinks(cacheDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != resolvedCache {
+		t.Fatalf("adapter cache = %q, want resolved %q", raw, resolvedCache)
 	}
 }

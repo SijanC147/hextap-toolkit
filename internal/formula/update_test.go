@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -84,7 +85,11 @@ func TestUpdateTapOwnedProfilePreservesServiceCaveatsTestsAndFormatting(t *testi
   end
 end
 `)
-	updated, result, err := Update(original, project, "3.8.2", newArmSHA, newAmdSHA)
+	template := profileTemplate(t, original)
+	if _, _, err := Update(original, project, "3.8.2", newArmSHA, newAmdSHA); err == nil || !strings.Contains(err.Error(), "template") {
+		t.Fatalf("Update(profile without template) error = %v", err)
+	}
+	updated, result, err := UpdateWithTemplate(original, template, project, "3.8.2", newArmSHA, newAmdSHA)
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
@@ -97,6 +102,101 @@ end
 	if !result.Changed || result.PreviousVersion != "3.8.1" || result.Version != "3.8.2" {
 		t.Fatalf("Update() result = %#v", result)
 	}
+	if _, _, err := UpdateWithTemplate(updated, template, project, "3.8.1", armSHA, amdSHA); err == nil || !strings.Contains(err.Error(), "downgrade") {
+		t.Fatalf("UpdateWithTemplate(downgrade) error = %v", err)
+	}
+}
+
+func TestUpdateTapOwnedProfileTemplateRejectsFormulaAndTokenDrift(t *testing.T) {
+	project := loadProfileManifest(t)
+	original := []byte(`class BetterCcflare < Formula
+  if Hardware::CPU.arm?
+    url "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz"
+    sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  else
+    url "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-x86_64.tar.gz"
+    sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  end
+  marker = "#{send(:url, 'https://example.invalid/tap-owned-code')}"
+end
+`)
+	template := profileTemplate(t, original)
+	tests := map[string]struct {
+		formula  []byte
+		template []byte
+	}{
+		"nonmetadata Formula drift": {
+			formula:  bytesReplace(t, original, `marker =`, `changed =`),
+			template: template,
+		},
+		"noncanonical current URL": {
+			formula: bytesReplace(
+				t,
+				original,
+				"https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz",
+				"https://github.com/other/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz",
+			),
+			template: template,
+		},
+		"uppercase current SHA": {
+			formula:  bytesReplace(t, original, strings.Repeat("a", 64), strings.Repeat("A", 64)),
+			template: template,
+		},
+		"missing token": {
+			formula:  original,
+			template: bytesReplace(t, template, "@ARM64_URL@", "@AMD64_URL@"),
+		},
+		"unknown token": {
+			formula:  original,
+			template: append(append([]byte(nil), template...), []byte("@UNREVIEWED@\n")...),
+		},
+		"lowercase token": {
+			formula:  original,
+			template: append(append([]byte(nil), template...), []byte("@unreviewed@\n")...),
+		},
+		"mixed-case token": {
+			formula:  original,
+			template: append(append([]byte(nil), template...), []byte("@Unreviewed@\n")...),
+		},
+		"tokens outside canonical architecture block": {
+			formula: original,
+			template: bytesReplace(
+				t,
+				template,
+				"  if Hardware::CPU.arm?\n",
+				"  if Hardware::CPU.intel?\n",
+			),
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := UpdateWithTemplate(test.formula, test.template, project, "3.8.2", newArmSHA, newAmdSHA); err == nil {
+				t.Fatal("UpdateWithTemplate() accepted Formula/template drift")
+			}
+		})
+	}
+}
+
+func profileTemplate(t *testing.T, formula []byte) []byte {
+	t.Helper()
+	result := append([]byte(nil), formula...)
+	for current, token := range map[string]string{
+		"https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz": "@ARM64_URL@",
+		strings.Repeat("a", 64): "@ARM64_SHA256@",
+		"https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-x86_64.tar.gz": "@AMD64_URL@",
+		strings.Repeat("b", 64): "@AMD64_SHA256@",
+	} {
+		result = bytesReplace(t, result, current, token)
+	}
+	return result
+}
+
+func bytesReplace(t *testing.T, value []byte, current, replacement string) []byte {
+	t.Helper()
+	if bytes.Count(value, []byte(current)) != 1 {
+		t.Fatalf("fixture occurrence count for %q is not one", current)
+	}
+	return bytes.Replace(value, []byte(current), []byte(replacement), 1)
 }
 
 func stripReleaseMetadata(value string) string {
@@ -284,5 +384,43 @@ func TestUpdateFileIsAtomicAndPreservesMode(t *testing.T) {
 	}
 	if string(afterFailure) != string(beforeFailure) {
 		t.Fatal("UpdateFile() mutated destination after failure")
+	}
+}
+
+func TestUpdateFileWithTemplateRejectsSymlinkTemplateWithoutMutation(t *testing.T) {
+	project := loadProfileManifest(t)
+	original := []byte(`class BetterCcflare < Formula
+  if Hardware::CPU.arm?
+    url "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz"
+    sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  else
+    url "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-x86_64.tar.gz"
+    sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  end
+end
+`)
+	template := profileTemplate(t, original)
+	directory := t.TempDir()
+	formulaPath := filepath.Join(directory, "better-ccflare.rb")
+	templateTarget := filepath.Join(directory, "better-ccflare.real.rb.tmpl")
+	templatePath := filepath.Join(directory, "better-ccflare.rb.tmpl")
+	if err := os.WriteFile(formulaPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(templateTarget, template, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(templateTarget, templatePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpdateFileWithTemplate(formulaPath, templatePath, project, "3.8.2", newArmSHA, newAmdSHA); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("UpdateFileWithTemplate(symlink) error = %v", err)
+	}
+	after, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, original) {
+		t.Fatal("UpdateFileWithTemplate() mutated Formula after template rejection")
 	}
 }

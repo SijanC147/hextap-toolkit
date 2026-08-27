@@ -2,6 +2,7 @@ package formula
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -58,7 +59,11 @@ func TestValidateCanonicalAcceptsTapOwnedProfileMetadataWithoutRendering(t *test
   end
 end
 `)
-	metadata, err := ValidateCanonical(formula, project)
+	template := profileTemplate(t, formula)
+	if _, err := ValidateCanonical(formula, project); err == nil || !strings.Contains(err.Error(), "template") {
+		t.Fatalf("ValidateCanonical(profile without template) error = %v", err)
+	}
+	metadata, err := ValidateCanonicalWithTemplate(formula, template, project)
 	if err != nil {
 		t.Fatalf("ValidateCanonical(profile) error = %v", err)
 	}

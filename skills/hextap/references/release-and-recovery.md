@@ -62,8 +62,14 @@ source release and then stop at the tap registry gate. Preserve that release.
 1. Verify the immutable release and its `SHA256SUMS`.
 2. For schema 1, use the trusted pinned toolkit and real release URLs/checksums
    to render the exact Formula. For a schema-2 tap-owned Formula profile, pair
-   the manifest with the already reviewed tap template; never render or coerce
-   its service/caveats/tests from source. Never invent a checksum.
+   the manifest with the already reviewed regular, non-symlink
+   `packaging/<formula_profile>.rb.tmpl`; never render or coerce its
+   service/caveats/tests from source. The template must have exactly the four
+   approved URL/SHA tokens in the canonical Darwin architecture block and no
+   other token-like placeholders. Require the current Formula to equal the
+   current-metadata template rendering byte-for-byte before rendering the new
+   metadata solely from that same template. Any template, Formula, URL, SHA, or
+   downgrade drift is a stop condition. Never invent a checksum.
 3. Open one protected tap PR containing both the byte-exact
    `Projects/FORMULA.json` registration and `Formula/FORMULA.rb`.
 4. Require whole-tap PR CI, merge through protection, and require tap-main CI.

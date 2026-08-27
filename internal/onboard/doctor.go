@@ -148,7 +148,20 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 	if err := validateFormulaClass([]byte(formulaData), validated.Manifest.Formula.Class); err != nil {
 		return nil, errors.New("online doctor: tap Formula fails canonical class validation")
 	}
-	if _, err := formulaengine.ValidateCanonical([]byte(formulaData), validated.Manifest); err != nil {
+	if validated.Manifest.Homebrew.FormulaProfile != "" {
+		templateDestination := path.Join("packaging", validated.Manifest.Homebrew.FormulaProfile+".rb.tmpl")
+		templateType, err := ghRead(4<<10, "api", "repos/SijanC147/homebrew-hextap/contents/"+templateDestination, "--jq", ".type")
+		if err != nil || strings.TrimSpace(templateType) != "file" {
+			return nil, fmt.Errorf("online doctor: tap-owned Formula template %s is not a regular repository file", templateDestination)
+		}
+		templateData, err := ghRead(maximumLocalFile, "api", "-H", "Accept: application/vnd.github.raw+json", "repos/SijanC147/homebrew-hextap/contents/"+templateDestination)
+		if err != nil {
+			return nil, fmt.Errorf("online doctor: tap-owned Formula template %s is missing", templateDestination)
+		}
+		if _, err := formulaengine.ValidateCanonicalWithTemplate([]byte(formulaData), []byte(templateData), validated.Manifest); err != nil {
+			return nil, errors.New("online doctor: tap Formula does not equal its tap-owned template rendering")
+		}
+	} else if _, err := formulaengine.ValidateCanonical([]byte(formulaData), validated.Manifest); err != nil {
 		return nil, errors.New("online doctor: tap Formula does not satisfy the manifest Formula contract")
 	}
 	return []string{

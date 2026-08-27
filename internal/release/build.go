@@ -127,6 +127,19 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 	if err := validateProfileCommit(project, options.Commit); err != nil {
 		return BuildResult{}, err
 	}
+	bunCacheDir := options.BunCacheDir
+	if project.Schema == manifest.ProfileSchema {
+		if bunCacheDir == "" {
+			bunCacheDir, _ = os.LookupEnv("BUN_INSTALL_CACHE_DIR")
+		}
+		if bunCacheDir == "" {
+			return BuildResult{}, errors.New("validate build manifest: schema 2 requires BUN_INSTALL_CACHE_DIR")
+		}
+		bunCacheDir, err = validateDirectory(bunCacheDir, "Bun runtime cache", false)
+		if err != nil {
+			return BuildResult{}, err
+		}
+	}
 	targets, err := buildTargets(project)
 	if err != nil {
 		return BuildResult{}, err
@@ -165,7 +178,7 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 			return BuildResult{}, fmt.Errorf("create %s-%s staging directory: %w", buildTarget.OS, buildTarget.Arch, err)
 		}
 		binaryPath := filepath.Join(stageDir, buildTarget.Executable)
-		if err := runAdapter(adapterPath, sourceDir, binaryPath, buildTarget, options.Version, options.Commit, options.BunCacheDir); err != nil {
+		if err := runAdapter(adapterPath, sourceDir, binaryPath, buildTarget, options.Version, options.Commit, bunCacheDir); err != nil {
 			return BuildResult{}, err
 		}
 		binary, err := validateAdapterOutput(stageDir, binaryPath, buildTarget.Executable)

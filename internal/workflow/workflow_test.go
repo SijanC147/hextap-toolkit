@@ -211,6 +211,16 @@ func TestPublishHomebrewContract(t *testing.T) {
 	assertContains(t, script, `run.fetch("event") == ARGV[1]`)
 }
 
+func TestPublishHomebrewRequiresTapOwnedProfileTemplate(t *testing.T) {
+	script := readRepositoryFile(t, "scripts/publish-homebrew.sh")
+	assertContains(t, script, `dig("homebrew", "formula_profile")`)
+	assertContains(t, script, `[[ -d "$template_directory" && ! -L "$template_directory" ]]`)
+	assertContains(t, script, `template_path="$template_directory/$formula_profile.rb.tmpl"`)
+	assertContains(t, script, `[[ -f "$template_path" && ! -L "$template_path" ]]`)
+	assertContains(t, script, `--template "$template_path" --version "$version"`)
+	assertContains(t, script, "tap-owned Formula profile must already have a reviewed Formula")
+}
+
 func TestPublishReleaseDraftContract(t *testing.T) {
 	script := readRepositoryFile(t, "scripts/publish-release.sh")
 
@@ -235,6 +245,50 @@ func TestPublishHomebrewUsesCustomManifestAssets(t *testing.T) {
 	}
 	if !strings.Contains(result.hextapLog, "--amd64-sha "+strings.Repeat("b", 64)) {
 		t.Fatalf("hextapctl log missing custom amd64 checksum: %q", result.hextapLog)
+	}
+}
+
+func TestPublishHomebrewUsesReviewedTapOwnedProfileTemplate(t *testing.T) {
+	profileManifest := readRepositoryFile(t, "examples/better-ccflare.json")
+	template := `class BetterCcflare < Formula
+  if Hardware::CPU.arm?
+    url "@ARM64_URL@"
+    sha256 "@ARM64_SHA256@"
+  else
+    url "@AMD64_URL@"
+    sha256 "@AMD64_SHA256@"
+  end
+  service do
+    keep_alive successful_exit: false, crashed: true
+  end
+end
+`
+	formula := strings.NewReplacer(
+		"@ARM64_URL@", "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz",
+		"@ARM64_SHA256@", strings.Repeat("a", 64),
+		"@AMD64_URL@", "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-x86_64.tar.gz",
+		"@AMD64_SHA256@", strings.Repeat("b", 64),
+	).Replace(template)
+
+	result := runPublisherWithOptions(t, profileManifest, compactJSON(t, profileManifest), publisherOptions{
+		tapFormula:  formula,
+		tapTemplate: template,
+	})
+	if result.err != nil {
+		t.Fatalf("publish-homebrew.sh failed: %v\nstdout:\n%s\nstderr:\n%s", result.err, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.hextapLog, "--template ") || !strings.Contains(result.hextapLog, "/packaging/better-ccflare.rb.tmpl") {
+		t.Fatalf("hextapctl log missing tap-owned template binding: %q", result.hextapLog)
+	}
+
+	missing := runPublisherWithOptions(t, profileManifest, compactJSON(t, profileManifest), publisherOptions{
+		tapFormula: formula,
+	})
+	if missing.err == nil || !strings.Contains(missing.stderr, "template directory is missing or unsafe") {
+		t.Fatalf("missing profile template = error %v, stderr %q", missing.err, missing.stderr)
+	}
+	if missing.hextapLog != "" {
+		t.Fatalf("hextapctl ran before profile template validation: %q", missing.hextapLog)
 	}
 }
 
@@ -383,6 +437,8 @@ type publisherOptions struct {
 	tapRunMode     string
 	tapRunOutcomes string
 	tapStateEvent  string
+	tapFormula     string
+	tapTemplate    string
 }
 
 func runPublisher(t *testing.T, sourceManifest, tapManifest string) publisherResult {
@@ -408,11 +464,35 @@ func runPublisherWithOptions(t *testing.T, sourceManifest, tapManifest string, o
 	ghLogPath := filepath.Join(temporary, "gh.log")
 	pushCountPath := filepath.Join(temporary, "push-count")
 	sleepLogPath := filepath.Join(temporary, "sleep.log")
+	tapFormulaPath := filepath.Join(temporary, "tap-formula.rb")
+	tapTemplatePath := filepath.Join(temporary, "tap-formula.rb.tmpl")
+	var source struct {
+		Formula struct {
+			Name       string `json:"name"`
+			Repository struct {
+				Owner string `json:"owner"`
+				Name  string `json:"name"`
+			} `json:"repository"`
+			Assets struct {
+				DarwinARM64 string `json:"darwin_arm64"`
+				DarwinAMD64 string `json:"darwin_amd64"`
+			} `json:"assets"`
+		} `json:"formula"`
+	}
+	if err := json.Unmarshal([]byte(sourceManifest), &source); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, sourcePath, sourceManifest, 0o600)
 	writeFile(t, tapPath, tapManifest, 0o600)
 	writeFile(t, filepath.Join(assetDirectory, "SHA256SUMS"),
-		strings.Repeat("a", 64)+"  renamed-aarch64-package.tar.gz\n"+
-			strings.Repeat("b", 64)+"  renamed-x86_64-package.tar.gz\n", 0o600)
+		strings.Repeat("a", 64)+"  "+source.Formula.Assets.DarwinARM64+"\n"+
+			strings.Repeat("b", 64)+"  "+source.Formula.Assets.DarwinAMD64+"\n", 0o600)
+	if options.tapFormula != "" {
+		writeFile(t, tapFormulaPath, options.tapFormula, 0o600)
+	}
+	if options.tapTemplate != "" {
+		writeFile(t, tapTemplatePath, options.tapTemplate, 0o600)
+	}
 
 	ghPath := filepath.Join(stubDirectory, "gh")
 	writeFile(t, ghPath, `#!/usr/bin/env bash
@@ -425,7 +505,15 @@ if [[ "$1" == repo && "$2" == clone ]]; then
   destination="$4"
   mkdir -p "$destination/Projects" "$destination/Formula"
   cp "$TEST_TAP_MANIFEST" "$destination/Projects/$TEST_FORMULA.json"
-  : > "$destination/Formula/$TEST_FORMULA.rb"
+  if [[ -n "$TEST_TAP_FORMULA_PATH" ]]; then
+    cp "$TEST_TAP_FORMULA_PATH" "$destination/Formula/$TEST_FORMULA.rb"
+  else
+    : > "$destination/Formula/$TEST_FORMULA.rb"
+  fi
+  if [[ -n "$TEST_TAP_TEMPLATE_PATH" ]]; then
+    mkdir -p "$destination/packaging"
+    cp "$TEST_TAP_TEMPLATE_PATH" "$destination/packaging/$TEST_FORMULA.rb.tmpl"
+  fi
   exit 0
 fi
 if [[ "$1" == run && "$2" == watch ]]; then
@@ -511,8 +599,13 @@ set -euo pipefail
 printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 `, 0o700)
 
+	repository := source.Formula.Repository.Owner + "/" + source.Formula.Repository.Name
 	command := exec.Command("bash", filepath.Join(repositoryRoot(t), "scripts/publish-homebrew.sh"),
-		"SijanC147/custom-project", "v1.2.3", "1.2.3", "custom-formula", sourcePath, assetDirectory, hextapPath)
+		repository, "v3.8.1", "3.8.1", source.Formula.Name, sourcePath, assetDirectory, hextapPath)
+	if source.Formula.Name == "custom-formula" {
+		command.Args[3] = "v1.2.3"
+		command.Args[4] = "1.2.3"
+	}
 	gitChanged := "false"
 	if options.gitChanged {
 		gitChanged = "true"
@@ -533,7 +626,19 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 		"PATH="+stubDirectory+":/usr/bin:/bin",
 		"GH_TOKEN=test-token",
 		"TEST_TAP_MANIFEST="+tapPath,
-		"TEST_FORMULA=custom-formula",
+		"TEST_FORMULA="+source.Formula.Name,
+		"TEST_TAP_FORMULA_PATH="+func() string {
+			if options.tapFormula != "" {
+				return tapFormulaPath
+			}
+			return ""
+		}(),
+		"TEST_TAP_TEMPLATE_PATH="+func() string {
+			if options.tapTemplate != "" {
+				return tapTemplatePath
+			}
+			return ""
+		}(),
 		"TEST_TAP_SHA="+strings.Repeat("c", 40),
 		"TEST_HEXTAP_LOG="+hextapLogPath,
 		"TEST_GH_LOG="+ghLogPath,

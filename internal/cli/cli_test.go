@@ -341,6 +341,58 @@ func TestFormulaRenderAndUpdateCommands(t *testing.T) {
 	}
 }
 
+func TestFormulaUpdateProfileRequiresAndUsesTapTemplate(t *testing.T) {
+	manifestPath := filepath.Join("..", "..", "examples", "better-ccflare.json")
+	template := `class BetterCcflare < Formula
+  if Hardware::CPU.arm?
+    url "@ARM64_URL@"
+    sha256 "@ARM64_SHA256@"
+  else
+    url "@AMD64_URL@"
+    sha256 "@AMD64_SHA256@"
+  end
+  marker = "#{send(:url, 'tap-owned-code')}"
+end
+`
+	formula := strings.NewReplacer(
+		"@ARM64_URL@", "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-arm64.tar.gz",
+		"@ARM64_SHA256@", cliArmSHA,
+		"@AMD64_URL@", "https://github.com/SijanC147/better-ccflare/releases/download/v3.8.1/better-ccflare-macos-x86_64.tar.gz",
+		"@AMD64_SHA256@", cliAmdSHA,
+	).Replace(template)
+	directory := t.TempDir()
+	formulaPath := filepath.Join(directory, "better-ccflare.rb")
+	templatePath := filepath.Join(directory, "better-ccflare.rb.tmpl")
+	if err := os.WriteFile(formulaPath, []byte(formula), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(templatePath, []byte(template), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	common := []string{
+		"formula", "update",
+		"--manifest", manifestPath,
+		"--formula", formulaPath,
+		"--version", "3.8.2",
+		"--arm64-sha", strings.Repeat("c", 64),
+		"--amd64-sha", strings.Repeat("d", 64),
+	}
+	if code, _, stderr := execute(common...); code == 0 || !strings.Contains(stderr, "--template is required") {
+		t.Fatalf("profile update without template = code %d, stderr %q", code, stderr)
+	}
+	code, stdout, stderr := execute(append(common, "--template", templatePath)...)
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "formula updated") {
+		t.Fatalf("profile update = code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	updated, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updated), "/v3.8.2/") || !strings.Contains(string(updated), strings.Repeat("c", 64)) || !strings.Contains(string(updated), strings.Repeat("d", 64)) {
+		t.Fatalf("updated profile Formula metadata is wrong:\n%s", updated)
+	}
+}
+
 func TestFormulaRenderCLIErrorDoesNotMutateDestination(t *testing.T) {
 	manifestPath := exampleManifest(t)
 	formulaPath := filepath.Join(t.TempDir(), "ClaudeRcProxy.rb")

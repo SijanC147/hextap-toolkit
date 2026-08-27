@@ -66,7 +66,9 @@ argv, explicit targets, and packaging per target. One adapter executable may
 produce a raw asset, a canonical archive, or both; both representations must be
 byte-identical. Windows amd64 is verified as PE32+ and executed on a Windows
 runner. A named tap-owned Formula profile keeps nonmetadata Ruby outside source
-while the publisher still patches only the two Darwin URLs and SHA-256 values.
+and binds it to a reviewed tap template. The publisher first proves full current
+Formula equality with the current-metadata rendering, then renders only the two
+Darwin URLs and SHA-256 values from that same template.
 Build preparation warms a fresh explicit Bun runtime cache with one private
 probe per declared target. The Ubuntu asset build then drops back to the runner
 user inside a root-created network namespace, making the warmed cache the only
