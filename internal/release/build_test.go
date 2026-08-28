@@ -236,6 +236,42 @@ func TestBuildIsByteDeterministicAndHeadersAreCanonical(t *testing.T) {
 	assertChecksums(t, outputs[0])
 }
 
+func TestBuildBundlesDeclaredZshCompletionWithCanonicalPathAndMode(t *testing.T) {
+	source, manifestPath := writeBuildFixture(t, false, successfulAdapter)
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData = bytes.Replace(manifestData, []byte(`"macos_only": true,`), []byte(`"macos_only": true,
+    "binary_aliases": ["hextap"],
+    "zsh_completion": "completions/_hextap",`), 1)
+	if err := os.WriteFile(manifestPath, manifestData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	completionPath := filepath.Join(source, "completions", "_hextap")
+	if err := os.MkdirAll(filepath.Dir(completionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(completionPath, []byte("#compdef hextap brew-hextap\n_hextap() { : }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(buildOptions(source, manifestPath, output)); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	archivePath := filepath.Join(output, "claude-rc-proxy-darwin-arm64.tar.gz")
+	if got, want := archiveMemberOrder(t, archivePath), []string{"claude-rc-proxy", "LICENSE", "README.md", "completions/_hextap"}; strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("archive member order = %v, want %v", got, want)
+	}
+	completion := readArchive(t, archivePath)["completions/_hextap"]
+	if completion.header == nil || completion.header.Mode != 0o644 || string(completion.data) != "#compdef hextap brew-hextap\n_hextap() { : }\n" {
+		t.Fatalf("completion archive member = %#v", completion)
+	}
+}
+
 func TestBuildRejectsAdapterAndStagingViolationsAndCleansOutput(t *testing.T) {
 	tests := map[string]struct {
 		script string

@@ -16,29 +16,32 @@ import (
 )
 
 const (
-	LegacySchema          = 1
-	ProfileSchema         = 2
-	CurrentSchema         = ProfileSchema
-	maxPathComponentBytes = 255
-	maxRelativePathBytes  = 1024
-	maxFormulaNameBytes   = maxPathComponentBytes - len("-darwin-arm64.tar.gz")
-	maxCommandArgs        = 64
-	maxCommandArgBytes    = 4096
+	LegacySchema           = 1
+	ProfileSchema          = 2
+	CurrentSchema          = ProfileSchema
+	maxPathComponentBytes  = 255
+	maxRelativePathBytes   = 1024
+	maxFormulaNameBytes    = maxPathComponentBytes - len("-darwin-arm64.tar.gz")
+	maxCommandArgs         = 64
+	maxCommandArgBytes     = 4096
+	maxBinaryAliases       = 16
+	maxCompletionPathBytes = len("completions/") + maxPathComponentBytes
 )
 
 var (
-	formulaNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$`)
-	classNamePattern    = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
-	repositoryPattern   = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
-	ownerPattern        = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
-	fileNamePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
-	pathPartPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
-	relativePathPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*(?:/[A-Za-z0-9][A-Za-z0-9._+-]*)*$`)
-	environmentPattern  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-	argumentPattern     = regexp.MustCompile(`^[-A-Za-z0-9_./:=+,%@]+$`)
-	commandNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
-	stableVersionRE     = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
-	placeholderRE       = regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	formulaNamePattern   = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$`)
+	classNamePattern     = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
+	repositoryPattern    = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+	ownerPattern         = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+	fileNamePattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	pathPartPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	relativePathPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*(?:/[A-Za-z0-9][A-Za-z0-9._+-]*)*$`)
+	zshCompletionPattern = regexp.MustCompile(`^completions/_[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	environmentPattern   = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	argumentPattern      = regexp.MustCompile(`^[-A-Za-z0-9_./:=+,%@]+$`)
+	commandNamePattern   = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+	stableVersionRE      = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	placeholderRE        = regexp.MustCompile(`\{\{[^{}]*\}\}`)
 )
 
 // Manifest is the versioned declarative contract shared by release and tap tooling.
@@ -108,6 +111,8 @@ type Homebrew struct {
 	TestArgs       []string `json:"test_args"`
 	Service        *Service `json:"service,omitempty"`
 	Caveats        string   `json:"caveats"`
+	BinaryAliases  []string `json:"binary_aliases,omitempty"`
+	ZshCompletion  string   `json:"zsh_completion,omitempty"`
 	FormulaProfile string   `json:"formula_profile,omitempty"`
 	ServiceEnabled *bool    `json:"service_enabled,omitempty"`
 }
@@ -351,12 +356,26 @@ func validateRequiredFields(data []byte) error {
 	}
 	var homebrew map[string]json.RawMessage
 	if schema == LegacySchema {
-		homebrew, err = requireExactObjectFields(root["homebrew"], "homebrew", []string{"macos_only", "test_args", "caveats"}, []string{"service"})
+		homebrew, err = requireExactObjectFields(root["homebrew"], "homebrew", []string{"macos_only", "test_args", "caveats"}, []string{"service", "binary_aliases", "zsh_completion"})
 	} else {
 		homebrew, err = requireExactObjectFields(root["homebrew"], "homebrew", []string{"macos_only", "test_args", "formula_profile", "service_enabled"}, nil)
 	}
 	if err != nil {
 		return err
+	}
+	if schema == LegacySchema {
+		if aliasesJSON, ok := homebrew["binary_aliases"]; ok {
+			var aliases []string
+			if err := json.Unmarshal(aliasesJSON, &aliases); err != nil || len(aliases) == 0 {
+				return errors.New("validate manifest: homebrew.binary_aliases must be a nonempty array")
+			}
+		}
+		if completionJSON, ok := homebrew["zsh_completion"]; ok {
+			var completion string
+			if err := json.Unmarshal(completionJSON, &completion); err != nil || completion == "" {
+				return errors.New("validate manifest: homebrew.zsh_completion must be a nonempty string")
+			}
+		}
 	}
 	if _, err := requireExactObjectFields(formula["repository"], "formula.repository", []string{"owner", "name"}, nil); err != nil {
 		return err
@@ -513,13 +532,46 @@ func (m Manifest) Validate() error {
 		if err := validateCaveats(m.Homebrew.Caveats); err != nil {
 			return err
 		}
+		if err := validateHomebrewInstallMetadata(m.Formula.Binary, m.Homebrew.BinaryAliases, m.Homebrew.ZshCompletion); err != nil {
+			return err
+		}
 	} else {
-		if m.Homebrew.Service != nil || m.Homebrew.Caveats != "" || m.Homebrew.ServiceEnabled == nil {
+		if m.Homebrew.Service != nil || m.Homebrew.Caveats != "" || m.Homebrew.BinaryAliases != nil || m.Homebrew.ZshCompletion != "" || m.Homebrew.ServiceEnabled == nil {
 			return errors.New("validate manifest: schema 2 homebrew requires a tap-owned Formula profile")
 		}
 		if m.Homebrew.FormulaProfile != m.Formula.Name {
 			return errors.New("validate manifest: homebrew.formula_profile must equal formula.name")
 		}
+	}
+	return nil
+}
+
+func validateHomebrewInstallMetadata(binary string, aliases []string, completion string) error {
+	if len(aliases) > maxBinaryAliases {
+		return fmt.Errorf("validate manifest: homebrew.binary_aliases must contain at most %d entries", maxBinaryAliases)
+	}
+	installed := map[string]bool{binary: true}
+	seenFolded := map[string]bool{strings.ToLower(binary): true}
+	for index, alias := range aliases {
+		if len(alias) > maxPathComponentBytes || !fileNamePattern.MatchString(alias) || alias == "." || alias == ".." {
+			return fmt.Errorf("validate manifest: homebrew.binary_aliases[%d] must be a safe basename", index)
+		}
+		folded := strings.ToLower(alias)
+		if seenFolded[folded] {
+			return errors.New("validate manifest: homebrew.binary_aliases must be case-insensitively unique and must not equal formula.binary")
+		}
+		seenFolded[folded] = true
+		installed[alias] = true
+	}
+	if completion == "" {
+		return nil
+	}
+	if len(completion) > maxCompletionPathBytes || !zshCompletionPattern.MatchString(completion) {
+		return errors.New("validate manifest: homebrew.zsh_completion must match completions/_COMMAND")
+	}
+	stem := strings.TrimPrefix(strings.TrimPrefix(completion, "completions/"), "_")
+	if !installed[stem] {
+		return errors.New("validate manifest: homebrew.zsh_completion basename must match formula.binary or one homebrew.binary_aliases entry")
 	}
 	return nil
 }

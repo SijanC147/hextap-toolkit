@@ -103,14 +103,16 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 	assertDefinitionPattern(t, definitions, "repositoryOwner", ownerPattern.String())
 	assertDefinitionPattern(t, definitions, "fileName", fileNamePattern.String())
 	assertDefinitionPattern(t, definitions, "relativePath", relativePathPattern.String())
+	assertDefinitionPattern(t, definitions, "zshCompletionPath", zshCompletionPattern.String())
 	assertDefinitionPattern(t, definitions, "environmentKey", environmentPattern.String())
 	assertDefinitionPattern(t, definitions, "argument", argumentPattern.String())
 	for name, expected := range map[string]int{
-		"formulaName":  maxFormulaNameBytes,
-		"className":    maxPathComponentBytes,
-		"fileName":     maxPathComponentBytes,
-		"assetName":    maxPathComponentBytes,
-		"relativePath": maxRelativePathBytes,
+		"formulaName":       maxFormulaNameBytes,
+		"className":         maxPathComponentBytes,
+		"fileName":          maxPathComponentBytes,
+		"assetName":         maxPathComponentBytes,
+		"relativePath":      maxRelativePathBytes,
+		"zshCompletionPath": maxCompletionPathBytes,
 	} {
 		if got := nestedNumber(t, definitions, name, "maxLength"); got != expected {
 			t.Fatalf("$defs.%s.maxLength = %d, want %d", name, got, expected)
@@ -175,6 +177,11 @@ func TestManifestConformanceCorpus(t *testing.T) {
 		{name: "valid disabled service", valid: true, mutate: func(value map[string]any) {
 			object(t, value["homebrew"], "homebrew")["service"] = map[string]any{"enabled": false}
 		}},
+		{name: "valid binary alias and Zsh completion", valid: true, mutate: func(value map[string]any) {
+			homebrew := object(t, value["homebrew"], "homebrew")
+			homebrew["binary_aliases"] = []any{"proxy"}
+			homebrew["zsh_completion"] = "completions/_proxy"
+		}},
 		{name: "invalid schema const", mutate: func(value map[string]any) { value["schema"] = float64(2) }},
 		{name: "invalid missing release", mutate: func(value map[string]any) { delete(value, "release") }},
 		{name: "invalid root property", mutate: func(value map[string]any) { value["unknown"] = true }},
@@ -237,6 +244,9 @@ func TestManifestConformanceCorpus(t *testing.T) {
 		}},
 		{name: "invalid test argument pattern", mutate: func(value map[string]any) {
 			object(t, value["homebrew"], "homebrew")["test_args"] = []any{"$(id)"}
+		}},
+		{name: "invalid Zsh completion pattern", mutate: func(value map[string]any) {
+			object(t, value["homebrew"], "homebrew")["zsh_completion"] = "completions/hextap"
 		}},
 		{name: "invalid restart minimum", mutate: func(value map[string]any) {
 			service := object(t, object(t, value["homebrew"], "homebrew")["service"], "service")
@@ -323,7 +333,7 @@ func TestMachineSchemaUsesOnlySupportedEvaluatorKeywords(t *testing.T) {
 		"title": true, "description": true,
 		"type": true, "const": true, "oneOf": true, "allOf": true, "not": true,
 		"properties": true, "required": true, "additionalProperties": true, "propertyNames": true,
-		"items": true, "minItems": true,
+		"items": true, "minItems": true, "maxItems": true, "uniqueItems": true,
 		"minLength": true, "maxLength": true, "pattern": true, "format": true,
 		"minimum": true, "maximum": true,
 	}
@@ -587,6 +597,18 @@ func validateFixtureShape(root, schema map[string]any, value any, location strin
 		}
 		if minimum, ok := schema["minItems"].(float64); ok && len(arrayValue) < int(minimum) {
 			return fmt.Errorf("%s: too few items", location)
+		}
+		if maximum, ok := schema["maxItems"].(float64); ok && len(arrayValue) > int(maximum) {
+			return fmt.Errorf("%s: too many items", location)
+		}
+		if unique, _ := schema["uniqueItems"].(bool); unique {
+			for index := range arrayValue {
+				for previous := 0; previous < index; previous++ {
+					if reflect.DeepEqual(arrayValue[previous], arrayValue[index]) {
+						return fmt.Errorf("%s: duplicate array item", location)
+					}
+				}
+			}
 		}
 		if itemSchema, ok := schema["items"].(map[string]any); ok {
 			for index, child := range arrayValue {

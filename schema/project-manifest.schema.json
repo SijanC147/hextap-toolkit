@@ -102,6 +102,11 @@
       "maxLength": 1024,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*(?:/[A-Za-z0-9][A-Za-z0-9._+-]*)*$"
     },
+    "zshCompletionPath": {
+      "type": "string",
+      "maxLength": 267,
+      "pattern": "^completions/_[A-Za-z0-9][A-Za-z0-9._+-]*$"
+    },
     "environmentKey": {
       "type": "string",
       "pattern": "^[A-Z_][A-Z0-9_]*$"
@@ -559,6 +564,18 @@
         "caveats": {
           "$ref": "#/$defs/caveats"
         },
+        "binary_aliases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/fileName"
+          }
+        },
+        "zsh_completion": {
+          "$ref": "#/$defs/zshCompletionPath"
+        },
         "formula_profile": {
           "$ref": "#/$defs/formulaName"
         },
@@ -591,6 +608,18 @@
         },
         "caveats": {
           "$ref": "#/$defs/caveats"
+        },
+        "binary_aliases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/fileName"
+          }
+        },
+        "zsh_completion": {
+          "$ref": "#/$defs/zshCompletionPath"
         }
       }
     },

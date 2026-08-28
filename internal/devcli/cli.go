@@ -8,29 +8,24 @@ import (
 	"io"
 	"strings"
 
+	"github.com/SijanC147/hextap-toolkit/internal/commandmeta"
 	"github.com/SijanC147/hextap-toolkit/internal/release"
 )
 
-const usageText = `usage: brew-hextap dev <command> [options]
-
-Commands:
-  status      Inspect toolkit repository and release state
-  validate    Run local toolkit validation gates
-  plan        Compute the next patch, minor, or major release
-  release     Publish a confirmed release from canonical main
-  deploy      Run protected PR, release, and optional install workflow
-  install     Install and verify one released Hextap version
-`
-
 // Run executes the installed developer command surface.
 func Run(args []string, stdout, stderr io.Writer, version, commit string) int {
-	service := Service{Stdout: stdout, Stderr: stderr, Version: version, Commit: commit}
+	return RunNamed("brew-hextap", args, stdout, stderr, version, commit)
+}
+
+// RunNamed executes the developer surface with invocation-aware help.
+func RunNamed(invocation string, args []string, stdout, stderr io.Writer, version, commit string) int {
+	service := Service{Stdout: stdout, Stderr: stderr, Invocation: invocation, Version: version, Commit: commit}
 	return service.runCLI(context.Background(), args, stdout, stderr)
 }
 
 func (service Service) runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
-		_, _ = io.WriteString(stdout, usageText)
+	if len(args) != 0 && (isHelpToken(args[0]) || args[0] == "help") {
+		service.writeHelp(stdout, []string{"dev"})
 		return 0
 	}
 	if len(args) == 0 {
@@ -64,16 +59,17 @@ func (values *stringList) Set(value string) error {
 
 func (service Service) runReleaseCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("dev release")
-	project := flags.String("project", ".", "toolkit Git project")
-	bump := flags.String("bump", "", "required release bump")
-	confirmTag := flags.String("confirm-tag", "", "exact computed tag confirmation")
-	execute := flags.Bool("execute", false, "authorize remote release mutation")
-	install := flags.Bool("install", false, "upgrade local Hextap after remote proof")
-	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	binder := commandmeta.Bind(flags, "dev", "release")
+	project := binder.String("project", ".")
+	bump := binder.String("bump", "")
+	confirmTag := binder.String("confirm-tag", "")
+	execute := binder.Bool("execute", false)
+	install := binder.Bool("install", false)
+	jsonOutput := binder.Bool("json", false)
 	var skillAgents stringList
-	flags.Var(&skillAgents, "skill-agent", "concrete user skill target to reconcile after install (repeatable)")
+	binder.Var(&skillAgents, "skill-agent")
 	if isHelp(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap dev release --bump patch|minor|major --confirm-tag vX.Y.Z --execute [--project PATH] [--install] [--skill-agent ID ...] [--json]\n")
+		service.writeHelp(stdout, []string{"dev", "release"})
 		return 0
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
@@ -88,17 +84,18 @@ func (service Service) runReleaseCLI(ctx context.Context, args []string, stdout,
 
 func (service Service) runDeployCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("dev deploy")
-	project := flags.String("project", ".", "toolkit Git project")
-	bump := flags.String("bump", "", "required release bump")
-	confirmTag := flags.String("confirm-tag", "", "exact computed tag confirmation")
-	execute := flags.Bool("execute", false, "authorize protected PR and release mutation")
-	install := flags.Bool("install", false, "upgrade local Hextap after remote proof")
-	prTitle := flags.String("pr-title", "", "pull request title; defaults to latest commit subject")
-	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	binder := commandmeta.Bind(flags, "dev", "deploy")
+	project := binder.String("project", ".")
+	bump := binder.String("bump", "")
+	confirmTag := binder.String("confirm-tag", "")
+	execute := binder.Bool("execute", false)
+	install := binder.Bool("install", false)
+	prTitle := binder.String("pr-title", "")
+	jsonOutput := binder.Bool("json", false)
 	var skillAgents stringList
-	flags.Var(&skillAgents, "skill-agent", "concrete user skill target to reconcile after install (repeatable)")
+	binder.Var(&skillAgents, "skill-agent")
 	if isHelp(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap dev deploy --bump patch|minor|major --confirm-tag vX.Y.Z --execute [--project PATH] [--pr-title TEXT] [--install] [--skill-agent ID ...] [--json]\n")
+		service.writeHelp(stdout, []string{"dev", "deploy"})
 		return 0
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
@@ -113,15 +110,16 @@ func (service Service) runDeployCLI(ctx context.Context, args []string, stdout, 
 
 func (service Service) runInstallCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("dev install")
-	project := flags.String("project", ".", "toolkit Git project")
-	tag := flags.String("tag", "", "published stable tag")
-	commit := flags.String("commit", "", "exact released commit")
-	execute := flags.Bool("execute", false, "authorize local Hextap mutation")
-	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	binder := commandmeta.Bind(flags, "dev", "install")
+	project := binder.String("project", ".")
+	tag := binder.String("tag", "")
+	commit := binder.String("commit", "")
+	execute := binder.Bool("execute", false)
+	jsonOutput := binder.Bool("json", false)
 	var skillAgents stringList
-	flags.Var(&skillAgents, "skill-agent", "concrete user skill target to reconcile (repeatable)")
+	binder.Var(&skillAgents, "skill-agent")
 	if isHelp(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap dev install --tag vX.Y.Z --commit FULL_SHA --execute [--project PATH] [--skill-agent ID ...] [--json]\n")
+		service.writeHelp(stdout, []string{"dev", "install"})
 		return 0
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
@@ -155,10 +153,11 @@ func writeOutcome(stdout, stderr io.Writer, jsonOutput bool, outcome Outcome) in
 
 func (service Service) runStatusCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("dev status")
-	project := flags.String("project", ".", "toolkit Git project")
-	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	binder := commandmeta.Bind(flags, "dev", "status")
+	project := binder.String("project", ".")
+	jsonOutput := binder.Bool("json", false)
 	if isHelp(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap dev status [--project PATH] [--json]\n")
+		service.writeHelp(stdout, []string{"dev", "status"})
 		return 0
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
@@ -181,11 +180,12 @@ func (service Service) runStatusCLI(ctx context.Context, args []string, stdout, 
 
 func (service Service) runValidateCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("dev validate")
-	project := flags.String("project", ".", "toolkit Git project")
-	quick := flags.Bool("quick", false, "skip the race detector for an iteration check")
-	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	binder := commandmeta.Bind(flags, "dev", "validate")
+	project := binder.String("project", ".")
+	quick := binder.Bool("quick", false)
+	jsonOutput := binder.Bool("json", false)
 	if isHelp(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap dev validate [--project PATH] [--quick] [--json]\n")
+		service.writeHelp(stdout, []string{"dev", "validate"})
 		return 0
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
@@ -207,11 +207,12 @@ func (service Service) runValidateCLI(ctx context.Context, args []string, stdout
 
 func (service Service) runPlanCLI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("dev plan")
-	project := flags.String("project", ".", "toolkit Git project")
-	bump := flags.String("bump", "", "required release bump: patch, minor, or major")
-	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	binder := commandmeta.Bind(flags, "dev", "plan")
+	project := binder.String("project", ".")
+	bump := binder.String("bump", "")
+	jsonOutput := binder.Bool("json", false)
 	if isHelp(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap dev plan --bump patch|minor|major [--project PATH] [--json]\n")
+		service.writeHelp(stdout, []string{"dev", "plan"})
 		return 0
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
@@ -249,7 +250,24 @@ func newFlagSet(name string) *flag.FlagSet {
 }
 
 func isHelp(args []string) bool {
-	return len(args) == 1 && (args[0] == "--help" || args[0] == "-h")
+	for _, argument := range args {
+		if isHelpToken(argument) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHelpToken(argument string) bool {
+	return argument == "--help" || argument == "-h"
+}
+
+func (service Service) writeHelp(output io.Writer, path []string) {
+	invocation := service.Invocation
+	if invocation == "" {
+		invocation = "brew-hextap"
+	}
+	_, _ = io.WriteString(output, commandmeta.Help(invocation, path))
 }
 
 func cliFail(stderr io.Writer, format string, args ...any) int {

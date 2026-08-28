@@ -168,7 +168,7 @@ func TestToolkitSelfReleaseBuildIsDeterministicAndVerifiable(t *testing.T) {
 			t.Fatalf("release assets = %v, want %v", result.Assets, wantAssets)
 		}
 		for _, asset := range wantAssets {
-			if got, want := archiveMembers(t, filepath.Join(output, asset)), []string{"brew-hextap", "LICENSE", "README.md"}; strings.Join(got, "\n") != strings.Join(want, "\n") {
+			if got, want := archiveMembers(t, filepath.Join(output, asset)), []string{"brew-hextap", "LICENSE", "README.md", "completions/_hextap"}; strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("%s members = %v, want %v", asset, got, want)
 			}
 		}

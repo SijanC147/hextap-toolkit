@@ -18,17 +18,19 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SijanC147/hextap-toolkit/internal/atomicfile"
 	"github.com/SijanC147/hextap-toolkit/internal/manifest"
 )
 
 const (
-	maxBinarySize       = 256 << 20
-	maxLicenseSize      = 1 << 20
-	maxReadmeSize       = 8 << 20
-	defaultBuildTimeout = 15 * time.Minute
-	releaseLockName     = ".hextap-release.lock"
+	maxBinarySize        = 256 << 20
+	maxLicenseSize       = 1 << 20
+	maxReadmeSize        = 8 << 20
+	maxZshCompletionSize = 1 << 20
+	defaultBuildTimeout  = 15 * time.Minute
+	releaseLockName      = ".hextap-release.lock"
 )
 
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
@@ -156,6 +158,17 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 	if err != nil {
 		return BuildResult{}, err
 	}
+	var zshCompletion []byte
+	if project.Homebrew.ZshCompletion != "" {
+		completionPath := filepath.Join(sourceDir, filepath.FromSlash(project.Homebrew.ZshCompletion))
+		zshCompletion, err = readRegularFile(completionPath, "Zsh completion", maxZshCompletionSize, true)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		if len(zshCompletion) == 0 || !utf8.Valid(zshCompletion) || zshCompletion[len(zshCompletion)-1] != '\n' {
+			return BuildResult{}, errors.New("validate Zsh completion: file must be nonempty UTF-8 ending with a newline")
+		}
+	}
 	adapterPath := filepath.Join(sourceDir, filepath.FromSlash(project.Release.BuildScript))
 	if err := validateProjectLocalExecutable(adapterPath, sourceDir); err != nil {
 		return BuildResult{}, fmt.Errorf("validate build adapter: %w", err)
@@ -189,6 +202,9 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 			{name: project.Formula.Binary, mode: 0o755, data: binary},
 			{name: "LICENSE", mode: 0o644, data: license},
 			{name: "README.md", mode: 0o644, data: readme},
+		}
+		if project.Homebrew.ZshCompletion != "" {
+			bundleMembers = append(bundleMembers, archiveMember{name: project.Homebrew.ZshCompletion, mode: 0o644, data: zshCompletion})
 		}
 		binaryMembers := bundleMembers[:1]
 		for _, artifact := range buildTarget.Artifacts {

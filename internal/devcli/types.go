@@ -41,6 +41,7 @@ type Service struct {
 	Runner          Runner
 	Stdout          io.Writer
 	Stderr          io.Writer
+	Invocation      string
 	Version         string
 	Commit          string
 	Executable      string
