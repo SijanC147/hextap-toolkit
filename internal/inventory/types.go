@@ -39,7 +39,7 @@ type Runner interface {
 // FileSystem is the minimal read-only filesystem surface used by inventory.
 type FileSystem interface {
 	Lstat(string) (fs.FileInfo, error)
-	ReadDir(string) ([]fs.DirEntry, error)
+	ReadDir(context.Context, string, int) ([]fs.DirEntry, bool, error)
 	ReadFile(string) ([]byte, error)
 }
 

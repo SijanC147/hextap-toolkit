@@ -95,9 +95,9 @@ func (service Service) Collect(ctx context.Context, options Options) Report {
 	report.Tap.Installed = true
 	service.collectTapGit(ctx, &report)
 	var registryComplete bool
-	report.Projects, registryComplete = service.collectRegisteredProjects(&report, tapPath)
-	formulaNames := service.collectPackageNames(&report, filepath.Join(tapPath, "Formula"), "formula", true)
-	caskNames := service.collectCaskNames(&report, tapPath)
+	report.Projects, registryComplete = service.collectRegisteredProjects(ctx, &report, tapPath)
+	formulaNames := service.collectPackageNames(ctx, &report, filepath.Join(tapPath, "Formula"), "formula", true)
+	caskNames := service.collectCaskNames(ctx, &report, tapPath)
 	for _, name := range formulaNames {
 		report.Formulae = append(report.Formulae, service.collectFormula(ctx, &report, brew, name))
 	}
@@ -229,18 +229,17 @@ func (service Service) collectTapGit(ctx context.Context, report *Report) {
 	}
 }
 
-func (service Service) collectRegisteredProjects(report *Report, tapPath string) ([]ProjectInfo, bool) {
+func (service Service) collectRegisteredProjects(ctx context.Context, report *Report, tapPath string) ([]ProjectInfo, bool) {
 	directory := filepath.Join(tapPath, "Projects")
-	entries, err := service.fileSystem().ReadDir(directory)
+	entries, truncated, err := service.fileSystem().ReadDir(ctx, directory, maximumRegistryEntries)
 	if err != nil {
 		addWarning(report, "projects", "the Hextap project registry is unavailable")
 		return []ProjectInfo{}, false
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	complete := true
-	if len(entries) > maximumRegistryEntries {
+	if truncated {
 		addWarning(report, "projects.limit", "the Hextap project registry exceeds the bounded inventory limit")
-		entries = entries[:maximumRegistryEntries]
 		complete = false
 	}
 	projects := make([]ProjectInfo, 0, len(entries))
@@ -263,8 +262,8 @@ func (service Service) collectRegisteredProjects(report *Report, tapPath string)
 	return projects, complete
 }
 
-func (service Service) collectPackageNames(report *Report, directory, component string, warnMissing bool) []string {
-	entries, err := service.fileSystem().ReadDir(directory)
+func (service Service) collectPackageNames(ctx context.Context, report *Report, directory, component string, warnMissing bool) []string {
+	entries, truncated, err := service.fileSystem().ReadDir(ctx, directory, maximumRegistryEntries)
 	if err != nil {
 		if warnMissing || !errors.Is(err, fs.ErrNotExist) {
 			addWarning(report, pluralComponent(component), "the tap's "+component+" registry is unavailable")
@@ -272,9 +271,8 @@ func (service Service) collectPackageNames(report *Report, directory, component 
 		return []string{}
 	}
 	names := make([]string, 0, len(entries))
-	if len(entries) > maximumRegistryEntries {
+	if truncated {
 		addWarning(report, pluralComponent(component)+".limit", "the tap package registry exceeds the bounded inventory limit")
-		entries = entries[:maximumRegistryEntries]
 	}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -293,10 +291,10 @@ func (service Service) collectPackageNames(report *Report, directory, component 
 	return names
 }
 
-func (service Service) collectCaskNames(report *Report, tapPath string) []string {
+func (service Service) collectCaskNames(ctx context.Context, report *Report, tapPath string) []string {
 	seen := make(map[string]bool)
 	for _, directory := range []string{"Cask", "Casks"} {
-		for _, name := range service.collectPackageNames(report, filepath.Join(tapPath, directory), "cask", false) {
+		for _, name := range service.collectPackageNames(ctx, report, filepath.Join(tapPath, directory), "cask", false) {
 			seen[name] = true
 		}
 	}

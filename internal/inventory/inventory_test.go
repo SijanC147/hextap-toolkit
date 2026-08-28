@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -63,8 +65,19 @@ func (filesystem mapFileSystem) Lstat(name string) (fs.FileInfo, error) {
 	return fs.Stat(filesystem.files, mapPath(name))
 }
 
-func (filesystem mapFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
-	return fs.ReadDir(filesystem.files, mapPath(name))
+func (filesystem mapFileSystem) ReadDir(ctx context.Context, name string, maximum int) ([]fs.DirEntry, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	entries, err := fs.ReadDir(filesystem.files, mapPath(name))
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := len(entries) > maximum
+	if truncated {
+		entries = entries[:maximum]
+	}
+	return entries, truncated, nil
 }
 
 func (filesystem mapFileSystem) ReadFile(name string) ([]byte, error) {
@@ -299,12 +312,31 @@ func TestPackageInventoryCapsRegistryEntries(t *testing.T) {
 	}
 	service := Service{FileSystem: mapFileSystem{files: files}}
 	report := Report{Warnings: []Warning{}}
-	names := service.collectPackageNames(&report, "/tap/Formula", "formula", true)
+	names := service.collectPackageNames(context.Background(), &report, "/tap/Formula", "formula", true)
 	if len(names) != maximumRegistryEntries {
 		t.Fatalf("bounded Formula names = %d, want %d", len(names), maximumRegistryEntries)
 	}
 	if len(report.Warnings) != 1 || report.Warnings[0].Component != "formulae.limit" {
 		t.Fatalf("registry-limit warnings = %#v", report.Warnings)
+	}
+}
+
+func TestOSFileSystemStreamsOnlyTheBoundedDirectoryPrefix(t *testing.T) {
+	directory := t.TempDir()
+	for index := 0; index < 8; index++ {
+		path := filepath.Join(directory, fmt.Sprintf("entry-%02d", index))
+		if err := os.WriteFile(path, []byte("entry\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, truncated, err := (osFileSystem{}).ReadDir(context.Background(), directory, 3)
+	if err != nil || !truncated || len(entries) != 3 {
+		t.Fatalf("ReadDir() entries=%d truncated=%t error=%v", len(entries), truncated, err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := (osFileSystem{}).ReadDir(canceled, directory, 3); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadDir(canceled) error = %v", err)
 	}
 }
 

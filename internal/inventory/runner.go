@@ -3,7 +3,9 @@ package inventory
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -90,6 +92,30 @@ type osFileSystem struct{}
 
 func (osFileSystem) Lstat(name string) (fs.FileInfo, error) { return os.Lstat(name) }
 
-func (osFileSystem) ReadDir(name string) ([]fs.DirEntry, error) { return os.ReadDir(name) }
+func (osFileSystem) ReadDir(ctx context.Context, name string, maximum int) ([]fs.DirEntry, bool, error) {
+	if maximum <= 0 {
+		return nil, false, fmt.Errorf("directory entry limit must be positive")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	directory, err := os.Open(name)
+	if err != nil {
+		return nil, false, err
+	}
+	defer directory.Close()
+	entries, err := directory.ReadDir(maximum + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(entries) > maximum
+	if truncated {
+		entries = entries[:maximum]
+	}
+	return entries, truncated, nil
+}
 
 func (osFileSystem) ReadFile(name string) ([]byte, error) { return os.ReadFile(name) }
