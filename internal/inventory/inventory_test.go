@@ -3,11 +3,13 @@ package inventory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/SijanC147/hextap-toolkit/internal/skillinstall"
 )
@@ -23,6 +25,13 @@ type fakeRunner struct {
 	errors        map[string]error
 	commands      []Command
 	requireNoAuto bool
+}
+
+type blockingRunner struct{}
+
+func (blockingRunner) Run(ctx context.Context, _ Command) (Result, error) {
+	<-ctx.Done()
+	return Result{}, ctx.Err()
 }
 
 func (runner *fakeRunner) Run(_ context.Context, command Command) (Result, error) {
@@ -257,6 +266,76 @@ func TestCollectPreservesPartialResultsAndNeverEchoesDependencyErrors(t *testing
 		if strings.Contains(warning.Message, dependencySecret) {
 			t.Fatalf("warning leaked dependency error: %#v", warning)
 		}
+	}
+}
+
+func TestCollectAppliesOneAggregateDeadline(t *testing.T) {
+	service := Service{
+		Runner:            blockingRunner{},
+		Executable:        "/active/brew-hextap",
+		HomeDir:           t.TempDir(),
+		BrewCandidates:    []string{"/brew"},
+		CollectionTimeout: 25 * time.Millisecond,
+		ResolvePath:       func(path string) (string, error) { return path, nil },
+		SkillStatus: func(skillinstall.Options) (skillinstall.StatusResult, error) {
+			return skillinstall.StatusResult{}, nil
+		},
+	}
+	started := time.Now()
+	report := service.Collect(context.Background(), Options{})
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("Collect() exceeded aggregate deadline: %s", elapsed)
+	}
+	if len(report.Warnings) == 0 || report.Warnings[0].Component != "homebrew" {
+		t.Fatalf("deadline report warnings = %#v", report.Warnings)
+	}
+}
+
+func TestPackageInventoryCapsRegistryEntries(t *testing.T) {
+	files := make(fstest.MapFS, maximumRegistryEntries+1)
+	for index := 0; index <= maximumRegistryEntries; index++ {
+		name := fmt.Sprintf("tap/Formula/package-%04d.rb", index)
+		files[name] = &fstest.MapFile{Data: []byte("formula\n")}
+	}
+	service := Service{FileSystem: mapFileSystem{files: files}}
+	report := Report{Warnings: []Warning{}}
+	names := service.collectPackageNames(&report, "/tap/Formula", "formula", true)
+	if len(names) != maximumRegistryEntries {
+		t.Fatalf("bounded Formula names = %d, want %d", len(names), maximumRegistryEntries)
+	}
+	if len(report.Warnings) != 1 || report.Warnings[0].Component != "formulae.limit" {
+		t.Fatalf("registry-limit warnings = %#v", report.Warnings)
+	}
+}
+
+func TestSanitizeRemoteRejectsCredentialsQueriesAndControlText(t *testing.T) {
+	tests := map[string]struct {
+		input string
+		want  string
+	}{
+		"HTTPS credentials": {
+			input: "https://token@github.com/SijanC147/homebrew-hextap.git",
+			want:  "https://github.com/SijanC147/homebrew-hextap.git",
+		},
+		"HTTPS query and fragment": {
+			input: "https://github.com/SijanC147/homebrew-hextap.git?token=secret#fragment",
+			want:  "https://github.com/SijanC147/homebrew-hextap.git",
+		},
+		"safe SCP remote": {
+			input: "git@github.com:SijanC147/homebrew-hextap.git",
+			want:  "git@github.com:SijanC147/homebrew-hextap.git",
+		},
+		"SCP query":      {input: "git@github.com:repo.git?token=SECRET"},
+		"SCP control":    {input: "git@github.com:repo.git\x1b[31m"},
+		"SCP extra at":   {input: "git@evil@github.com:repo.git"},
+		"unknown scheme": {input: "credential-store://secret@example"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := sanitizeRemote(test.input); got != test.want {
+				t.Fatalf("sanitizeRemote(%q) = %q, want %q", test.input, got, test.want)
+			}
+		})
 	}
 }
 

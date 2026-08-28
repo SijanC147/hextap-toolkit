@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -269,6 +270,37 @@ func TestBuildBundlesDeclaredZshCompletionWithCanonicalPathAndMode(t *testing.T)
 	completion := readArchive(t, archivePath)["completions/_hextap"]
 	if completion.header == nil || completion.header.Mode != 0o644 || string(completion.data) != "#compdef hextap brew-hextap\n_hextap() { : }\n" {
 		t.Fatalf("completion archive member = %#v", completion)
+	}
+}
+
+func TestBuildRejectsZshCompletionSymlinkedParentEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating directory symlinks requires privileges on Windows")
+	}
+	source, manifestPath := writeBuildFixture(t, false, successfulAdapter)
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData = bytes.Replace(manifestData, []byte(`"macos_only": true,`), []byte(`"macos_only": true,
+    "binary_aliases": ["hextap"],
+    "zsh_completion": "completions/_hextap",`), 1)
+	if err := os.WriteFile(manifestPath, manifestData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "_hextap"), []byte("#compdef hextap brew-hextap\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(source, "completions")); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "dist")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(buildOptions(source, manifestPath, output)); err == nil || !strings.Contains(err.Error(), "Zsh completion path must not contain symlinks") {
+		t.Fatalf("Build() completion-parent error = %v", err)
 	}
 }
 

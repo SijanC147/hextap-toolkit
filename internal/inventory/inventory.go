@@ -14,22 +14,36 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/SijanC147/hextap-toolkit/internal/manifest"
 	"github.com/SijanC147/hextap-toolkit/internal/skillinstall"
 )
 
-const maximumManifestSize int64 = 1 << 20
+const (
+	maximumManifestSize      int64 = 1 << 20
+	maximumRegistryEntries         = 1024
+	defaultCollectionTimeout       = 30 * time.Second
+)
 
 var (
 	gitRevisionPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	packageNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9@+._-]*$`)
 	environmentPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	scpRemotePattern   = regexp.MustCompile(`^git@[A-Za-z0-9.-]+:[A-Za-z0-9][A-Za-z0-9._/-]*$`)
 )
 
 // Collect returns every safely available local result and records component
 // warnings rather than failing the complete read-only report.
 func (service Service) Collect(ctx context.Context, options Options) Report {
+	timeout := service.CollectionTimeout
+	if timeout <= 0 {
+		timeout = defaultCollectionTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	report := Report{
 		Schema:   1,
 		CLI:      CLIInfo{Version: service.Version, Commit: service.Commit, Executable: service.executable()},
@@ -223,8 +237,13 @@ func (service Service) collectRegisteredProjects(report *Report, tapPath string)
 		return []ProjectInfo{}, false
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	projects := make([]ProjectInfo, 0, len(entries))
 	complete := true
+	if len(entries) > maximumRegistryEntries {
+		addWarning(report, "projects.limit", "the Hextap project registry exceeds the bounded inventory limit")
+		entries = entries[:maximumRegistryEntries]
+		complete = false
+	}
+	projects := make([]ProjectInfo, 0, len(entries))
 	seen := make(map[string]bool)
 	for _, entry := range entries {
 		name := entry.Name()
@@ -253,6 +272,10 @@ func (service Service) collectPackageNames(report *Report, directory, component 
 		return []string{}
 	}
 	names := make([]string, 0, len(entries))
+	if len(entries) > maximumRegistryEntries {
+		addWarning(report, pluralComponent(component)+".limit", "the tap package registry exceeds the bounded inventory limit")
+		entries = entries[:maximumRegistryEntries]
+	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if filepath.Ext(name) != ".rb" {
@@ -503,28 +526,35 @@ func parseLine(output string) (string, bool) {
 
 func sanitizeRemote(value string) string {
 	parsed, err := url.Parse(value)
-	if err == nil && parsed.Scheme != "" {
+	if err == nil && parsed.Scheme != "" && parsed.Host != "" && allowedRemoteScheme(parsed.Scheme) {
 		parsed.User = nil
 		parsed.RawQuery = ""
 		parsed.Fragment = ""
-		return parsed.String()
-	}
-	if strings.HasPrefix(value, "git@") && !strings.ContainsAny(value, "\x00\r\n") {
-		return value
-	}
-	if at := strings.LastIndex(value, "@"); at >= 0 {
-		value = "redacted" + value[at:]
-	}
-	if !safeText(value, 2048) {
+		sanitized := parsed.String()
+		if safeText(sanitized, 2048) {
+			return sanitized
+		}
 		return ""
 	}
-	return value
+	if safeText(value, 2048) && scpRemotePattern.MatchString(value) && !strings.Contains(value, "..") {
+		return value
+	}
+	return ""
+}
+
+func allowedRemoteScheme(value string) bool {
+	switch strings.ToLower(value) {
+	case "git", "http", "https", "ssh":
+		return true
+	default:
+		return false
+	}
 }
 
 func safeVersion(value string) bool { return safeText(value, 256) }
 
 func safeText(value string, maximum int) bool {
-	return value != "" && len(value) <= maximum && !strings.ContainsAny(value, "\x00\r\n")
+	return value != "" && len(value) <= maximum && strings.IndexFunc(value, unicode.IsControl) == -1
 }
 
 func pluralComponent(value string) string {

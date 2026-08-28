@@ -53,17 +53,18 @@ type Options struct {
 
 // Service owns one dependency-injected inventory collection session.
 type Service struct {
-	Runner         Runner
-	FileSystem     FileSystem
-	Version        string
-	Commit         string
-	Invocation     string
-	Executable     string
-	HomeDir        string
-	BrewCandidates []string
-	ResolvePath    func(string) (string, error)
-	LookPath       func(string) (string, error)
-	SkillStatus    SkillStatusFunc
+	Runner            Runner
+	FileSystem        FileSystem
+	Version           string
+	Commit            string
+	Invocation        string
+	Executable        string
+	HomeDir           string
+	BrewCandidates    []string
+	ResolvePath       func(string) (string, error)
+	LookPath          func(string) (string, error)
+	SkillStatus       SkillStatusFunc
+	CollectionTimeout time.Duration
 }
 
 // Report is the versioned, lossless JSON inventory document.
