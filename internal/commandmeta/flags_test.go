@@ -29,6 +29,12 @@ func TestBinderRegistersEveryMetadataFlagWithBothSpellings(t *testing.T) {
 					binder := Bind(flags, path...)
 					args := []string{spelling}
 					switch {
+					case option.Kind == BoolValue:
+						value := binder.Bool(option.Long, true)
+						args = []string{spelling + "=false"}
+						if err := flags.Parse(args); err != nil || *value {
+							t.Fatalf("Parse(%v) value = %t, error = %v", args, *value, err)
+						}
 					case option.Repeatable:
 						var values collectedValues
 						binder.Var(&values, option.Long)
@@ -44,10 +50,7 @@ func TestBinderRegistersEveryMetadataFlagWithBothSpellings(t *testing.T) {
 							t.Fatalf("Parse(%v) value = %q, error = %v", args, *value, err)
 						}
 					default:
-						value := binder.Bool(option.Long, false)
-						if err := flags.Parse(args); err != nil || !*value {
-							t.Fatalf("Parse(%v) value = %t, error = %v", args, *value, err)
-						}
+						t.Fatalf("option --%s has no registered value contract", option.Long)
 					}
 					if !binder.WasSet(option.Long) {
 						t.Fatalf("WasSet(%q) = false after parsing %s", option.Long, spelling)
@@ -56,6 +59,32 @@ func TestBinderRegistersEveryMetadataFlagWithBothSpellings(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestBinderRejectsWrongMetadataTypes(t *testing.T) {
+	assertPanics := func(name string, run func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s did not panic", name)
+			}
+		}()
+		run()
+	}
+
+	assertPanics("string from bool", func() {
+		binder := Bind(flag.NewFlagSet("wrong", flag.ContinueOnError), "status")
+		binder.String("json", "")
+	})
+	assertPanics("bool from string", func() {
+		binder := Bind(flag.NewFlagSet("wrong", flag.ContinueOnError), "status")
+		binder.Bool("project", false)
+	})
+	assertPanics("custom value from bool", func() {
+		binder := Bind(flag.NewFlagSet("wrong", flag.ContinueOnError), "status")
+		var values collectedValues
+		binder.Var(&values, "json")
+	})
 }
 
 func optionTestValue(option Option) string {

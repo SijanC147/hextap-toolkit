@@ -17,6 +17,7 @@ const (
 	DirectoryValue ValueKind = "directory"
 	FileValue      ValueKind = "file"
 	EnumValue      ValueKind = "enum"
+	BoolValue      ValueKind = "bool"
 )
 
 // Choice is one documented and completable enum value.
@@ -33,6 +34,7 @@ type Option struct {
 	Kind        ValueKind
 	Description string
 	Repeatable  bool
+	Optional    bool
 	Choices     []Choice
 }
 
@@ -156,8 +158,12 @@ func Help(invocation string, path []string) string {
 	for _, option := range command.Options {
 		fmt.Fprintf(&output, "  -%s, --%s", option.Short, option.Long)
 		if option.ValueName != "" {
-			output.WriteByte(' ')
-			output.WriteString(option.ValueName)
+			if option.Optional {
+				fmt.Fprintf(&output, "[=%s]", option.ValueName)
+			} else {
+				output.WriteByte(' ')
+				output.WriteString(option.ValueName)
+			}
 		}
 		if option.Repeatable {
 			output.WriteString(" (repeatable)")
@@ -226,12 +232,16 @@ func buildRoot() Command {
 		{Name: "cask", Description: "include Casks registered in the Hextap tap"},
 		{Name: "skill", Description: "include managed Hextap agent-skill installations"},
 	}
+	boolChoices := []Choice{
+		{Name: "true", Description: "enable the option"},
+		{Name: "false", Description: "disable the option explicitly"},
+	}
 
 	project := func(description string) Option {
 		return Option{Long: "project", Short: "p", ValueName: "PATH", Kind: DirectoryValue, Description: description}
 	}
 	jsonOutput := func(description string) Option {
-		return Option{Long: "json", Short: "j", Description: description}
+		return Option{Long: "json", Short: "j", ValueName: "BOOL", Kind: BoolValue, Description: description, Optional: true, Choices: boolChoices}
 	}
 	agent := func(description string) Option {
 		return Option{Long: "agent", Short: "a", ValueName: "ID", Kind: EnumValue, Description: description, Repeatable: true, Choices: agentChoices}
@@ -240,9 +250,12 @@ func buildRoot() Command {
 		return Option{Long: "scope", Short: "s", ValueName: "SCOPE", Kind: EnumValue, Description: description, Choices: scopeChoices}
 	}
 	dryRun := func(description string) Option {
-		return Option{Long: "dry-run", Short: "n", Description: description}
+		return Option{Long: "dry-run", Short: "n", ValueName: "BOOL", Kind: BoolValue, Description: description, Optional: true, Choices: boolChoices}
 	}
-	overlap := Option{Long: "allow-overlapping-discovery", Short: "O", Description: "Acknowledge that selected agent targets share discovery roots and permit the documented nonredundant path resolution."}
+	boolOption := func(long, short, description string) Option {
+		return Option{Long: long, Short: short, ValueName: "BOOL", Kind: BoolValue, Description: description, Optional: true, Choices: boolChoices}
+	}
+	overlap := boolOption("allow-overlapping-discovery", "O", "Acknowledge that selected agent targets share discovery roots and permit the documented nonredundant path resolution.")
 	skillAgent := func(description string) Option {
 		return Option{Long: "skill-agent", Short: "s", ValueName: "ID", Kind: EnumValue, Description: description, Repeatable: true, Choices: agentChoices}
 	}
@@ -309,7 +322,7 @@ func buildRoot() Command {
 			Option{Long: "commit-symbol", Short: "c", ValueName: "SYMBOL", Kind: StringValue, Description: "Set the package-qualified Go variable injected with the exact release commit; defaults to main.commit."},
 			Option{Long: "toolkit-version", Short: "t", ValueName: "vX.Y.Z", Kind: StringValue, Description: "Pin generated artifacts to this stable Hextap toolkit tag; stable installed builds provide their own tag by default."},
 			Option{Long: "toolkit-sha", Short: "s", ValueName: "FULL_SHA", Kind: StringValue, Description: "Pin the reusable workflow and toolkit provenance to this exact full source commit; release builds provide their own commit by default."},
-			Option{Long: "linux", Short: "x", Description: "Include paired Linux arm64 and amd64 release archives; defaults to true and accepts Go boolean flag syntax such as --linux=false."},
+			boolOption("linux", "x", "Include paired Linux arm64 and amd64 release archives; defaults to true and accepts Go boolean flag syntax such as --linux=false."),
 			dryRun("Validate and print every CREATE, UNCHANGED, or VALIDATED action without writing any project file."),
 			Option{Long: "required-check", Short: "R", ValueName: "CONTEXT", Kind: StringValue, Description: "Add one exact protected-branch status-check context to generated policy; specify the flag once per required check.", Repeatable: true},
 		),
@@ -329,7 +342,7 @@ func buildRoot() Command {
 		Description: "Checks the manifest, generated files, exact pins, repository identity, and local release contract. The optional build gate executes the trusted project adapter and verifies its complete archive set.",
 		Options: withHelp(
 			project("Select the onboarded Git project root; defaults to the current directory."),
-			Option{Long: "build", Short: "b", Description: "Execute the project's trusted build adapter and perform bounded binary and archive smoke verification after structural validation."},
+			boolOption("build", "b", "Execute the project's trusted build adapter and perform bounded binary and archive smoke verification after structural validation."),
 		),
 		Safety: []string{"Default validation is read-only.", "--build executes trusted project code in a bounded temporary release build and must not be used on untrusted repositories."},
 		Examples: []Example{
@@ -344,7 +357,7 @@ func buildRoot() Command {
 		Description: "Reports each satisfied prerequisite for an onboarded project. Online mode adds bounded GitHub identity, policy, tag, release, registration, and Formula contract checks without remote mutation.",
 		Options: withHelp(
 			project("Select the onboarded Git project root; defaults to the current directory."),
-			Option{Long: "online", Short: "o", Description: "Add authenticated, bounded, read-only GitHub checks for the canonical repository, release, rulesets, tap registration, and Formula."},
+			boolOption("online", "o", "Add authenticated, bounded, read-only GitHub checks for the canonical repository, release, rulesets, tap registration, and Formula."),
 		),
 		Safety: []string{"Local mode is read-only and makes no GitHub calls.", "--online performs bounded read-only GitHub access; it never changes rulesets, secrets, releases, tags, tap files, or services."},
 		Examples: []Example{
@@ -453,7 +466,7 @@ func buildRoot() Command {
 		Description: "Runs formatting, tests, vetting, builds, shell checks, workflow validation, Git diff checks, and worktree mutation detection. Full mode includes the Go race detector.",
 		Options: withHelp(
 			project("Select the Hextap toolkit Git checkout to validate; defaults to the current directory."),
-			Option{Long: "quick", Short: "q", Description: "Skip the race detector for a faster iteration gate while retaining the remaining deterministic checks."},
+			boolOption("quick", "q", "Skip the race detector for a faster iteration gate while retaining the remaining deterministic checks."),
 			jsonOutput("Emit the validation result as stable, versioned JSON."),
 		),
 		Safety: []string{"Executes trusted toolkit source and local developer tools.", "It snapshots Git-visible state and fails if validation changes the working tree."},
@@ -480,8 +493,8 @@ func buildRoot() Command {
 	}
 
 	confirmTag := Option{Long: "confirm-tag", Short: "c", ValueName: "vX.Y.Z", Kind: StringValue, Description: "Confirm the exact freshly computed release tag; stale or mismatched confirmations fail before mutation."}
-	executeRelease := Option{Long: "execute", Short: "e", Description: "Explicitly authorize the command's documented remote release mutations after all preconditions pass."}
-	installAfter := Option{Long: "install", Short: "i", Description: "After complete remote proof, upgrade and verify only the local Hextap Formula and any explicitly selected managed skills."}
+	executeRelease := boolOption("execute", "e", "Explicitly authorize the command's documented remote release mutations after all preconditions pass.")
+	installAfter := boolOption("install", "i", "After complete remote proof, upgrade and verify only the local Hextap Formula and any explicitly selected managed skills.")
 
 	devRelease := Command{
 		Name:        "release",
@@ -511,7 +524,7 @@ func buildRoot() Command {
 			project("Select the Hextap toolkit feature-branch checkout; defaults to the current directory."),
 			bump,
 			confirmTag,
-			Option{Long: "execute", Short: "e", Description: "Explicitly authorize the protected branch push, pull-request, merge, tag, release, and tap workflow after every gate passes."},
+			boolOption("execute", "e", "Explicitly authorize the protected branch push, pull-request, merge, tag, release, and tap workflow after every gate passes."),
 			installAfter,
 			Option{Long: "pr-title", Short: "t", ValueName: "TEXT", Kind: StringValue, Description: "Set the pull-request title; when omitted, use the latest commit subject."},
 			skillAgent("Select a concrete user-scoped managed skill target to reconcile after an explicitly requested local installation."),
@@ -532,7 +545,7 @@ func buildRoot() Command {
 			project("Select the Hextap toolkit checkout used to verify release metadata; defaults to the current directory."),
 			Option{Long: "tag", Short: "t", ValueName: "vX.Y.Z", Kind: StringValue, Description: "Select the exact published stable immutable release tag to install."},
 			Option{Long: "commit", Short: "c", ValueName: "FULL_SHA", Kind: StringValue, Description: "Require the installed CLI to report this exact full released source commit."},
-			Option{Long: "execute", Short: "e", Description: "Explicitly authorize the local Hextap Formula and selected skill mutations after release proof passes."},
+			boolOption("execute", "e", "Explicitly authorize the local Hextap Formula and selected skill mutations after release proof passes."),
 			skillAgent("Select a concrete user-scoped managed skill target to reconcile after the Formula is verified."),
 			jsonOutput("Emit versioned installation evidence as JSON."),
 		),

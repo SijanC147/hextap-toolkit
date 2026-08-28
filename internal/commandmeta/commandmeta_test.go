@@ -44,6 +44,14 @@ func TestCommandTreeIsCompleteAndEveryFlagHasOneUniqueShorthand(t *testing.T) {
 			if option.Repeatable && option.ValueName == "" {
 				t.Fatalf("%s --%s is repeatable without a value", strings.Join(path, " "), option.Long)
 			}
+			if option.Optional && option.ValueName == "" {
+				t.Fatalf("%s --%s has an optional argument without a value name", strings.Join(path, " "), option.Long)
+			}
+			if option.Kind == BoolValue {
+				if !option.Optional || option.ValueName != "BOOL" || len(option.Choices) != 2 || option.Choices[0].Name != "true" || option.Choices[1].Name != "false" {
+					t.Fatalf("%s --%s lacks the canonical optional true/false contract: %#v", strings.Join(path, " "), option.Long, option)
+				}
+			}
 		}
 		if !seenLong["help"] {
 			t.Fatalf("command %q does not declare --help/-h", strings.Join(path, " "))
@@ -67,10 +75,16 @@ func TestHelpAndZshCompletionTraverseTheSameMetadata(t *testing.T) {
 		"->command",
 		"_describe",
 		"_values",
+		"--linux=-",
+		"true[enable the option]",
+		"false[disable the option explicitly]",
 	} {
 		if !strings.Contains(completion, required) {
 			t.Errorf("Zsh completion lacks %q", required)
 		}
+	}
+	if strings.Contains(completion, "_arguments -s") {
+		t.Fatal("Zsh completion enables short-option stacking that Go's flag parser rejects")
 	}
 
 	walkCommands(t, Root(), nil, func(t *testing.T, command Command, path []string) {
@@ -82,6 +96,30 @@ func TestHelpAndZshCompletionTraverseTheSameMetadata(t *testing.T) {
 		}
 		if !strings.Contains(help, command.Summary) || !strings.Contains(help, command.Description) {
 			t.Errorf("help for %q is not derived from its summary and description", strings.Join(path, " "))
+		}
+		for _, required := range []string{
+			"# Purpose: " + commentText(command.Summary),
+			"# Description: " + commentText(command.Description),
+		} {
+			if !strings.Contains(completion, required) {
+				t.Errorf("completion documentation for %q lacks %q", strings.Join(path, " "), required)
+			}
+		}
+		for _, argument := range command.Arguments {
+			if !strings.Contains(completion, commentText(argument.Description)) {
+				t.Errorf("completion documentation for %q lacks argument %q description", strings.Join(path, " "), argument.Name)
+			}
+		}
+		for _, note := range command.Safety {
+			if !strings.Contains(completion, "# Safety: "+commentText(note)) {
+				t.Errorf("completion documentation for %q lacks safety note %q", strings.Join(path, " "), note)
+			}
+		}
+		for _, example := range command.Examples {
+			if !strings.Contains(completion, "# Example: "+commentText(example.Description)) ||
+				!strings.Contains(completion, "#   "+commentText(strings.ReplaceAll(example.Command, "{command}", "hextap"))) {
+				t.Errorf("completion documentation for %q lacks example %q", strings.Join(path, " "), example.Description)
+			}
 		}
 		for _, option := range command.Options {
 			if !strings.Contains(help, "-"+option.Short+", --"+option.Long) || !strings.Contains(help, option.Description) {
@@ -113,6 +151,30 @@ func TestCheckedInZshCompletionMatchesAuthoritativeMetadata(t *testing.T) {
 	}
 	if string(data) != Zsh() {
 		t.Fatal("completions/_hextap drifted from command metadata; regenerate it with `go run ./cmd/brew-hextap completion zsh`")
+	}
+}
+
+func TestBooleanOptionsExposeOptionalValuesInHelpAndCompletion(t *testing.T) {
+	help := Help("hextap", []string{"onboard"})
+	for _, required := range []string{
+		"-x, --linux[=BOOL]",
+		"true (enable the option)",
+		"false (disable the option explicitly)",
+	} {
+		if !strings.Contains(help, required) {
+			t.Errorf("onboard help lacks %q", required)
+		}
+	}
+	completion := Zsh()
+	for _, required := range []string{
+		"--linux=-",
+		"::bool:_hextap_values_onboard_linux",
+		"true[enable the option]",
+		"false[disable the option explicitly]",
+	} {
+		if !strings.Contains(completion, required) {
+			t.Errorf("Zsh completion lacks boolean contract %q", required)
+		}
 	}
 }
 

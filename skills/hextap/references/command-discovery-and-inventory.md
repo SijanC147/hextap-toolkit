@@ -46,10 +46,13 @@ subcommand is equivalent.
 
 ## Zsh completion
 
-The Homebrew Formula installs the release-owned completion at:
+The Homebrew Formula installs the release-owned completion below the Homebrew
+prefix that owns the active Hextap binary. Resolve that exact prefix from the
+inventory rather than assuming the shell's default `brew` is the owner:
 
-```text
-$(brew --prefix)/share/zsh/site-functions/_hextap
+```sh
+hextap status --json | jq -r \
+  '.homebrew.prefix + "/share/zsh/site-functions/_hextap"'
 ```
 
 The file registers both `hextap` and `brew-hextap` and is generated from the

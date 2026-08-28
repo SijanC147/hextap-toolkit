@@ -22,7 +22,7 @@ func Bind(flags *flag.FlagSet, path ...string) Binder {
 // String registers both the long and short spellings of a string option.
 func (binder Binder) String(long, defaultValue string) *string {
 	option := binder.mustOption(long)
-	if option.ValueName == "" {
+	if option.ValueName == "" || option.Optional || (option.Kind != StringValue && option.Kind != DirectoryValue && option.Kind != FileValue && option.Kind != EnumValue) {
 		panic("string option metadata lacks a value")
 	}
 	value := defaultValue
@@ -34,8 +34,8 @@ func (binder Binder) String(long, defaultValue string) *string {
 // Bool registers both the long and short spellings of a boolean option.
 func (binder Binder) Bool(long string, defaultValue bool) *bool {
 	option := binder.mustOption(long)
-	if option.ValueName != "" {
-		panic("boolean option metadata unexpectedly declares a value")
+	if option.Kind != BoolValue || option.ValueName == "" || !option.Optional {
+		panic("boolean option metadata lacks its optional boolean value contract")
 	}
 	value := defaultValue
 	binder.flags.BoolVar(&value, option.Long, defaultValue, option.Description)
@@ -46,7 +46,7 @@ func (binder Binder) Bool(long string, defaultValue bool) *bool {
 // Var registers both spellings of a repeatable or custom flag.Value option.
 func (binder Binder) Var(value flag.Value, long string) {
 	option := binder.mustOption(long)
-	if option.ValueName == "" {
+	if option.ValueName == "" || !option.Repeatable || option.Optional || option.Kind == BoolValue {
 		panic("custom option metadata lacks a value")
 	}
 	binder.flags.Var(value, option.Long, option.Description)
