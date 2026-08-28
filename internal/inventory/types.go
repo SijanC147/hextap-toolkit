@@ -57,6 +57,7 @@ type Service struct {
 	FileSystem     FileSystem
 	Version        string
 	Commit         string
+	Invocation     string
 	Executable     string
 	HomeDir        string
 	BrewCandidates []string

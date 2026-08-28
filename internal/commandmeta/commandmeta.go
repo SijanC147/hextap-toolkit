@@ -219,6 +219,13 @@ func buildRoot() Command {
 		{Name: "minor", Description: "backward-compatible feature"},
 		{Name: "major", Description: "incompatible contract change"},
 	}
+	inventoryKindChoices := []Choice{
+		{Name: "all", Description: "include every inventory category"},
+		{Name: "project", Description: "include registered projects and an optional local project"},
+		{Name: "formula", Description: "include Formulae registered in the Hextap tap"},
+		{Name: "cask", Description: "include Casks registered in the Hextap tap"},
+		{Name: "skill", Description: "include managed Hextap agent-skill installations"},
+	}
 
 	project := func(description string) Option {
 		return Option{Long: "project", Short: "p", ValueName: "PATH", Kind: DirectoryValue, Description: description}
@@ -250,6 +257,39 @@ func buildRoot() Command {
 		Examples: []Example{
 			{Description: "Print the installed build identity", Command: "{command} version"},
 			{Description: "Use the equivalent global shorthand", Command: "{command} -V"},
+		},
+	}
+
+	status := Command{
+		Name:        "status",
+		Summary:     "Summarize local Hextap installations and registrations",
+		Description: "Builds one offline, read-only snapshot of the running CLI, its owning Homebrew installation, the canonical Hextap tap, registered projects, Formulae, Casks, managed skills, and an optional local project. Missing components are reported as warnings instead of hiding partial results.",
+		Options: withHelp(
+			project("Inspect this local project manifest in addition to the system-wide Hextap inventory; omit it for system inventory only."),
+			jsonOutput("Emit the complete versioned inventory document as JSON instead of the concise human summary."),
+		),
+		Safety: []string{"Read-only and offline by default; it disables Homebrew auto-update, API access, and analytics and never runs service operations.", "It reports environment-variable names where useful but never reads or prints their values, dependency stderr, or credentials."},
+		Examples: []Example{
+			{Description: "Summarize the local Hextap system", Command: "{command} status"},
+			{Description: "Include the current project and emit versioned JSON", Command: "{command} status --project . --json"},
+		},
+	}
+
+	info := Command{
+		Name:        "info",
+		Summary:     "Print detailed local Hextap inventory",
+		Description: "Prints the full offline inventory with exact package, project, skill, tap, Git, version, installation, outdated, pinned, and safe service-definition metadata. Category and exact-name filters can narrow the report without changing the underlying collection contract.",
+		Options: withHelp(
+			project("Inspect this local project manifest in addition to the system-wide Hextap inventory; omit it for system inventory only."),
+			Option{Long: "kind", Short: "k", ValueName: "KIND", Kind: EnumValue, Description: "Limit detailed output to one inventory category; defaults to all.", Choices: inventoryKindChoices},
+			Option{Long: "name", Short: "n", ValueName: "NAME", Kind: StringValue, Description: "Require an exact project, Formula, Cask, or skill name after applying the category filter."},
+			jsonOutput("Emit the filtered versioned inventory document as JSON instead of the detailed human report."),
+		),
+		Safety: []string{"Read-only and offline by default; it never updates Homebrew, contacts GitHub, starts services, or changes registrations.", "Unavailable dependencies produce generic warnings; credential values and dependency stderr are never exposed."},
+		Examples: []Example{
+			{Description: "Print every available local inventory detail", Command: "{command} info"},
+			{Description: "Inspect one registered Formula", Command: "{command} info --kind formula --name hextap"},
+			{Description: "Inspect managed skills as JSON", Command: "{command} info -k skill -j"},
 		},
 	}
 
@@ -548,7 +588,7 @@ func buildRoot() Command {
 		Description: "Hextap provides one versioned command surface for project onboarding, offline and online validation, managed agent skills, toolkit development, and shell integration. The same binary supports direct hextap and Homebrew external-command brew hextap invocation.",
 		Arguments:   commandArgument("Choose one top-level operation."),
 		Options:     []Option{helpOption, versionOption},
-		Children:    []Command{version, onboard, validate, doctor, skills, dev, completion},
+		Children:    []Command{version, status, info, onboard, validate, doctor, skills, dev, completion},
 		Safety:      []string{"Help, version, completion output, status, targets, default validation, and default doctor paths are read-only.", "Commands that write locally, execute trusted code, access GitHub, or mutate releases clearly identify that boundary in their own help and require their documented authorization flags."},
 		Examples: []Example{
 			{Description: "Show the complete top-level command map", Command: "{command} --help"},

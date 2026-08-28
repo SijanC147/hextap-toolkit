@@ -69,9 +69,9 @@ func RunNamed(invocation string, args []string, stdout, stderr io.Writer, versio
 		writeVersion(stdout, invocation, version, commit)
 		return 0
 	case "status":
-		return (inventory.Service{Version: version, Commit: commit}).RunStatusCLI(context.Background(), args[1:], stdout, stderr)
+		return (inventory.Service{Version: version, Commit: commit, Invocation: invocation}).RunStatusCLI(context.Background(), args[1:], stdout, stderr)
 	case "info":
-		return (inventory.Service{Version: version, Commit: commit}).RunInfoCLI(context.Background(), args[1:], stdout, stderr)
+		return (inventory.Service{Version: version, Commit: commit, Invocation: invocation}).RunInfoCLI(context.Background(), args[1:], stdout, stderr)
 	case "onboard":
 		return runOnboard(invocation, args[1:], stdout, stderr, version, commit)
 	case "validate":
