@@ -26,13 +26,15 @@ func readSkillFile(t *testing.T, relative string) string {
 
 func TestHextapSkillAgentSkillsFrontmatterAndContent(t *testing.T) {
 	content := readSkillFile(t, "SKILL.md")
-	frontmatter := regexp.MustCompile(`(?s)\A---\nname: hextap\ndescription: "[^"]+"\ncompatibility: "Requires Homebrew and the brew hextap external command\."\nlicense: MIT\nmetadata:\n  hextap-skill-version: "1\.2\.1"\n---\n`).FindString(content)
+	frontmatter := regexp.MustCompile(`(?s)\A---\nname: hextap\ndescription: "[^"]+"\ncompatibility: "Requires Homebrew and Hextap 0\.5\.0 or newer through hextap or brew hextap\."\nlicense: MIT\nmetadata:\n  hextap-skill-version: "1\.3\.0"\n---\n`).FindString(content)
 	if frontmatter == "" {
 		t.Fatal("SKILL.md frontmatter is not the lean canonical shape")
 	}
 	for _, required := range []string{
-		"brew hextap help",
-		"brew hextap onboard --dry-run",
+		"hextap --help",
+		"hextap onboard --dry-run",
+		"hextap status --json",
+		"Command discovery and inventory",
 		"validate --build",
 		"doctor --online",
 		"homebrew-only",
@@ -48,7 +50,7 @@ func TestHextapSkillAgentSkillsFrontmatterAndContent(t *testing.T) {
 			t.Errorf("SKILL.md is missing required contract %q", required)
 		}
 	}
-	for _, forbidden := range []string{"TODO", "v0.1.2", "brew hextap --help", "~/.agents", "~/.claude", "~/.codex"} {
+	for _, forbidden := range []string{"TODO", "v0.1.2", "~/.agents", "~/.claude", "~/.codex"} {
 		if strings.Contains(content, forbidden) {
 			t.Errorf("SKILL.md contains transient or agent-specific text %q", forbidden)
 		}
@@ -58,8 +60,8 @@ func TestHextapSkillAgentSkillsFrontmatterAndContent(t *testing.T) {
 func TestHextapSkillReferencesResolveAndCoverContracts(t *testing.T) {
 	content := readSkillFile(t, "SKILL.md")
 	links := regexp.MustCompile(`\]\((references/[a-z0-9-]+\.md)\)`).FindAllStringSubmatch(content, -1)
-	if len(links) < 4 {
-		t.Fatalf("reference link count = %d, want at least 4", len(links))
+	if len(links) < 5 {
+		t.Fatalf("reference link count = %d, want at least 5", len(links))
 	}
 	seen := make(map[string]bool)
 	for _, link := range links {
@@ -72,14 +74,15 @@ func TestHextapSkillReferencesResolveAndCoverContracts(t *testing.T) {
 			t.Errorf("linked reference %s: %v", path, err)
 		}
 	}
-	if len(seen) != 4 {
-		t.Fatalf("unique linked references = %d, want 4", len(seen))
+	if len(seen) != 5 {
+		t.Fatalf("unique linked references = %d, want 5", len(seen))
 	}
 
 	allReferences := readSkillFile(t, filepath.Join("references", "onboarding-and-validation.md")) +
 		readSkillFile(t, filepath.Join("references", "release-and-recovery.md")) +
 		readSkillFile(t, filepath.Join("references", "safety-and-failure-routing.md")) +
-		readSkillFile(t, filepath.Join("references", "toolkit-development.md"))
+		readSkillFile(t, filepath.Join("references", "toolkit-development.md")) +
+		readSkillFile(t, filepath.Join("references", "command-discovery-and-inventory.md"))
 	for _, required := range []string{
 		"OP_SERVICE_ACCOUNT_TOKEN",
 		"secrets: inherit",
@@ -91,6 +94,9 @@ func TestHextapSkillReferencesResolveAndCoverContracts(t *testing.T) {
 		"--confirm-tag",
 		"skills upgrade --agent",
 		"never resolves feedback",
+		"hextap completion zsh",
+		"hextap info --kind formula --name hextap",
+		"hextap -> brew-hextap",
 	} {
 		if !strings.Contains(allReferences, required) {
 			t.Errorf("skill references are missing required contract %q", required)

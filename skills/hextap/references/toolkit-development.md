@@ -5,7 +5,7 @@ the Hextap toolkit itself.
 
 ## Trust boundaries
 
-- `brew hextap dev status` and `dev plan` are read-only Git/GitHub inventory.
+- `hextap dev status` and `dev plan` are read-only Git/GitHub inventory.
 - `dev validate` runs trusted toolkit source and local developer tools.
 - `dev deploy` may push a feature branch, create or reuse a PR, merge through
   repository protection, create one confirmed tag, and trigger its release.
@@ -24,7 +24,7 @@ Require an explicit user request covering every selected mutation boundary.
 2. Inspect the live repository and release baseline:
 
    ```sh
-   brew hextap dev status --project TOOLKIT_ROOT
+   hextap dev status --project TOOLKIT_ROOT
    ```
 
 3. Implement the requested source change with failing tests first. Keep the Go
@@ -33,8 +33,8 @@ Require an explicit user request covering every selected mutation boundary.
 4. Iterate with the quick gate, then require the full gate before committing:
 
    ```sh
-   brew hextap dev validate --project TOOLKIT_ROOT --quick
-   brew hextap dev validate --project TOOLKIT_ROOT
+   hextap dev validate --project TOOLKIT_ROOT --quick
+   hextap dev validate --project TOOLKIT_ROOT
    ```
 
 5. Review the complete diff, run an independent code-quality review, commit with
@@ -51,7 +51,7 @@ Select SemVer from user-visible compatibility impact:
 Compute rather than guess the exact next version:
 
 ```sh
-brew hextap dev plan --project TOOLKIT_ROOT --bump patch|minor|major
+hextap dev plan --project TOOLKIT_ROOT --bump patch|minor|major
 ```
 
 Review the current immutable release, computed tag, and target commit. The
@@ -63,7 +63,7 @@ mutating command requires both `--execute` and the exact displayed
 From a clean feature branch with reviewed commits, run:
 
 ```sh
-brew hextap dev deploy \
+hextap dev deploy \
   --project TOOLKIT_ROOT \
   --bump BUMP \
   --confirm-tag vNEXT \
@@ -98,7 +98,7 @@ When the protected source change is already merged and clean canonical `main`
 is checked out:
 
 ```sh
-brew hextap dev release \
+hextap dev release \
   --project TOOLKIT_ROOT \
   --bump BUMP \
   --confirm-tag vNEXT \
@@ -109,7 +109,7 @@ When an immutable release already exists and only local Hextap installation is
 authorized:
 
 ```sh
-brew hextap dev install \
+hextap dev install \
   --project TOOLKIT_ROOT \
   --tag vVERSION \
   --commit FULL_RELEASE_COMMIT \
@@ -126,8 +126,8 @@ managed skill targets.
 Use read-only inventory without an agent filter to inspect every concrete path:
 
 ```sh
-brew hextap skills status --scope user
-brew hextap skills status --scope user --json
+hextap skills status --scope user
+hextap skills status --scope user --json
 ```
 
 Treat `agent` as the physical installation target and `discovered_by` as the
@@ -138,8 +138,8 @@ An installed lower marker version reports `UPDATE_AVAILABLE`. Upgrade only an
 intact marker-owned target after reviewing the dry-run:
 
 ```sh
-brew hextap skills upgrade --agent AGENT --scope user --dry-run
-brew hextap skills upgrade --agent AGENT --scope user
+hextap skills upgrade --agent AGENT --scope user --dry-run
+hextap skills upgrade --agent AGENT --scope user
 ```
 
 Never downgrade `NEWER_THAN_CLI`, replace `SAME_VERSION_DIFFERENT`, repair

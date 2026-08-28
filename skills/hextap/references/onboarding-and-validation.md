@@ -14,8 +14,8 @@ Load this reference when creating or checking the local Hextap contract.
 4. Confirm the installed command provenance:
 
    ```sh
-   brew hextap --version
-   brew hextap help
+   hextap --version
+   hextap help
    ```
 
 An installed stable CLI derives its stable toolkit tag and full commit pin. A
@@ -28,7 +28,7 @@ For a new Go project, use explicit project metadata and repeat
 `--required-check` once per protected status context:
 
 ```sh
-brew hextap onboard \
+hextap onboard \
   --project PROJECT_ROOT \
   --description "ONE_LINE_DESCRIPTION" \
   --license LICENSE_IDENTIFIER \
@@ -45,7 +45,7 @@ Use `--linux=false` only when Linux assets are deliberately excluded.
 For a Bun/TypeScript project, first add and review an authoritative schema-2
 `.hextap.json` plus executable `scripts/hextap-build`. Use
 `examples/better-ccflare.json` in the pinned toolkit as the field reference.
-Then run `brew hextap onboard` without Go generation flags. Hextap preserves the
+Then run `hextap onboard` without Go generation flags. Hextap preserves the
 manifest and custom adapter byte-for-byte and creates only its managed caller,
 tap payload, rulesets, and setup document. Schema 2 requires:
 
@@ -74,20 +74,20 @@ Run each rung separately so its trust boundary remains visible:
 
 ```sh
 # Read local files; do not execute the project adapter or use GitHub.
-brew hextap validate --project PROJECT_ROOT
+hextap validate --project PROJECT_ROOT
 
 # Execute trusted profile preparation and the adapter in a bounded temporary
 # build, then verify the exact asset set and one matching native executable.
-brew hextap validate --project PROJECT_ROOT --build
+hextap validate --project PROJECT_ROOT --build
 
 # Check local prerequisites; do not execute the adapter or use GitHub.
-brew hextap doctor --project PROJECT_ROOT
+hextap doctor --project PROJECT_ROOT
 
 # Add bounded, read-only queries pinned to github.com.
-brew hextap doctor --project PROJECT_ROOT --online
+hextap doctor --project PROJECT_ROOT --online
 ```
 
-For a schema-2 `brew hextap validate --build`, the coordinator creates one
+For a schema-2 `hextap validate --build`, the coordinator creates one
 private temporary Bun runtime cache, preserves it across profile preparation
 and adapter build, removes it afterward, and restores the caller environment.
 Do not invent or persist a cache variable for this user-facing validation path.
