@@ -25,11 +25,11 @@
 #   hextap -V
 
 # Command: hextap status
-# Purpose: Summarize local Hextap installations and registrations
-# Description: Builds one offline, read-only snapshot of the running CLI, its owning Homebrew installation, the canonical Hextap tap, registered projects, Formulae, Casks, managed skills, and an optional local project. Missing components are reported as warnings instead of hiding partial results.
+# Purpose: Show local Hextap installations and registrations
+# Description: Builds one offline, read-only snapshot of the running CLI, its owning Homebrew installation, the canonical Hextap tap, registered projects, Formulae, Casks, managed skills, and an optional local project. Human output presents every report field in a narrow-terminal-friendly hierarchy; missing components and empty states remain explicit.
 # Safety: Read-only and offline by default; it disables Homebrew auto-update, API access, and analytics and never runs service operations.
 # Safety: It reports environment-variable names where useful but never reads or prints their values, dependency stderr, or credentials.
-# Example: Summarize the local Hextap system
+# Example: Show the complete local Hextap system
 #   hextap status
 # Example: Include the current project and emit versioned JSON
 #   hextap status --project . --json
@@ -539,8 +539,8 @@ _hextap_status() {
   _arguments -S \
     '(-p --project)-p[Inspect this local project manifest in addition to the system-wide Hextap inventory; omit it for system inventory only.]:path:_directories' \
     '(-p --project)--project[Inspect this local project manifest in addition to the system-wide Hextap inventory; omit it for system inventory only.]:path:_directories' \
-    '(-j --json)-j=-[Emit the complete versioned inventory document as JSON instead of the concise human summary.]::bool:_hextap_values_status_json' \
-    '(-j --json)--json=-[Emit the complete versioned inventory document as JSON instead of the concise human summary.]::bool:_hextap_values_status_json' \
+    '(-j --json)-j=-[Emit the same complete report as a versioned JSON document instead of structured human output.]::bool:_hextap_values_status_json' \
+    '(-j --json)--json=-[Emit the same complete report as a versioned JSON document instead of structured human output.]::bool:_hextap_values_status_json' \
     '(-h --help)-h[Print this complete command help and exit successfully without performing any work.]' \
     '(-h --help)--help[Print this complete command help and exit successfully without performing any work.]'
 }
@@ -898,7 +898,7 @@ _hextap() {
       local -a commands
       commands=(
         'version:Print the installed build version and source commit'
-        'status:Summarize local Hextap installations and registrations'
+        'status:Show local Hextap installations and registrations'
         'info:Print detailed local Hextap inventory'
         'onboard:Plan or create deterministic local Hextap onboarding artifacts'
         'validate:Validate local onboarding artifacts and optionally smoke-build archives'

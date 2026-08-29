@@ -275,15 +275,15 @@ func buildRoot() Command {
 
 	status := Command{
 		Name:        "status",
-		Summary:     "Summarize local Hextap installations and registrations",
-		Description: "Builds one offline, read-only snapshot of the running CLI, its owning Homebrew installation, the canonical Hextap tap, registered projects, Formulae, Casks, managed skills, and an optional local project. Missing components are reported as warnings instead of hiding partial results.",
+		Summary:     "Show local Hextap installations and registrations",
+		Description: "Builds one offline, read-only snapshot of the running CLI, its owning Homebrew installation, the canonical Hextap tap, registered projects, Formulae, Casks, managed skills, and an optional local project. Human output presents every report field in a narrow-terminal-friendly hierarchy; missing components and empty states remain explicit.",
 		Options: withHelp(
 			project("Inspect this local project manifest in addition to the system-wide Hextap inventory; omit it for system inventory only."),
-			jsonOutput("Emit the complete versioned inventory document as JSON instead of the concise human summary."),
+			jsonOutput("Emit the same complete report as a versioned JSON document instead of structured human output."),
 		),
 		Safety: []string{"Read-only and offline by default; it disables Homebrew auto-update, API access, and analytics and never runs service operations.", "It reports environment-variable names where useful but never reads or prints their values, dependency stderr, or credentials."},
 		Examples: []Example{
-			{Description: "Summarize the local Hextap system", Command: "{command} status"},
+			{Description: "Show the complete local Hextap system", Command: "{command} status"},
 			{Description: "Include the current project and emit versioned JSON", Command: "{command} status --project . --json"},
 		},
 	}
