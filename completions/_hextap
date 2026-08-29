@@ -5,10 +5,10 @@
 # The documentation appendix mirrors every detailed help field.
 
 # Command: hextap
-# Purpose: Deterministic onboarding, validation, release, and installation for Hextap projects
-# Description: Hextap provides one versioned command surface for project onboarding, offline and online validation, managed agent skills, toolkit development, and shell integration. The same binary supports direct hextap and Homebrew external-command brew hextap invocation.
+# Purpose: Deterministic onboarding, rollback, validation, release, and installation for Hextap projects
+# Description: Hextap provides one versioned command surface for project onboarding, safe historical Homebrew rollback, offline and online validation, managed agent skills, toolkit development, and shell integration. The same binary supports direct hextap and Homebrew external-command brew hextap invocation.
 # Argument COMMAND (required): Choose one top-level operation.
-# Safety: Help, version, completion output, status, targets, default validation, and default doctor paths are read-only.
+# Safety: Help, version, completion output, status, inventory, rollback planning, targets, default validation, and default doctor paths are read-only.
 # Safety: Commands that write locally, execute trusted code, access GitHub, or mutate releases clearly identify that boundary in their own help and require their documented authorization flags.
 # Example: Show the complete top-level command map
 #   hextap --help
@@ -45,6 +45,45 @@
 #   hextap info --kind formula --name hextap
 # Example: Inspect managed skills as JSON
 #   hextap info -k skill -j
+
+# Command: hextap rollback
+# Purpose: Plan or execute safe historical Homebrew rollback
+# Description: Selects Formula or Cask rollback under a shared dry-run-by-default contract with explicit history, owning-Homebrew resolution, exact confirmation, service and concurrency refusal, deterministic restoration, and a separate protected remote-PR path.
+# Argument COMMAND (required): Choose formula or cask.
+# Safety: The parent command performs no work until a package kind and explicit historical selector are supplied.
+# Safety: No rollback command stops services, pushes main, force-pushes, merges a PR, moves a tag, rewrites an immutable release, or prints dependency stderr and credentials.
+# Example: Read the complete Formula rollback contract
+#   hextap rollback formula --help
+# Example: Read the complete Cask rollback contract
+#   hextap rollback cask -h
+
+# Command: hextap rollback formula
+# Purpose: Plan or execute one fail-closed Formula rollback
+# Description: Resolves the Homebrew installation that owns active Hextap and one exact historical Formula. Local mode refuses dirty or drifting tap state and active services, temporarily checks out only the Formula path, runs a bounded reinstall, and unconditionally restores exact HEAD bytes and cleanliness. Remote mode preserves the current canonical install, service, caveat, and test structure while applying historical release metadata and incrementing version_scheme so normal Homebrew upgrade ordering can converge; schema-2 Formulae require the authoritative tap template to reconcile byte-identically in the same PR.
+# Argument NAME (required): Exact lowercase Formula basename in the canonical Hextap tap; the Formula must already be installed.
+# Safety: Planning is the default. Mutation requires both --execute and the exact --confirm string from the same fresh plan.
+# Safety: Local execution never stops or restarts a service, never updates the tap, disables cleanup and dependent mutation, restores on failure or cancellation, and fails on concurrent drift.
+# Safety: Remote execution clones unchanged owned main, pushes only a new codex/hextap-rollback-* branch without force, opens a protected PR, and never pushes main, merges, moves tags, or rewrites immutable releases.
+# Example: Plan a local Formula rollback by exact historical version
+#   hextap rollback formula hextap --to-version 0.4.2
+# Example: Execute the reviewed local plan with its exact printed confirmation
+#   hextap rollback formula hextap -t FULL_HISTORICAL_SHA -m local -x -c "CONFIRMATION_FROM_PLAN"
+# Example: Plan a protected remote rollback and inspect upgrade convergence
+#   hextap rollback formula hextap --to-commit FULL_HISTORICAL_SHA --mode remote --json
+
+# Command: hextap rollback cask
+# Purpose: Plan or execute one fail-closed Cask rollback
+# Description: Resolves one exact installed Cask and historical tap definition. Local mode performs the same single-path checkout, bounded cask reinstall, unconditional exact restoration, and drift checks as Formula rollback. Remote mode reconciles historical version, URL, and checksum metadata into the current canonical artifact and caveat structure; it explains Homebrew's replacement-based Cask convergence and the --greedy requirement for auto-updating Casks.
+# Argument NAME (required): Exact lowercase Cask token in the canonical Hextap tap; the Cask must already be installed.
+# Safety: Planning is the default. Mutation requires both --execute and the exact --confirm string from the same fresh plan.
+# Safety: Local execution changes only the selected installed Cask and one temporary tap path; it never uses --zap, cleans other packages, or hides restoration failure.
+# Safety: Remote execution creates only an owned feature branch and protected PR; it cannot force-push, direct-push main, merge, or alter any source release.
+# Example: Plan a local Cask rollback by exact historical commit
+#   hextap rollback cask ntm -t FULL_HISTORICAL_SHA
+# Example: Plan Cask replacement convergence through a protected PR
+#   hextap rollback cask ntm --to-version 1.7.0 --mode remote
+# Example: Execute after copying the exact fresh confirmation
+#   hextap rollback cask ntm -v 1.7.0 -m local -x -c "CONFIRMATION_FROM_PLAN"
 
 # Command: hextap onboard
 # Purpose: Plan or create deterministic local Hextap onboarding artifacts
@@ -233,6 +272,54 @@ _hextap_values_info_kind() {
 }
 
 _hextap_values_info_json() {
+  local context state state_descr line
+  typeset -A val_args
+  _values 'bool' \
+    'true[enable the option]' \
+    'false[disable the option explicitly]'
+}
+
+_hextap_values_rollback_formula_mode() {
+  local context state state_descr line
+  typeset -A val_args
+  _values 'mode' \
+    'local[temporarily check out one historical definition, reinstall it, and restore the exact tap]' \
+    'remote[prepare a canonical metadata rollback on an owned feature branch and protected pull request]'
+}
+
+_hextap_values_rollback_formula_execute() {
+  local context state state_descr line
+  typeset -A val_args
+  _values 'bool' \
+    'true[enable the option]' \
+    'false[disable the option explicitly]'
+}
+
+_hextap_values_rollback_formula_json() {
+  local context state state_descr line
+  typeset -A val_args
+  _values 'bool' \
+    'true[enable the option]' \
+    'false[disable the option explicitly]'
+}
+
+_hextap_values_rollback_cask_mode() {
+  local context state state_descr line
+  typeset -A val_args
+  _values 'mode' \
+    'local[temporarily check out one historical definition, reinstall it, and restore the exact tap]' \
+    'remote[prepare a canonical metadata rollback on an owned feature branch and protected pull request]'
+}
+
+_hextap_values_rollback_cask_execute() {
+  local context state state_descr line
+  typeset -A val_args
+  _values 'bool' \
+    'true[enable the option]' \
+    'false[disable the option explicitly]'
+}
+
+_hextap_values_rollback_cask_json() {
   local context state state_descr line
   typeset -A val_args
   _values 'bool' \
@@ -559,6 +646,74 @@ _hextap_info() {
     '(-j --json)--json=-[Emit the filtered versioned inventory document as JSON instead of the detailed human report.]::bool:_hextap_values_info_json' \
     '(-h --help)-h[Print this complete command help and exit successfully without performing any work.]' \
     '(-h --help)--help[Print this complete command help and exit successfully without performing any work.]'
+}
+
+_hextap_rollback_formula() {
+  local context state state_descr line
+  typeset -A opt_args
+  _arguments -S \
+    '(-t --to-commit)-t[Select this exact full 40-character historical tap commit; specify exactly one of --to-commit or --to-version.]:full_sha:_message "full_sha"' \
+    '(-t --to-commit)--to-commit[Select this exact full 40-character historical tap commit; specify exactly one of --to-commit or --to-version.]:full_sha:_message "full_sha"' \
+    '(-v --to-version)-v[Resolve one unambiguous historical Formula definition with this exact version; specify exactly one historical selector.]:version:_message "version"' \
+    '(-v --to-version)--to-version[Resolve one unambiguous historical Formula definition with this exact version; specify exactly one historical selector.]:version:_message "version"' \
+    '(-m --mode)-m[Choose local temporary reinstall or remote protected pull-request planning; defaults to local.]:mode:_hextap_values_rollback_formula_mode' \
+    '(-m --mode)--mode[Choose local temporary reinstall or remote protected pull-request planning; defaults to local.]:mode:_hextap_values_rollback_formula_mode' \
+    '(-x --execute)-x=-[Explicitly authorize the selected local reinstall or owned feature-branch push and pull-request creation after every fresh precondition passes.]::bool:_hextap_values_rollback_formula_execute' \
+    '(-x --execute)--execute=-[Explicitly authorize the selected local reinstall or owned feature-branch push and pull-request creation after every fresh precondition passes.]::bool:_hextap_values_rollback_formula_execute' \
+    '(-c --confirm)-c[Repeat the exact confirmation string printed by the fresh plan; a missing, stale, or mismatched value fails before mutation.]:text:_message "text"' \
+    '(-c --confirm)--confirm[Repeat the exact confirmation string printed by the fresh plan; a missing, stale, or mismatched value fails before mutation.]:text:_message "text"' \
+    '(-j --json)-j=-[Emit the complete versioned rollback plan or execution evidence as JSON.]::bool:_hextap_values_rollback_formula_json' \
+    '(-j --json)--json=-[Emit the complete versioned rollback plan or execution evidence as JSON.]::bool:_hextap_values_rollback_formula_json' \
+    '(-h --help)-h[Print this complete command help and exit successfully without performing any work.]' \
+    '(-h --help)--help[Print this complete command help and exit successfully without performing any work.]' \
+    '1:name:_message '\''Exact lowercase Formula basename in the canonical Hextap tap; the Formula must already be installed.'\'''
+}
+
+_hextap_rollback_cask() {
+  local context state state_descr line
+  typeset -A opt_args
+  _arguments -S \
+    '(-t --to-commit)-t[Select this exact full 40-character historical tap commit; specify exactly one of --to-commit or --to-version.]:full_sha:_message "full_sha"' \
+    '(-t --to-commit)--to-commit[Select this exact full 40-character historical tap commit; specify exactly one of --to-commit or --to-version.]:full_sha:_message "full_sha"' \
+    '(-v --to-version)-v[Resolve one unambiguous historical Cask definition with this exact version; specify exactly one historical selector.]:version:_message "version"' \
+    '(-v --to-version)--to-version[Resolve one unambiguous historical Cask definition with this exact version; specify exactly one historical selector.]:version:_message "version"' \
+    '(-m --mode)-m[Choose local temporary reinstall or remote protected pull-request planning; defaults to local.]:mode:_hextap_values_rollback_cask_mode' \
+    '(-m --mode)--mode[Choose local temporary reinstall or remote protected pull-request planning; defaults to local.]:mode:_hextap_values_rollback_cask_mode' \
+    '(-x --execute)-x=-[Explicitly authorize the selected local reinstall or owned feature-branch push and pull-request creation after every fresh precondition passes.]::bool:_hextap_values_rollback_cask_execute' \
+    '(-x --execute)--execute=-[Explicitly authorize the selected local reinstall or owned feature-branch push and pull-request creation after every fresh precondition passes.]::bool:_hextap_values_rollback_cask_execute' \
+    '(-c --confirm)-c[Repeat the exact confirmation string printed by the fresh plan; a missing, stale, or mismatched value fails before mutation.]:text:_message "text"' \
+    '(-c --confirm)--confirm[Repeat the exact confirmation string printed by the fresh plan; a missing, stale, or mismatched value fails before mutation.]:text:_message "text"' \
+    '(-j --json)-j=-[Emit the complete versioned rollback plan or execution evidence as JSON.]::bool:_hextap_values_rollback_cask_json' \
+    '(-j --json)--json=-[Emit the complete versioned rollback plan or execution evidence as JSON.]::bool:_hextap_values_rollback_cask_json' \
+    '(-h --help)-h[Print this complete command help and exit successfully without performing any work.]' \
+    '(-h --help)--help[Print this complete command help and exit successfully without performing any work.]' \
+    '1:name:_message '\''Exact lowercase Cask token in the canonical Hextap tap; the Cask must already be installed.'\'''
+}
+
+_hextap_rollback() {
+  local context state state_descr line
+  typeset -A opt_args
+  _arguments -C \
+    '(-h --help)-h[Print this complete command help and exit successfully without performing any work.]' \
+    '(-h --help)--help[Print this complete command help and exit successfully without performing any work.]' \
+    '1:command:->command' \
+    '*::argument:->arguments'
+  case "$state" in
+    command)
+      local -a commands
+      commands=(
+        'formula:Plan or execute one fail-closed Formula rollback'
+        'cask:Plan or execute one fail-closed Cask rollback'
+      )
+      _describe 'command' commands
+      ;;
+    arguments)
+      case "${line[1]}" in
+        formula) _hextap_rollback_formula ;;
+        cask) _hextap_rollback_cask ;;
+      esac
+      ;;
+  esac
 }
 
 _hextap_onboard() {
@@ -900,6 +1055,7 @@ _hextap() {
         'version:Print the installed build version and source commit'
         'status:Show local Hextap installations and registrations'
         'info:Print detailed local Hextap inventory'
+        'rollback:Plan or execute safe historical Homebrew rollback'
         'onboard:Plan or create deterministic local Hextap onboarding artifacts'
         'validate:Validate local onboarding artifacts and optionally smoke-build archives'
         'doctor:Check local prerequisites and optionally inspect GitHub read-only'
@@ -914,6 +1070,7 @@ _hextap() {
         version) _hextap_version ;;
         status) _hextap_status ;;
         info) _hextap_info ;;
+        rollback) _hextap_rollback ;;
         onboard) _hextap_onboard ;;
         validate) _hextap_validate ;;
         doctor) _hextap_doctor ;;

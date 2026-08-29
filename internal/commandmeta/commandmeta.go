@@ -116,6 +116,18 @@ func Help(invocation string, path []string) string {
 	output.WriteString(fullCommand)
 	if len(command.Children) != 0 {
 		output.WriteString(" <COMMAND>")
+	} else {
+		for _, argument := range command.Arguments {
+			name := argument.Name
+			if argument.Repeatable {
+				name += "..."
+			}
+			if argument.Required {
+				output.WriteString(" <" + name + ">")
+			} else {
+				output.WriteString(" [" + name + "]")
+			}
+		}
 	}
 	output.WriteString(" [OPTIONS]\n\n")
 
@@ -232,6 +244,10 @@ func buildRoot() Command {
 		{Name: "cask", Description: "include Casks registered in the Hextap tap"},
 		{Name: "skill", Description: "include managed Hextap agent-skill installations"},
 	}
+	rollbackModeChoices := []Choice{
+		{Name: "local", Description: "temporarily check out one historical definition, reinstall it, and restore the exact tap"},
+		{Name: "remote", Description: "prepare a canonical metadata rollback on an owned feature branch and protected pull request"},
+	}
 	boolChoices := []Choice{
 		{Name: "true", Description: "enable the option"},
 		{Name: "false", Description: "disable the option explicitly"},
@@ -303,6 +319,64 @@ func buildRoot() Command {
 			{Description: "Print every available local inventory detail", Command: "{command} info"},
 			{Description: "Inspect one registered Formula", Command: "{command} info --kind formula --name hextap"},
 			{Description: "Inspect managed skills as JSON", Command: "{command} info -k skill -j"},
+		},
+	}
+
+	rollbackOptions := func(kind string) []Option {
+		return withHelp(
+			Option{Long: "to-commit", Short: "t", ValueName: "FULL_SHA", Kind: StringValue, Description: "Select this exact full 40-character historical tap commit; specify exactly one of --to-commit or --to-version."},
+			Option{Long: "to-version", Short: "v", ValueName: "VERSION", Kind: StringValue, Description: "Resolve one unambiguous historical " + kind + " definition with this exact version; specify exactly one historical selector."},
+			Option{Long: "mode", Short: "m", ValueName: "MODE", Kind: EnumValue, Description: "Choose local temporary reinstall or remote protected pull-request planning; defaults to local.", Choices: rollbackModeChoices},
+			boolOption("execute", "x", "Explicitly authorize the selected local reinstall or owned feature-branch push and pull-request creation after every fresh precondition passes."),
+			Option{Long: "confirm", Short: "c", ValueName: "TEXT", Kind: StringValue, Description: "Repeat the exact confirmation string printed by the fresh plan; a missing, stale, or mismatched value fails before mutation."},
+			jsonOutput("Emit the complete versioned rollback plan or execution evidence as JSON."),
+		)
+	}
+	rollbackFormula := Command{
+		Name:        "formula",
+		Summary:     "Plan or execute one fail-closed Formula rollback",
+		Description: "Resolves the Homebrew installation that owns active Hextap and one exact historical Formula. Local mode refuses dirty or drifting tap state and active services, temporarily checks out only the Formula path, runs a bounded reinstall, and unconditionally restores exact HEAD bytes and cleanliness. Remote mode preserves the current canonical install, service, caveat, and test structure while applying historical release metadata and incrementing version_scheme so normal Homebrew upgrade ordering can converge; schema-2 Formulae require the authoritative tap template to reconcile byte-identically in the same PR.",
+		Arguments:   []Argument{{Name: "NAME", Description: "Exact lowercase Formula basename in the canonical Hextap tap; the Formula must already be installed.", Required: true}},
+		Options:     rollbackOptions("Formula"),
+		Safety: []string{
+			"Planning is the default. Mutation requires both --execute and the exact --confirm string from the same fresh plan.",
+			"Local execution never stops or restarts a service, never updates the tap, disables cleanup and dependent mutation, restores on failure or cancellation, and fails on concurrent drift.",
+			"Remote execution clones unchanged owned main, pushes only a new codex/hextap-rollback-* branch without force, opens a protected PR, and never pushes main, merges, moves tags, or rewrites immutable releases.",
+		},
+		Examples: []Example{
+			{Description: "Plan a local Formula rollback by exact historical version", Command: "{command} rollback formula hextap --to-version 0.4.2"},
+			{Description: "Execute the reviewed local plan with its exact printed confirmation", Command: "{command} rollback formula hextap -t FULL_HISTORICAL_SHA -m local -x -c \"CONFIRMATION_FROM_PLAN\""},
+			{Description: "Plan a protected remote rollback and inspect upgrade convergence", Command: "{command} rollback formula hextap --to-commit FULL_HISTORICAL_SHA --mode remote --json"},
+		},
+	}
+	rollbackCask := Command{
+		Name:        "cask",
+		Summary:     "Plan or execute one fail-closed Cask rollback",
+		Description: "Resolves one exact installed Cask and historical tap definition. Local mode performs the same single-path checkout, bounded cask reinstall, unconditional exact restoration, and drift checks as Formula rollback. Remote mode reconciles historical version, URL, and checksum metadata into the current canonical artifact and caveat structure; it explains Homebrew's replacement-based Cask convergence and the --greedy requirement for auto-updating Casks.",
+		Arguments:   []Argument{{Name: "NAME", Description: "Exact lowercase Cask token in the canonical Hextap tap; the Cask must already be installed.", Required: true}},
+		Options:     rollbackOptions("Cask"),
+		Safety: []string{
+			"Planning is the default. Mutation requires both --execute and the exact --confirm string from the same fresh plan.",
+			"Local execution changes only the selected installed Cask and one temporary tap path; it never uses --zap, cleans other packages, or hides restoration failure.",
+			"Remote execution creates only an owned feature branch and protected PR; it cannot force-push, direct-push main, merge, or alter any source release.",
+		},
+		Examples: []Example{
+			{Description: "Plan a local Cask rollback by exact historical commit", Command: "{command} rollback cask ntm -t FULL_HISTORICAL_SHA"},
+			{Description: "Plan Cask replacement convergence through a protected PR", Command: "{command} rollback cask ntm --to-version 1.7.0 --mode remote"},
+			{Description: "Execute after copying the exact fresh confirmation", Command: "{command} rollback cask ntm -v 1.7.0 -m local -x -c \"CONFIRMATION_FROM_PLAN\""},
+		},
+	}
+	rollback := Command{
+		Name:        "rollback",
+		Summary:     "Plan or execute safe historical Homebrew rollback",
+		Description: "Selects Formula or Cask rollback under a shared dry-run-by-default contract with explicit history, owning-Homebrew resolution, exact confirmation, service and concurrency refusal, deterministic restoration, and a separate protected remote-PR path.",
+		Arguments:   commandArgument("Choose formula or cask."),
+		Options:     withHelp(),
+		Children:    []Command{rollbackFormula, rollbackCask},
+		Safety:      []string{"The parent command performs no work until a package kind and explicit historical selector are supplied.", "No rollback command stops services, pushes main, force-pushes, merges a PR, moves a tag, rewrites an immutable release, or prints dependency stderr and credentials."},
+		Examples: []Example{
+			{Description: "Read the complete Formula rollback contract", Command: "{command} rollback formula --help"},
+			{Description: "Read the complete Cask rollback contract", Command: "{command} rollback cask -h"},
 		},
 	}
 
@@ -597,12 +671,12 @@ func buildRoot() Command {
 	}
 
 	return Command{
-		Summary:     "Deterministic onboarding, validation, release, and installation for Hextap projects",
-		Description: "Hextap provides one versioned command surface for project onboarding, offline and online validation, managed agent skills, toolkit development, and shell integration. The same binary supports direct hextap and Homebrew external-command brew hextap invocation.",
+		Summary:     "Deterministic onboarding, rollback, validation, release, and installation for Hextap projects",
+		Description: "Hextap provides one versioned command surface for project onboarding, safe historical Homebrew rollback, offline and online validation, managed agent skills, toolkit development, and shell integration. The same binary supports direct hextap and Homebrew external-command brew hextap invocation.",
 		Arguments:   commandArgument("Choose one top-level operation."),
 		Options:     []Option{helpOption, versionOption},
-		Children:    []Command{version, status, info, onboard, validate, doctor, skills, dev, completion},
-		Safety:      []string{"Help, version, completion output, status, targets, default validation, and default doctor paths are read-only.", "Commands that write locally, execute trusted code, access GitHub, or mutate releases clearly identify that boundary in their own help and require their documented authorization flags."},
+		Children:    []Command{version, status, info, rollback, onboard, validate, doctor, skills, dev, completion},
+		Safety:      []string{"Help, version, completion output, status, inventory, rollback planning, targets, default validation, and default doctor paths are read-only.", "Commands that write locally, execute trusted code, access GitHub, or mutate releases clearly identify that boundary in their own help and require their documented authorization flags."},
 		Examples: []Example{
 			{Description: "Show the complete top-level command map", Command: "{command} --help"},
 			{Description: "Run bounded read-only project diagnostics", Command: "{command} doctor --project ."},
