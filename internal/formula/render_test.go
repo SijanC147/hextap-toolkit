@@ -105,6 +105,23 @@ func TestRenderOmitsDisabledService(t *testing.T) {
 	}
 }
 
+func TestRenderInstallsDeclaredBinaryAliasesAndZshCompletion(t *testing.T) {
+	m := loadManifest(t)
+	m.Homebrew.BinaryAliases = []string{"hextap"}
+	m.Homebrew.ZshCompletion = "completions/_hextap"
+	got, err := Render(m, "0.1.0", armSHA, amdSHA)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := string(got)
+	want := "    bin.install \"claude-rc-proxy\"\n" +
+		"    bin.install_symlink \"claude-rc-proxy\" => \"hextap\"\n" +
+		"    zsh_completion.install \"completions/_hextap\"\n"
+	if !strings.Contains(text, want) {
+		t.Fatalf("Formula install block lacks explicit alias/completion contract:\n%s", text)
+	}
+}
+
 func TestRenderRejectsInvalidReleaseMetadata(t *testing.T) {
 	tests := []struct {
 		name, version, arm, amd string

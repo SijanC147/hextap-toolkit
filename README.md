@@ -4,7 +4,8 @@
 and self-development toolkit for the private Hextap Homebrew tap. `hextapctl` remains the workflow
 engine that validates manifests, builds and verifies archives, and renders or
 updates Formulae. The separately installable `brew-hextap` executable is the
-human-facing `brew hextap` command for conflict-safe local onboarding,
+human-facing `brew hextap` command and is also installed as the shorter direct
+`hextap` command. Both names provide conflict-safe local onboarding,
 validation, read-only doctor checks, managed agent skills, and protected
 toolkit development/release orchestration.
 
@@ -45,7 +46,9 @@ dist/brew-hextap --version
 
 ## Local onboarding
 
-Homebrew exposes `brew-hextap` as `brew hextap`. A stable installed build uses
+Homebrew exposes `brew-hextap` as `brew hextap` and installs `hextap` as a
+symlink to that same executable. It also installs the metadata-generated native
+Zsh definition as `_hextap` in Homebrew's `zsh_completion` directory. A stable installed build uses
 its normalized linker-injected runtime version and full commit to derive the
 workflow pin: runtime `0.1.0` becomes the human provenance tag `v0.1.0` while
 the executable continues to report normalized `0.1.0`. Development builds
@@ -98,6 +101,19 @@ brew hextap validate --project . --build
 brew hextap doctor --project .
 brew hextap doctor --project . --online
 ```
+
+Every command and nested subcommand supports complete `--help` and `-h`
+output. The global build identity is available as `--version` or `-V`, and
+every command-scoped long flag has one single-character alias. Generate the
+same exhaustive native Zsh definition without installing it with:
+
+```sh
+hextap completion zsh
+```
+
+Help, flag parsing, and completion share one authoritative command metadata
+tree; a traversal test fails if a command, option, shorthand, value, or
+description drifts between them.
 
 Default doctor never executes the project adapter and never calls GitHub. It
 requires `go` for schema 1 and the pinned profile runtime (`bun` today) for
@@ -305,6 +321,12 @@ workflow. The checked-in `.hextap.json` uses the explicit disabled-service
 shape, and `scripts/hextap-build` validates the normalized version, commit,
 OS, and architecture before building only `./cmd/brew-hextap`.
 
+Current toolkit manifests may additionally declare `homebrew.binary_aliases`
+and `homebrew.zsh_completion`. The Hextap self-release now appends the exact
+generated `completions/_hextap` member after `brew-hextap`, `LICENSE`, and
+`README.md`; the generic Formula renderer installs the alias and completion
+from those explicit manifest fields.
+
 The toolkit self-caller uses the relative
 `./.github/workflows/release-go.yml` path so the reusable workflow resolves at
 the same tag commit. Tag pushes select `full`; manual dispatch accepts an
@@ -317,7 +339,7 @@ immutable-release setting is created by this source change.
 ## Project manifest schema
 
 Every project is described by one strict JSON document. Schema `1` is the
-unchanged Go/Darwin/Linux contract; schema `2` adds a pinned Bun profile,
+compatible Go/Darwin/Linux contract with optional binary-alias and Zsh-completion packaging; schema `2` adds a pinned Bun profile,
 project-owned direct argv commands, explicit multi-artifact targets, optional
 Windows amd64, and a tap-owned Formula profile. Duplicate object keys at any nesting level, mis-cased/case-fold aliases,
 invalid or lossy Unicode, unknown fields, missing required fields, multiple
@@ -419,6 +441,8 @@ service, caveats, tests, comments, or formatting into source metadata.
 | `target.binary` / `archive` | Explicit raw executable and/or canonical `.tar.gz` output derived from one adapter invocation. `archive_contents` is required with an archive. |
 | `homebrew.macos_only` | Must be `true` in schema 1 because its Formula contract defines only Darwin assets. Rendering always adds `depends_on :macos`. |
 | `homebrew.test_args` | One or more shell-safe arguments used by the Formula test. |
+| `homebrew.binary_aliases` | Schema 1 only. Optional nonempty list of up to 16 case-insensitively unique safe basenames, none equal to `formula.binary`; the Formula installs each as a symlink to the packaged binary. |
+| `homebrew.zsh_completion` | Schema 1 only. Optional exact `completions/_COMMAND` path whose stem must equal `formula.binary` or one declared binary alias. The source must be a regular single-link UTF-8 file of at most 1 MiB ending in a newline. |
 | `homebrew.service` | Optional. Use `null`, omit it, or set only `{"enabled": false}` to disable service generation. |
 | `service.run_args` | Required array for an enabled service; may be empty. |
 | `service.keep_alive` | Must select exactly one supported Homebrew policy: `successful_exit` or `crashed`. They are intentionally mutually exclusive because Homebrew prioritizes one when both are present. |
@@ -572,7 +596,10 @@ hextapctl release build \
 The source and output must be real directories rather than symlinks; the
 output directory must already exist and be empty. The manifest must resolve
 inside the source tree. The source must contain regular `LICENSE` and
-`README.md` files and the manifest's executable `release.build_script`.
+`README.md` files and the manifest's executable `release.build_script`. When
+`homebrew.zsh_completion` is declared, that exact project-local completion
+file is also required and is appended to every schema-1 bundle with mode
+`0644` after the binary, license, and readme.
 
 For schema 1, the builder invokes the adapter once for each Darwin target and,
 when `release.linux` is true, once for each Linux target, preserving the
@@ -677,7 +704,8 @@ Rendering produces deterministic Ruby with:
 
 - no explicit `version` stanza; Homebrew derives it from canonical release URLs
 - `if Hardware::CPU.arm?` followed by the arm64 URL/SHA, `else`, and amd64 URL/SHA
-- `bin.install`, an optional service, optional caveats, and a version test
+- `bin.install`, declared `bin.install_symlink` aliases, an optional
+  `zsh_completion.install`, optional service, optional caveats, and a version test
 - sorted environment variables and a final newline
 
 The write uses a same-directory temporary file, atomic rename, and parent

@@ -79,6 +79,46 @@ func TestParseRejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestLegacyBinaryAliasesAndZshCompletionContract(t *testing.T) {
+	withInstallMetadata := func(binaryAliases, completion string) string {
+		return strings.Replace(validManifest, `"macos_only": true,`, `"macos_only": true,
+    "binary_aliases": `+binaryAliases+`,
+    "zsh_completion": "`+completion+`",`, 1)
+	}
+	project, err := Parse([]byte(withInstallMetadata(`["hextap"]`, "completions/_hextap")))
+	if err != nil {
+		t.Fatalf("valid install metadata rejected: %v", err)
+	}
+	encoded, err := project.MarshalJSON()
+	if err != nil || !bytes.Contains(encoded, []byte(`"binary_aliases":["hextap"]`)) || !bytes.Contains(encoded, []byte(`"zsh_completion":"completions/_hextap"`)) {
+		t.Fatalf("MarshalJSON() lost install metadata: %s, error = %v", encoded, err)
+	}
+	if _, err := Parse(encoded); err != nil {
+		t.Fatalf("Parse(MarshalJSON()) rejected install metadata: %v", err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		aliases    string
+		completion string
+	}{
+		{name: "empty aliases", aliases: `[]`, completion: "completions/_hextap"},
+		{name: "binary collision", aliases: `["claude-rc-proxy"]`, completion: "completions/_claude-rc-proxy"},
+		{name: "case folded duplicate", aliases: `["hextap", "Hextap"]`, completion: "completions/_hextap"},
+		{name: "unsafe alias", aliases: `["bin/hextap"]`, completion: "completions/_hextap"},
+		{name: "wrong directory", aliases: `["hextap"]`, completion: "completion/_hextap"},
+		{name: "missing underscore", aliases: `["hextap"]`, completion: "completions/hextap"},
+		{name: "nested completion", aliases: `["hextap"]`, completion: "completions/nested/_hextap"},
+		{name: "completion stem mismatch", aliases: `["hextap"]`, completion: "completions/_other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Parse([]byte(withInstallMetadata(test.aliases, test.completion))); err == nil {
+				t.Fatal("Parse() unexpectedly accepted invalid install metadata")
+			}
+		})
+	}
+}
+
 func TestParseRejectsDuplicateObjectKeysAtEveryNestingLevel(t *testing.T) {
 	tests := map[string]string{
 		"root":         strings.Replace(validManifest, `"schema": 1,`, `"schema": 1, "schema": 1,`, 1),

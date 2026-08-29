@@ -3,6 +3,7 @@ package skillinstall
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -120,9 +121,17 @@ func TestSupportFilesPublishBeforeSkillAndMarkerOnLateCollision(t *testing.T) {
 	home := t.TempDir()
 	target := targetByIDForTest(t, "claude-code")
 	skillDir := filepath.Join(home, target.UserSkillsDir, "hextap")
-	wantPublished := filepath.Join(skillDir, "references", "onboarding-and-validation.md")
-	wantCollision := filepath.Join(skillDir, "references", "release-and-recovery.md")
-	wantSupport := fileDataByName(t, "references/onboarding-and-validation.md")
+	files := bundledFiles(t)
+	if len(files) < 3 || files[len(files)-1].name != "SKILL.md" {
+		t.Fatalf("bundle publication order = %v, want at least two support files before SKILL.md", files)
+	}
+	supportFiles := files[:len(files)-1]
+	collision := supportFiles[len(supportFiles)-1]
+	wantCollision := filepath.Join(skillDir, filepath.FromSlash(collision.name))
+	wantPublished := make([]string, 0, len(supportFiles)-1)
+	for _, file := range supportFiles[:len(supportFiles)-1] {
+		wantPublished = append(wantPublished, filepath.Join(skillDir, filepath.FromSlash(file.name)))
+	}
 	var attempted []string
 	_, err := install(Options{Agents: []string{"claude-code"}, Scope: UserScope, HomeDir: home}, applyControl{
 		beforePublish: func(_ int, entry Entry) {
@@ -134,25 +143,27 @@ func TestSupportFilesPublishBeforeSkillAndMarkerOnLateCollision(t *testing.T) {
 			}
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "after 1 of") {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("after %d of", len(wantPublished))) {
 		t.Fatalf("Install(late conflict) error = %v", err)
 	}
 	var partial *PartialInstallError
 	if !errors.As(err, &partial) {
 		t.Fatalf("Install(late conflict) error = %T %v, want PartialInstallError", err, err)
 	}
-	if !reflect.DeepEqual(attempted, []string{wantPublished, wantCollision}) {
+	if !reflect.DeepEqual(attempted, append(append([]string(nil), wantPublished...), wantCollision)) {
 		t.Fatalf("publication order = %v, want support files before SKILL.md", attempted)
 	}
-	if !reflect.DeepEqual(partial.Published, []string{wantPublished}) {
-		t.Fatalf("partial paths = %v, want %v", partial.Published, []string{wantPublished})
+	if !reflect.DeepEqual(partial.Published, wantPublished) {
+		t.Fatalf("partial paths = %v, want %v", partial.Published, wantPublished)
 	}
 	if !reflect.DeepEqual(partial.Claimed, []string{skillDir}) {
 		t.Fatalf("claimed paths = %v, want %v", partial.Claimed, []string{skillDir})
 	}
-	gotSupport, readErr := os.ReadFile(wantPublished)
-	if readErr != nil || !bytes.Equal(gotSupport, wantSupport) {
-		t.Fatalf("published support file = %q, error=%v, want canonical embedded bytes", gotSupport, readErr)
+	for index, path := range wantPublished {
+		gotSupport, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(gotSupport, supportFiles[index].data) {
+			t.Fatalf("published support file %s = %q, error=%v, want canonical embedded bytes", path, gotSupport, readErr)
+		}
 	}
 	if _, statErr := os.Lstat(filepath.Join(skillDir, "SKILL.md")); !os.IsNotExist(statErr) {
 		t.Fatalf("failed installation published SKILL.md: %v", statErr)

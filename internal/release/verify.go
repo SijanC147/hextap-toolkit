@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"archive/tar"
 	"github.com/SijanC147/hextap-toolkit/internal/manifest"
@@ -31,7 +33,7 @@ const (
 	// bounding all verifier allocations before an archive is trusted.
 	maxVerifyCompressedSize   int64 = 512 << 20
 	maxVerifyMemberSize       int64 = maxBinarySize
-	maxVerifyUncompressedSize int64 = maxBinarySize + maxLicenseSize + maxReadmeSize + 4<<10
+	maxVerifyUncompressedSize int64 = maxBinarySize + maxLicenseSize + maxReadmeSize + maxZshCompletionSize + 4<<10
 	verifyCommandTimeout            = 10 * time.Second
 	maxVerifyCommandOutput          = 16 << 10
 )
@@ -119,7 +121,7 @@ func verifyWithHook(options VerifyOptions, afterChecksums func()) (VerifyResult,
 			case artifactBinary:
 				binary, err = verifyRawBinary(assetBytes[artifact.Name], item.OS, item.Arch)
 			case artifactBinaryArchive, artifactBundleArchive:
-				binary, err = verifyArchive(assetBytes[artifact.Name], project.Formula.Binary, item.OS, item.Arch, artifact.Format)
+				binary, err = verifyArchive(assetBytes[artifact.Name], project.Formula.Binary, project.Homebrew.ZshCompletion, item.OS, item.Arch, artifact.Format)
 			default:
 				err = fmt.Errorf("unsupported artifact format %q", artifact.Format)
 			}
@@ -358,7 +360,7 @@ func verifyRawBinary(raw []byte, targetOS, targetArch string) ([]byte, error) {
 	return raw, nil
 }
 
-func verifyArchive(raw []byte, binaryName, targetOS, targetArch, format string) ([]byte, error) {
+func verifyArchive(raw []byte, binaryName, zshCompletion, targetOS, targetArch, format string) ([]byte, error) {
 	var err error
 	rawReader := bytes.NewReader(raw)
 	gzipReader, err := gzip.NewReader(rawReader)
@@ -390,6 +392,9 @@ func verifyArchive(raw []byte, binaryName, targetOS, targetArch, format string) 
 	expectedNames := []string{binaryName}
 	if format == artifactBundleArchive {
 		expectedNames = append(expectedNames, "LICENSE", "README.md")
+		if zshCompletion != "" {
+			expectedNames = append(expectedNames, zshCompletion)
+		}
 	} else if format != artifactBinaryArchive {
 		return nil, fmt.Errorf("unsupported archive format %q", format)
 	}
@@ -403,12 +408,14 @@ func verifyArchive(raw []byte, binaryName, targetOS, targetArch, format string) 
 		if err := verifyTarHeader(header, expected, index); err != nil {
 			return nil, err
 		}
-		memberMaximum := maxVerifyMemberSize
-		switch index {
-		case 1:
+		memberMaximum := int64(maxVerifyMemberSize)
+		switch expected {
+		case "LICENSE":
 			memberMaximum = maxLicenseSize
-		case 2:
+		case "README.md":
 			memberMaximum = maxReadmeSize
+		case zshCompletion:
+			memberMaximum = maxZshCompletionSize
 		}
 		if header.Size > memberMaximum {
 			return nil, fmt.Errorf("tar member %q exceeds %d bytes", header.Name, memberMaximum)
@@ -421,6 +428,9 @@ func verifyArchive(raw []byte, binaryName, targetOS, targetArch, format string) 
 			return nil, fmt.Errorf("tar member %q size changed", header.Name)
 		}
 		members[index] = member
+		if expected == zshCompletion && (len(member) == 0 || !utf8.Valid(member) || member[len(member)-1] != '\n') {
+			return nil, errors.New("Zsh completion must be nonempty UTF-8 ending with a newline")
+		}
 		if index == 0 {
 			binary = member
 		}
@@ -434,7 +444,7 @@ func verifyArchive(raw []byte, binaryName, targetOS, targetArch, format string) 
 	if tarData.Len() != 0 {
 		return nil, errors.New("tar contains trailing data")
 	}
-	canonical, err := canonicalTarPayload(binaryName, members)
+	canonical, err := canonicalTarPayload(expectedNames, members)
 	if err != nil {
 		return nil, err
 	}
@@ -447,14 +457,11 @@ func verifyArchive(raw []byte, binaryName, targetOS, targetArch, format string) 
 	return binary, nil
 }
 
-func canonicalTarPayload(binaryName string, members [][]byte) ([]byte, error) {
+func canonicalTarPayload(names []string, members [][]byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := tar.NewWriter(&buffer)
-	names := []string{binaryName}
-	if len(members) == 3 {
-		names = append(names, "LICENSE", "README.md")
-	} else if len(members) != 1 {
-		return nil, fmt.Errorf("canonical tar requires one or three members, got %d", len(members))
+	if len(names) != len(members) || len(members) == 0 {
+		return nil, fmt.Errorf("canonical tar names = %d, members = %d", len(names), len(members))
 	}
 	for index, name := range names {
 		mode := int64(0o644)
@@ -489,7 +496,7 @@ func canonicalTarPayload(binaryName string, members [][]byte) ([]byte, error) {
 }
 
 func verifyTarHeader(header *tar.Header, expected string, index int) error {
-	if header.Name != expected || filepath.Base(header.Name) != header.Name || filepath.Clean(header.Name) != header.Name || strings.Contains(header.Name, "\\") {
+	if header.Name != expected || path.IsAbs(header.Name) || path.Clean(header.Name) != header.Name || strings.HasPrefix(header.Name, "../") || strings.Contains(header.Name, "\\") {
 		return fmt.Errorf("tar member %d has unsafe or unexpected name %q", index+1, header.Name)
 	}
 	if header.Typeflag != tar.TypeReg || header.Linkname != "" || header.Format != tar.FormatUSTAR || header.PAXRecords != nil || header.Xattrs != nil {

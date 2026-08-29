@@ -25,6 +25,10 @@
     "test_args": [
       "--version"
     ],
+    "binary_aliases": [
+      "hextap"
+    ],
+    "zsh_completion": "completions/_hextap",
     "service": {
       "enabled": false
     },

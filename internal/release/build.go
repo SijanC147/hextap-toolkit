@@ -18,17 +18,19 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SijanC147/hextap-toolkit/internal/atomicfile"
 	"github.com/SijanC147/hextap-toolkit/internal/manifest"
 )
 
 const (
-	maxBinarySize       = 256 << 20
-	maxLicenseSize      = 1 << 20
-	maxReadmeSize       = 8 << 20
-	defaultBuildTimeout = 15 * time.Minute
-	releaseLockName     = ".hextap-release.lock"
+	maxBinarySize        = 256 << 20
+	maxLicenseSize       = 1 << 20
+	maxReadmeSize        = 8 << 20
+	maxZshCompletionSize = 1 << 20
+	defaultBuildTimeout  = 15 * time.Minute
+	releaseLockName      = ".hextap-release.lock"
 )
 
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
@@ -156,6 +158,17 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 	if err != nil {
 		return BuildResult{}, err
 	}
+	var zshCompletion []byte
+	if project.Homebrew.ZshCompletion != "" {
+		completionPath := filepath.Join(sourceDir, filepath.FromSlash(project.Homebrew.ZshCompletion))
+		zshCompletion, err = readProjectRegularFile(completionPath, sourceDir, "Zsh completion", maxZshCompletionSize, true)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		if len(zshCompletion) == 0 || !utf8.Valid(zshCompletion) || zshCompletion[len(zshCompletion)-1] != '\n' {
+			return BuildResult{}, errors.New("validate Zsh completion: file must be nonempty UTF-8 ending with a newline")
+		}
+	}
 	adapterPath := filepath.Join(sourceDir, filepath.FromSlash(project.Release.BuildScript))
 	if err := validateProjectLocalExecutable(adapterPath, sourceDir); err != nil {
 		return BuildResult{}, fmt.Errorf("validate build adapter: %w", err)
@@ -189,6 +202,9 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 			{name: project.Formula.Binary, mode: 0o755, data: binary},
 			{name: "LICENSE", mode: 0o644, data: license},
 			{name: "README.md", mode: 0o644, data: readme},
+		}
+		if project.Homebrew.ZshCompletion != "" {
+			bundleMembers = append(bundleMembers, archiveMember{name: project.Homebrew.ZshCompletion, mode: 0o644, data: zshCompletion})
 		}
 		binaryMembers := bundleMembers[:1]
 		for _, artifact := range buildTarget.Artifacts {
@@ -692,7 +708,7 @@ func readRegularFile(path, label string, maximum int64, requireSingleLink bool) 
 	if err != nil {
 		return nil, fmt.Errorf("inspect opened %s %q: %w", label, path, err)
 	}
-	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || requireSingleLink && hardLinked(openedInfo) {
 		return nil, fmt.Errorf("%s %q changed while opening", label, path)
 	}
 	limited := io.LimitReader(file, maximum+1)
@@ -703,10 +719,51 @@ func readRegularFile(path, label string, maximum int64, requireSingleLink bool) 
 	if int64(len(data)) > maximum {
 		return nil, fmt.Errorf("%s %q exceeds %d bytes", label, path, maximum)
 	}
-	if int64(len(data)) != openedInfo.Size() {
+	finalInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect read %s %q: %w", label, path, err)
+	}
+	if !os.SameFile(openedInfo, finalInfo) || !finalInfo.Mode().IsRegular() || requireSingleLink && hardLinked(finalInfo) || int64(len(data)) != finalInfo.Size() {
 		return nil, fmt.Errorf("%s %q changed size while reading", label, path)
 	}
 	return data, nil
+}
+
+func readProjectRegularFile(path, sourceDir, label string, maximum int64, requireSingleLink bool) ([]byte, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if !pathWithin(sourceDir, absolute) {
+		return nil, fmt.Errorf("%s path must stay within the source directory", label)
+	}
+	relative, err := filepath.Rel(sourceDir, absolute)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s relative path: %w", label, err)
+	}
+	current := sourceDir
+	components := strings.Split(relative, string(filepath.Separator))
+	for index, component := range components {
+		current = filepath.Join(current, component)
+		info, inspectErr := os.Lstat(current)
+		if inspectErr != nil {
+			return nil, fmt.Errorf("inspect %s path %q: %w", label, current, inspectErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s path must not contain symlinks", label)
+		}
+		if index < len(components)-1 && !info.IsDir() {
+			return nil, fmt.Errorf("%s parent %q must be a directory", label, current)
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s path symlinks: %w", label, err)
+	}
+	if !pathWithin(sourceDir, resolved) {
+		return nil, fmt.Errorf("%s path resolves outside the source directory", label)
+	}
+	return readRegularFile(absolute, label, maximum, requireSingleLink)
 }
 
 func hardLinked(info fs.FileInfo) bool {

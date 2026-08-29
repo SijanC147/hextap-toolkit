@@ -21,3 +21,20 @@ func TestRunUsesBuildInjectedVersionValues(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
+
+func TestRunNamedUsesDirectInvocationName(t *testing.T) {
+	oldVersion, oldCommit := version, commit
+	t.Cleanup(func() {
+		version, commit = oldVersion, oldCommit
+	})
+	version = "1.2.3"
+	commit = "0123456789abcdef0123456789abcdef01234567"
+
+	var stdout, stderr bytes.Buffer
+	if exitCode := runNamed("hextap", []string{"-V"}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("runNamed() exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if got, want := stdout.String(), "hextap 1.2.3 (commit 0123456789abcdef0123456789abcdef01234567)\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}

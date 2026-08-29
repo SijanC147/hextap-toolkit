@@ -3,8 +3,8 @@ package brewcli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,24 +13,14 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/SijanC147/hextap-toolkit/internal/commandmeta"
 	"github.com/SijanC147/hextap-toolkit/internal/devcli"
+	"github.com/SijanC147/hextap-toolkit/internal/inventory"
 	"github.com/SijanC147/hextap-toolkit/internal/onboard"
 	"github.com/SijanC147/hextap-toolkit/internal/skillinstall"
 )
 
-const (
-	errorExit = 2
-	usageText = `usage: brew-hextap <command> [options]
-
-Commands:
-  version     Print build version and commit
-  onboard     Plan or create local Hextap onboarding artifacts
-  validate    Validate local onboarding artifacts; optionally smoke-build
-  doctor      Check local prerequisites; optionally inspect GitHub read-only
-  skills      Install the bundled Hextap skill for explicit agent targets
-  dev         Develop, validate, release, and install Hextap itself
-`
-)
+const errorExit = 2
 
 var (
 	stableRuntimeVersion = regexp.MustCompile(`^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
@@ -50,58 +40,75 @@ func (s *stringList) Set(value string) error {
 
 // Run executes one brew-hextap command and returns a process exit code.
 func Run(args []string, stdout, stderr io.Writer, version, commit string) int {
-	if len(args) == 1 && args[0] == "--version" {
-		writeVersion(stdout, version, commit)
+	return RunNamed("brew-hextap", args, stdout, stderr, version, commit)
+}
+
+// RunNamed executes the installed command using the actual invocation name in
+// help and build-identity output.
+func RunNamed(invocation string, args []string, stdout, stderr io.Writer, version, commit string) int {
+	if len(args) == 1 && (args[0] == "--version" || args[0] == "-V") {
+		writeVersion(stdout, invocation, version, commit)
 		return 0
 	}
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
-		_, _ = io.WriteString(stdout, usageText)
+		writeHelp(stdout, invocation, nil)
 		return 0
 	}
 	if len(args) == 0 {
-		return fail(stderr, "command required; expected version, onboard, validate, doctor, skills, or dev")
+		return fail(stderr, "command required; expected version, status, info, onboard, validate, doctor, skills, dev, or completion")
 	}
 	switch args[0] {
 	case "version":
+		if hasHelpRequest(args[1:]) {
+			writeHelp(stdout, invocation, []string{"version"})
+			return 0
+		}
 		if len(args) != 1 {
 			return fail(stderr, "version: unexpected arguments")
 		}
-		writeVersion(stdout, version, commit)
+		writeVersion(stdout, invocation, version, commit)
 		return 0
+	case "status":
+		return (inventory.Service{Version: version, Commit: commit, Invocation: invocation}).RunStatusCLI(context.Background(), args[1:], stdout, stderr)
+	case "info":
+		return (inventory.Service{Version: version, Commit: commit, Invocation: invocation}).RunInfoCLI(context.Background(), args[1:], stdout, stderr)
 	case "onboard":
-		return runOnboard(args[1:], stdout, stderr, version, commit)
+		return runOnboard(invocation, args[1:], stdout, stderr, version, commit)
 	case "validate":
-		return runValidate(args[1:], stdout, stderr)
+		return runValidate(invocation, args[1:], stdout, stderr)
 	case "doctor":
-		return runDoctor(args[1:], stdout, stderr)
+		return runDoctor(invocation, args[1:], stdout, stderr)
 	case "skills":
-		return runSkills(args[1:], stdout, stderr)
+		return runSkills(invocation, args[1:], stdout, stderr)
 	case "dev":
-		return devcli.Run(args[1:], stdout, stderr, version, commit)
+		return devcli.RunNamed(invocation, args[1:], stdout, stderr, version, commit)
+	case "completion":
+		return runCompletion(invocation, args[1:], stdout, stderr)
 	default:
-		return fail(stderr, "unknown command; expected version, onboard, validate, doctor, skills, or dev")
+		return fail(stderr, "unknown command; expected version, status, info, onboard, validate, doctor, skills, dev, or completion")
 	}
 }
 
-func writeVersion(output io.Writer, version, commit string) {
-	fmt.Fprintf(output, "brew-hextap %s (commit %s)\n", version, commit)
+func writeVersion(output io.Writer, invocation, version, commit string) {
+	fmt.Fprintf(output, "%s %s (commit %s)\n", invocation, version, commit)
 }
 
-func runOnboard(args []string, stdout, stderr io.Writer, version, commit string) int {
-	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap onboard [options]\n")
+func runOnboard(invocation string, args []string, stdout, stderr io.Writer, version, commit string) int {
+	if hasHelpRequest(args) {
+		writeHelp(stdout, invocation, []string{"onboard"})
 		return 0
 	}
 	flags := newFlagSet("onboard")
-	project := flags.String("project", ".", "Git project root")
-	repository := flags.String("repository", "", "exact OWNER/REPO identity")
-	formula := flags.String("formula", "", "Homebrew formula name")
-	binary := flags.String("binary", "", "installed binary basename")
-	description := flags.String("description", "", "one-line formula description")
-	license := flags.String("license", "", "formula license identifier")
-	goPackage := flags.String("go-package", "", "narrow Go main package")
-	versionSymbol := flags.String("version-symbol", "main.version", "package-qualified version variable")
-	commitSymbol := flags.String("commit-symbol", "main.commit", "package-qualified commit variable")
+	binder := commandmeta.Bind(flags, "onboard")
+	project := binder.String("project", ".")
+	repository := binder.String("repository", "")
+	formula := binder.String("formula", "")
+	binary := binder.String("binary", "")
+	description := binder.String("description", "")
+	license := binder.String("license", "")
+	goPackage := binder.String("go-package", "")
+	versionSymbol := binder.String("version-symbol", "main.version")
+	commitSymbol := binder.String("commit-symbol", "main.commit")
 	defaultToolkitVersion := ""
 	if stableRuntimeVersion.MatchString(version) {
 		defaultToolkitVersion = "v" + version
@@ -110,23 +117,18 @@ func runOnboard(args []string, stdout, stderr io.Writer, version, commit string)
 	if fullInjectedCommit.MatchString(commit) {
 		defaultToolkitSHA = commit
 	}
-	toolkitVersion := flags.String("toolkit-version", defaultToolkitVersion, "stable toolkit tag vX.Y.Z")
-	toolkitSHA := flags.String("toolkit-sha", defaultToolkitSHA, "full toolkit commit SHA")
-	linux := flags.Bool("linux", true, "build Linux release assets")
-	dryRun := flags.Bool("dry-run", false, "report without writing")
+	toolkitVersion := binder.String("toolkit-version", defaultToolkitVersion)
+	toolkitSHA := binder.String("toolkit-sha", defaultToolkitSHA)
+	linux := binder.Bool("linux", true)
+	dryRun := binder.Bool("dry-run", false)
 	var requiredChecks stringList
-	flags.Var(&requiredChecks, "required-check", "required status-check context (repeatable)")
+	binder.Var(&requiredChecks, "required-check")
 	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return fail(stderr, "onboard: use brew-hextap --help for command usage")
-		}
 		return fail(stderr, "onboard: invalid arguments")
 	}
 	if flags.NArg() != 0 {
 		return fail(stderr, "onboard: unexpected positional arguments")
 	}
-	visited := make(map[string]bool)
-	flags.Visit(func(item *flag.Flag) { visited[item.Name] = true })
 	result, err := onboard.Onboard(onboard.Options{
 		Project:          *project,
 		Repository:       *repository,
@@ -142,14 +144,14 @@ func runOnboard(args []string, stdout, stderr io.Writer, version, commit string)
 		RequiredChecks:   requiredChecks,
 		Linux:            *linux,
 		DryRun:           *dryRun,
-		FormulaSet:       visited["formula"],
-		BinarySet:        visited["binary"],
-		DescriptionSet:   visited["description"],
-		LicenseSet:       visited["license"],
-		GoPackageSet:     visited["go-package"],
-		VersionSymbolSet: visited["version-symbol"],
-		CommitSymbolSet:  visited["commit-symbol"],
-		LinuxSet:         visited["linux"],
+		FormulaSet:       binder.WasSet("formula"),
+		BinarySet:        binder.WasSet("binary"),
+		DescriptionSet:   binder.WasSet("description"),
+		LicenseSet:       binder.WasSet("license"),
+		GoPackageSet:     binder.WasSet("go-package"),
+		VersionSymbolSet: binder.WasSet("version-symbol"),
+		CommitSymbolSet:  binder.WasSet("commit-symbol"),
+		LinuxSet:         binder.WasSet("linux"),
 	})
 	if err != nil {
 		return fail(stderr, "onboard: %v", err)
@@ -160,14 +162,15 @@ func runOnboard(args []string, stdout, stderr io.Writer, version, commit string)
 	return 0
 }
 
-func runValidate(args []string, stdout, stderr io.Writer) int {
-	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap validate [--project PATH] [--build]\n")
+func runValidate(invocation string, args []string, stdout, stderr io.Writer) int {
+	if hasHelpRequest(args) {
+		writeHelp(stdout, invocation, []string{"validate"})
 		return 0
 	}
 	flags := newFlagSet("validate")
-	project := flags.String("project", ".", "Git project root")
-	build := flags.Bool("build", false, "execute bounded build and archive smoke")
+	binder := commandmeta.Bind(flags, "validate")
+	project := binder.String("project", ".")
+	build := binder.Bool("build", false)
 	if err := flags.Parse(args); err != nil {
 		return fail(stderr, "validate: invalid arguments")
 	}
@@ -185,14 +188,15 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runDoctor(args []string, stdout, stderr io.Writer) int {
-	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap doctor [--project PATH] [--online]\n")
+func runDoctor(invocation string, args []string, stdout, stderr io.Writer) int {
+	if hasHelpRequest(args) {
+		writeHelp(stdout, invocation, []string{"doctor"})
 		return 0
 	}
 	flags := newFlagSet("doctor")
-	project := flags.String("project", ".", "Git project root")
-	online := flags.Bool("online", false, "perform additional read-only GitHub checks")
+	binder := commandmeta.Bind(flags, "doctor")
+	project := binder.String("project", ".")
+	online := binder.Bool("online", false)
 	if err := flags.Parse(args); err != nil {
 		return fail(stderr, "doctor: invalid arguments")
 	}
@@ -209,9 +213,9 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runSkills(args []string, stdout, stderr io.Writer) int {
-	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap skills <install|status|targets|upgrade> [options]\n")
+func runSkills(invocation string, args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 && isHelpToken(args[0]) {
+		writeHelp(stdout, invocation, []string{"skills"})
 		return 0
 	}
 	if len(args) == 0 {
@@ -219,12 +223,16 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "install":
-		return runSkillsInstall(args[1:], stdout, stderr)
+		return runSkillsInstall(invocation, args[1:], stdout, stderr)
 	case "status":
-		return runSkillsStatus(args[1:], stdout, stderr)
+		return runSkillsStatus(invocation, args[1:], stdout, stderr)
 	case "upgrade":
-		return runSkillsUpgrade(args[1:], stdout, stderr)
+		return runSkillsUpgrade(invocation, args[1:], stdout, stderr)
 	case "targets":
+		if hasHelpRequest(args[1:]) {
+			writeHelp(stdout, invocation, []string{"skills", "targets"})
+			return 0
+		}
 		if len(args) != 1 {
 			return fail(stderr, "skills targets: unexpected arguments")
 		}
@@ -241,18 +249,43 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-func runSkillsUpgrade(args []string, stdout, stderr io.Writer) int {
-	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap skills upgrade --agent ID [--agent ID ...] --scope user|project [--project PATH] [--dry-run] [--allow-overlapping-discovery]\n")
+func runCompletion(invocation string, args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 && isHelpToken(args[0]) {
+		writeHelp(stdout, invocation, []string{"completion"})
+		return 0
+	}
+	if len(args) == 0 {
+		return fail(stderr, "completion: subcommand required; expected zsh")
+	}
+	switch args[0] {
+	case "zsh":
+		if hasHelpRequest(args[1:]) {
+			writeHelp(stdout, invocation, []string{"completion", "zsh"})
+			return 0
+		}
+		if len(args) != 1 {
+			return fail(stderr, "completion zsh: unexpected arguments")
+		}
+		_, _ = io.WriteString(stdout, commandmeta.Zsh())
+		return 0
+	default:
+		return fail(stderr, "completion: unknown subcommand %q; expected zsh", args[0])
+	}
+}
+
+func runSkillsUpgrade(invocation string, args []string, stdout, stderr io.Writer) int {
+	if hasHelpRequest(args) {
+		writeHelp(stdout, invocation, []string{"skills", "upgrade"})
 		return 0
 	}
 	flags := newFlagSet("skills upgrade")
+	binder := commandmeta.Bind(flags, "skills", "upgrade")
 	var agents stringList
-	flags.Var(&agents, "agent", "agent target ID (repeatable)")
-	scope := flags.String("scope", "", "required upgrade scope: user or project")
-	project := flags.String("project", ".", "project root for project scope")
-	dryRun := flags.Bool("dry-run", false, "report without writing")
-	allowOverlap := flags.Bool("allow-overlapping-discovery", false, "acknowledge shared Cursor discovery roots")
+	binder.Var(&agents, "agent")
+	scope := binder.String("scope", "")
+	project := binder.String("project", ".")
+	dryRun := binder.Bool("dry-run", false)
+	allowOverlap := binder.Bool("allow-overlapping-discovery", false)
 	if err := flags.Parse(args); err != nil {
 		return fail(stderr, "skills upgrade: invalid arguments")
 	}
@@ -285,18 +318,19 @@ func runSkillsUpgrade(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runSkillsInstall(args []string, stdout, stderr io.Writer) int {
-	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap skills install --agent ID [--agent ID ...] --scope user|project [--project PATH] [--dry-run] [--allow-overlapping-discovery]\n")
+func runSkillsInstall(invocation string, args []string, stdout, stderr io.Writer) int {
+	if hasHelpRequest(args) {
+		writeHelp(stdout, invocation, []string{"skills", "install"})
 		return 0
 	}
 	flags := newFlagSet("skills install")
+	binder := commandmeta.Bind(flags, "skills", "install")
 	var agents stringList
-	flags.Var(&agents, "agent", "agent target ID (repeatable)")
-	scope := flags.String("scope", "", "required installation scope: user or project")
-	project := flags.String("project", ".", "project root for project scope")
-	dryRun := flags.Bool("dry-run", false, "report without writing")
-	allowOverlap := flags.Bool("allow-overlapping-discovery", false, "acknowledge shared Cursor discovery roots")
+	binder.Var(&agents, "agent")
+	scope := binder.String("scope", "")
+	project := binder.String("project", ".")
+	dryRun := binder.Bool("dry-run", false)
+	allowOverlap := binder.Bool("allow-overlapping-discovery", false)
 	if err := flags.Parse(args); err != nil {
 		return fail(stderr, "skills install: invalid arguments")
 	}
@@ -325,17 +359,18 @@ func runSkillsInstall(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runSkillsStatus(args []string, stdout, stderr io.Writer) int {
-	if isHelpRequest(args) {
-		_, _ = io.WriteString(stdout, "usage: brew-hextap skills status [--agent ID ...] [--scope user|project] [--project PATH] [--json]\n")
+func runSkillsStatus(invocation string, args []string, stdout, stderr io.Writer) int {
+	if hasHelpRequest(args) {
+		writeHelp(stdout, invocation, []string{"skills", "status"})
 		return 0
 	}
 	flags := newFlagSet("skills status")
+	binder := commandmeta.Bind(flags, "skills", "status")
 	var agents stringList
-	flags.Var(&agents, "agent", "agent target ID (repeatable)")
-	scope := flags.String("scope", string(skillinstall.UserScope), "inspection scope: user or project")
-	project := flags.String("project", ".", "project root for project scope")
-	jsonOutput := flags.Bool("json", false, "emit versioned JSON inventory")
+	binder.Var(&agents, "agent")
+	scope := binder.String("scope", string(skillinstall.UserScope))
+	project := binder.String("project", ".")
+	jsonOutput := binder.Bool("json", false)
 	if err := flags.Parse(args); err != nil {
 		return fail(stderr, "skills status: invalid arguments")
 	}
@@ -425,8 +460,21 @@ func newFlagSet(name string) *flag.FlagSet {
 	return result
 }
 
-func isHelpRequest(args []string) bool {
-	return len(args) == 1 && (args[0] == "--help" || args[0] == "-h")
+func hasHelpRequest(args []string) bool {
+	for _, argument := range args {
+		if isHelpToken(argument) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHelpToken(argument string) bool {
+	return argument == "--help" || argument == "-h"
+}
+
+func writeHelp(output io.Writer, invocation string, path []string) {
+	_, _ = io.WriteString(output, commandmeta.Help(invocation, path))
 }
 
 func fail(stderr io.Writer, format string, args ...any) int {

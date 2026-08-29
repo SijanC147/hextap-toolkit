@@ -45,6 +45,12 @@ func Render(project manifest.Manifest, version, arm64SHA, amd64SHA string) ([]by
 	}
 	out.WriteString("\n  def install\n")
 	fmt.Fprintf(&out, "    bin.install %s\n", rubyString(f.Binary))
+	for _, alias := range project.Homebrew.BinaryAliases {
+		fmt.Fprintf(&out, "    bin.install_symlink %s => %s\n", rubyString(f.Binary), rubyString(alias))
+	}
+	if project.Homebrew.ZshCompletion != "" {
+		fmt.Fprintf(&out, "    zsh_completion.install %s\n", rubyString(project.Homebrew.ZshCompletion))
+	}
 	out.WriteString("  end\n")
 
 	service := project.Homebrew.Service
