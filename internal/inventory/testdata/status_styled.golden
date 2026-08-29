@@ -1,0 +1,83 @@
+<ESC>[1;36mHextap system status<ESC>[0m
+  schema: 1
+
+<ESC>[1mCLI<ESC>[0m
+  version: 9.8.7-status-version
+  commit: 1111111111111111111111111111111111111111
+  executable: /status/bin/hextap-cli
+
+<ESC>[1mHomebrew<ESC>[0m
+  executable: /status/bin/brew-owner
+  prefix: /status/prefix
+
+<ESC>[1mTap<ESC>[0m
+  name: owner/status-tap
+  installed: true
+  path: /status/tap/path
+  revision: 2222222222222222222222222222222222222222
+  branch: status-branch
+  remote: https://example.invalid/status-tap.git
+
+<ESC>[1mRegistered projects (1)<ESC>[0m
+  [1] status-project
+    repository: owner/status-project-repository
+    binary: status-project-binary
+    schema: 2
+    service enabled: true
+    manifest path: /status/manifests/project.json
+    registration state: STATUS_REGISTERED
+
+<ESC>[1mFormulae (1)<ESC>[0m
+  [1] status-formula
+    full name: owner/status-tap/status-formula-full
+    available version: 4.5.6-status-available
+    installed: true
+    installed versions (2)
+      - 4.5.4-status-installed-a
+      - 4.5.5-status-installed-b
+    outdated: true
+    pinned: false
+    <ESC>[1mservice<ESC>[0m
+      defined: true
+      run type: status-run-type
+      restart delay: 17
+      keep alive (2)
+        - status-keep-alive-a=true
+        - status-keep-alive-b=false
+      environment variables (2)
+        - STATUS_ENV_A
+        - STATUS_ENV_B
+
+<ESC>[1mCasks (1)<ESC>[0m
+  [1] status-cask
+    full name: owner/status-tap/status-cask-full
+    available version: 7.8.9-status-cask-available
+    installed: true
+    installed version: 7.8.8-status-cask-installed
+    outdated: false
+    auto updates: false
+
+<ESC>[1mSkills (1)<ESC>[0m
+  [1] status-agent
+    scope: project
+    state: UPDATE_AVAILABLE
+    discovered by (2)
+      - status-discoverer-a
+      - status-discoverer-b
+    path: /status/skills/hextap
+    installed version: 1.2.2-status-skill-installed
+    available version: 1.2.3-status-skill-available
+    recommendation: UPGRADE
+
+<ESC>[1mLocal project<ESC>[0m
+  [1] status-local-project
+    repository: owner/status-local-repository
+    binary: status-local-binary
+    schema: 1
+    service enabled: false
+    manifest path: /status/manifests/local.json
+    registration state: STATUS_NOT_REGISTERED
+
+<ESC>[1;33mWarnings (1)<ESC>[0m
+  <ESC>[1;33m[1] status.warning.component<ESC>[0m
+    message: status warning message

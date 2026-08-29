@@ -1,0 +1,40 @@
+Hextap system status
+  schema: 1
+
+CLI
+  version: -
+  commit: -
+  executable: -
+
+Homebrew
+  executable: -
+  prefix: -
+
+Tap
+  name: sean/hextap
+  installed: false
+  path: -
+  revision: -
+  branch: -
+  remote: -
+
+Registered projects (0)
+  None.
+
+Formulae (0)
+  None.
+
+Casks (0)
+  None.
+
+Skills (0)
+  None.
+
+Local project
+  None requested.
+
+Warnings (2)
+  [1] tap.git.revision
+    message: tap Git metadata is unavailable
+  [2] formula.hextap
+    message: Homebrew Formula metadata is unavailable

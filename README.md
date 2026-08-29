@@ -7,7 +7,9 @@ updates Formulae. The separately installable `brew-hextap` executable is the
 human-facing `brew hextap` command and is also installed as the shorter direct
 `hextap` command. Both names provide conflict-safe local onboarding,
 validation, read-only doctor checks, managed agent skills, and protected
-toolkit development/release orchestration.
+toolkit development/release orchestration. They also provide a dry-run-first
+Formula and Cask rollback planner with separately confirmed local-reinstall and
+protected-PR execution modes.
 
 The durable initiative architecture, ownership boundaries, decisions, and
 live-gate roadmap are under [`docs/initiative`](docs/initiative/architecture.md).
@@ -114,6 +116,47 @@ hextap completion zsh
 Help, flag parsing, and completion share one authoritative command metadata
 tree; a traversal test fails if a command, option, shorthand, value, or
 description drifts between them.
+
+## Safe Homebrew rollback
+
+Rollback always requires one exact installed Formula or Cask plus exactly one
+historical selector. It prints a complete plan by default:
+
+```sh
+hextap rollback formula hextap --to-version 0.4.2
+hextap rollback cask ntm --to-commit FULL_HISTORICAL_TAP_SHA
+hextap rollback formula hextap -t FULL_HISTORICAL_TAP_SHA -m remote -j
+```
+
+The plan resolves the Homebrew installation that owns active Hextap rather
+than trusting the first `brew` on `PATH`. It requires the canonical tap to be
+clean, unchanged, on `main`, and owned by the expected repository. A version
+selector must identify exactly one history commit; ambiguous history requires
+the full 40-character commit instead.
+
+Local execution requires both `--execute`/`-x` and the plan's exact
+`--confirm`/`-c` string. Formula rollback refuses any active service instead
+of stopping it. Hextap temporarily checks out only the selected Formula or
+Cask path, disables Homebrew auto-update, API use, analytics, cleanup, and
+dependent mutation, then runs one bounded `brew reinstall --no-ask`. Failure,
+cancellation, or success all restore the exact original HEAD bytes and index.
+Concurrent tap drift is preserved and reported; success requires the original
+HEAD, branch, file, and clean status to be proved again.
+
+Remote mode never publishes historical source releases. It reconciles only
+historical release metadata into the current canonical definition so Formula
+install/service/caveat/test bytes and Cask artifact/caveat bytes remain
+current. A Formula receives `version_scheme CURRENT+1`, allowing a lower
+package version to converge through `brew update && brew upgrade`. Homebrew
+schema-2 Formulae update their authoritative `packaging/*.rb.tmpl` in the same
+PR after proving the current Formula is its byte-identical rendering.
+Casks have no version-scheme equivalent: ordinary Casks converge because any
+installed/current version mismatch is replaced, while `auto_updates` Casks
+require the exact `--greedy` command printed by the plan. Confirmed execution
+uses a fresh temporary clone, pushes only a new
+`codex/hextap-rollback-*` branch without force, and opens a protected PR to
+`main`; it does not merge, direct-push `main`, move a tag, or rewrite an
+immutable release.
 
 Default doctor never executes the project adapter and never calls GitHub. It
 requires `go` for schema 1 and the pinned profile runtime (`bun` today) for

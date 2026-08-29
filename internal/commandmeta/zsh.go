@@ -89,8 +89,10 @@ func writeCommandFunctions(output *strings.Builder, command Command, path []stri
 	} else {
 		output.WriteString("  _arguments -S \\\n")
 	}
-	writeOptionSpecs(output, path, command.Options, len(command.Children) == 0)
+	terminal := len(command.Children) == 0
+	writeOptionSpecs(output, path, command.Options, terminal && len(command.Arguments) == 0)
 	if len(command.Children) == 0 {
+		writeArgumentSpecs(output, command.Arguments)
 		output.WriteString("}\n\n")
 		return
 	}
@@ -116,6 +118,21 @@ func writeCommandFunctions(output *strings.Builder, command Command, path []stri
 	output.WriteString("      ;;\n")
 	output.WriteString("  esac\n")
 	output.WriteString("}\n\n")
+}
+
+func writeArgumentSpecs(output *strings.Builder, arguments []Argument) {
+	for index, argument := range arguments {
+		position := fmt.Sprintf("%d", index+1)
+		if argument.Repeatable {
+			position = "*"
+		}
+		spec := position + ":" + strings.ToLower(argument.Name) + ":_message " + shellQuote(zshDescription(argument.Description))
+		suffix := " \\\n"
+		if index == len(arguments)-1 {
+			suffix = "\n"
+		}
+		fmt.Fprintf(output, "    %s%s", shellQuote(spec), suffix)
+	}
 }
 
 func writeOptionSpecs(output *strings.Builder, path []string, options []Option, terminal bool) {

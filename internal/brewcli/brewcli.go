@@ -17,6 +17,7 @@ import (
 	"github.com/SijanC147/hextap-toolkit/internal/devcli"
 	"github.com/SijanC147/hextap-toolkit/internal/inventory"
 	"github.com/SijanC147/hextap-toolkit/internal/onboard"
+	"github.com/SijanC147/hextap-toolkit/internal/rollback"
 	"github.com/SijanC147/hextap-toolkit/internal/skillinstall"
 )
 
@@ -55,7 +56,7 @@ func RunNamed(invocation string, args []string, stdout, stderr io.Writer, versio
 		return 0
 	}
 	if len(args) == 0 {
-		return fail(stderr, "command required; expected version, status, info, onboard, validate, doctor, skills, dev, or completion")
+		return fail(stderr, "command required; expected version, status, info, rollback, onboard, validate, doctor, skills, dev, or completion")
 	}
 	switch args[0] {
 	case "version":
@@ -72,6 +73,8 @@ func RunNamed(invocation string, args []string, stdout, stderr io.Writer, versio
 		return (inventory.Service{Version: version, Commit: commit, Invocation: invocation}).RunStatusCLI(context.Background(), args[1:], stdout, stderr)
 	case "info":
 		return (inventory.Service{Version: version, Commit: commit, Invocation: invocation}).RunInfoCLI(context.Background(), args[1:], stdout, stderr)
+	case "rollback":
+		return (rollback.Service{Invocation: invocation}).RunCLI(context.Background(), args[1:], stdout, stderr)
 	case "onboard":
 		return runOnboard(invocation, args[1:], stdout, stderr, version, commit)
 	case "validate":
@@ -85,7 +88,7 @@ func RunNamed(invocation string, args []string, stdout, stderr io.Writer, versio
 	case "completion":
 		return runCompletion(invocation, args[1:], stdout, stderr)
 	default:
-		return fail(stderr, "unknown command; expected version, status, info, onboard, validate, doctor, skills, dev, or completion")
+		return fail(stderr, "unknown command; expected version, status, info, rollback, onboard, validate, doctor, skills, dev, or completion")
 	}
 }
 
