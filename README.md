@@ -11,6 +11,14 @@ toolkit development/release orchestration. They also provide a dry-run-first
 Formula and Cask rollback planner with separately confirmed local-reinstall and
 protected-PR execution modes.
 
+**Project homepage and operator documentation:**
+[Hextap Operator Manual](https://hextap-operator-manual.sijanc147.chatgpt.site)
+
+The manual provides source-pinned reference and implementation-level runbooks
+for every command and subcommand, including ordered execution stages, safety
+boundaries, failure/recovery behavior, JSON contracts, Homebrew rollback, agent
+skills, shell completion, and toolkit release operations.
+
 The durable initiative architecture, ownership boundaries, decisions, and
 live-gate roadmap are under [`docs/initiative`](docs/initiative/architecture.md).
 
