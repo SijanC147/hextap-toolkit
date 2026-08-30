@@ -78,6 +78,12 @@ row in the table. Enforcement is part of a ruleset's definition, so toggling it 
 a later version, and none exists.
 
 ```sh
+# The events protection must be compared against: the merge commit and the tag
+# creation, not release publication (publication happens after the tag push).
+gh api repos/SijanC147/<REPO>/commits/<MERGE_SHA> --jq '.commit.committer.date'
+gh api repos/SijanC147/<REPO>/git/ref/tags/<TAG> --jq '.object'        # type: tag = annotated
+gh api repos/SijanC147/<REPO>/git/tags/<TAG_OBJECT_SHA> --jq '.tagger.date'
+
 # Ruleset history is per-repository; the adopter ruleset IDs are in the table above.
 gh api repos/SijanC147/<REPO>/rulesets/<RULESET_ID>/history
 gh api repos/SijanC147/<REPO>/rulesets/<RULESET_ID>/history/<VERSION_ID> \
@@ -286,28 +292,33 @@ verdict here; each section names the command that does it.
 Protected PR head CI, protected merge, merged-`main` CI, and tag-to-commit identity are green
 across all three repositories, with the run IDs in the per-version and adopter ledgers above.
 
-Protection needs dated evidence in each repository, not just the toolkit. Ruleset version history,
-with each repository's current tag for comparison:
+Protection needs dated evidence in each repository, not just the toolkit — and it must be compared
+against **the events the gate protects**, which are the merge and the tag creation. Comparing
+against release *publication* would not do: the tag push starts the release workflow and
+publication happens minutes later, so a ruleset activated after the merge or tag but before
+publication would pass that comparison while the gate had in fact not been enforced.
 
-| Repository | Ruleset | Latest version | Last modified (UTC) | Target | Current tag published |
+All three current tags are **annotated**, so tag creation carries a real timestamp rather than
+being inferred. In each case the release run starts within six seconds of the tagger date, which
+confirms the tag was pushed immediately rather than created locally and held.
+
+| Repository | Rulesets | Latest ruleset change (UTC) | Merge commit (UTC) | Tag created (UTC) | Margin before merge |
 |---|---|---|---|---|---|
-| `hextap-toolkit` | `21411731` `hextap/main` | `47577297` | `2026-08-25T10:22:54Z` | branch | `v0.6.0` `2026-08-29T04:00:50Z` |
-| `hextap-toolkit` | `21411735` `hextap/release-tags` | `47577264` | `2026-08-25T10:22:35Z` | tag | — |
-| `claude-rc-proxy` | `21345746` `hextap/main` | `47762670` | `2026-08-26T19:05:23Z` | branch | `v0.2.0` `2026-08-29T06:05:58Z` |
-| `claude-rc-proxy` | `21345761` `hextap/release-tags` | `47762343` | `2026-08-26T19:02:32Z` | tag | — |
-| `better-ccflare` | `21627513` `hextap/main` | `47809441` | `2026-08-27T05:46:09Z` | branch | `v3.9.0` `2026-08-28T14:17:24Z` |
-| `better-ccflare` | `21627514` `hextap/release-tags` | `47809443` | `2026-08-27T05:46:10Z` | tag | — |
+| `hextap-toolkit` | `21411731`, `21411735` | `2026-08-25T10:22:54Z` | `2026-08-29T03:49:13Z` | `2026-08-29T03:54:53Z` | 3d 17h |
+| `claude-rc-proxy` | `21345746`, `21345761` | `2026-08-26T19:05:23Z` | `2026-08-29T05:04:56Z` | `2026-08-29T06:02:54Z` | 2d 10h |
+| `better-ccflare` | `21627513`, `21627514` | `2026-08-27T05:46:10Z` | `2026-08-28T14:04:44Z` | `2026-08-28T14:13:39Z` | 1d 8h |
 
-All six are `enforcement: active`, and every one was last modified **before** its repository's
-current tag was published. So each repository's protection was configured and unchanged across the
-merge and tag of the release its ledger row describes.
+All six rulesets are `enforcement: active`, targeting `branch` and `tag` respectively, and in every
+repository the **last** ruleset change predates **both** the merge and the tag creation of the
+release its ledger row describes. Individual ruleset versions and their timestamps are listed under
+[Reverifying](#reverifying)'s ruleset-history commands.
 
-**Two limits, both narrower than the toolkit's case.** First, the adopter rulesets *were* modified
-during the period — `claude-rc-proxy`'s `hextap/main` has three versions and its `release-tags` two
-— so unlike the toolkit, "unchanged since before the **first** release" is **not** true for them.
-The claim above is deliberately scoped to the current tag only. Second, as for the toolkit, this is
-evidence of continuous configuration, not of per-merge evaluation: `rule-suites` returns `[]` in
-all three repositories.
+**Two limits, stated rather than glossed.** First, the adopter rulesets *were* modified during the
+overall period — `claude-rc-proxy`'s `hextap/main` has three versions and its `release-tags` two —
+so "unchanged since before the **first** release" is true of the toolkit and **not** of them. The
+claim above is deliberately scoped to each repository's **current** tag. Second, this is evidence
+of continuous *configuration*, not of per-merge *evaluation*: `rule-suites`, which would carry
+per-evaluation records, returns `[]` in all three repositories, so no claim here rests on them.
 
 ### Release — evidenced as of 2026-08-30
 
