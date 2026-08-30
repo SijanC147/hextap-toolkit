@@ -35,7 +35,7 @@ separate, and never collapsed into a single status:
 |---|---|---|
 | **Source** | Did the commit reach `main` through the protected pull-request flow, with the required check green and tag protection enforced? | That a human reviewed it. `required_approving_review_count` is **0** on the owned rulesets (`internal/onboard/templates.go`), with no code-owner or last-push approval, so a PR can merge unapproved. This gate evidences protected merge, not review. It also does not prove anything was built or released. |
 | **Release** | Did the hosted matrix build, verify, attest and publish an immutable release? | That Homebrew received anything. Release publication and Formula publication are separate jobs and have failed independently — repeatedly. |
-| **Tap** | Was the tap-owned Formula updated by a real tap commit, and did tap CI pass on that exact SHA? | That the Formula installs, or that the tap itself is protected. Note the tap carries the download URL and SHA-256, not the package bytes. |
+| **Tap** | Was the tap-owned Formula updated by a real tap commit, and did tap CI pass on that exact SHA? **The operative question is "is this the SHA consumers actually receive?"** — that is, the commit that landed on tap `main`, not a pull request's branch head. | That the Formula installs, or that the tap itself is protected. Note the tap carries the download URL and SHA-256, not the package bytes. |
 | **Install** | Does the package install, and does the installed binary report the expected version and commit? | That the running service is healthy or that its data is compatible. |
 | **Runtime** | Is the running process actually serving correctly against its current data? | Nothing further — this is the last gate, and it is the weakest one here. |
 
@@ -103,9 +103,17 @@ gh api repos/SijanC147/<REPO>/rulesets/<RULESET_ID>/history
 gh api repos/SijanC147/<REPO>/rulesets/<RULESET_ID>/history/<VERSION_ID> \
   --jq '{name:.state.name,target:.state.target,enforcement:.state.enforcement}'
 
-# e.g. the toolkit's branch ruleset
-gh api repos/SijanC147/hextap-toolkit/rulesets/21411731/history/47577297 \
-  --jq '{name:.state.name,target:.state.target,enforcement:.state.enforcement}'
+# Every ruleset body, not just one: the list above shows only id/name/enforcement,
+# so drift in conditions, required checks or bypass actors is invisible there.
+# Run the detail endpoint for each of the six IDs in the protection table.
+for REPO_ID in "hextap-toolkit 21411731" "hextap-toolkit 21411735" \
+               "claude-rc-proxy 21345746" "claude-rc-proxy 21345761" \
+               "better-ccflare 21627513" "better-ccflare 21627514"; do
+  set -- $REPO_ID
+  gh api "repos/SijanC147/$1/rulesets/$2" \
+    --jq '{repo:"'"$1"'",id,name,target,enforcement,conditions,bypass_actors,
+           rules:[.rules[]|{type,parameters}]}'
+done
 ```
 
 **The limit of that evidence, stated rather than glossed:** it establishes the rulesets' continuous
@@ -116,11 +124,16 @@ claim in this document rests on them.
 
 The source gate passed for every version; there is no column for it because the value never varies.
 
-A **bold tap commit** was hand-authored by a person; the rest were written by the publisher.
+**The tap commit column is the SHA that landed on tap `main`, and the tap CI run is the one that
+ran against *that* SHA.** The nine publisher rows are direct pushes, so the landed commit and its
+`push` run are the same thing. The **two bold rows** went through a tap pull request, which
+produces *two* runs — a `pull_request` run against the branch head and a `push` run against the
+merge commit. Only the second evidences the gate, because the merge commit is the SHA consumers
+receive.
 
 | Version | PR | Merge / tag commit | PR head CI | Merged-`main` CI | Release run | Release ID | **Release gate** | Homebrew step | Tap commit | Tap CI | **Tap gate** |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32838086815` | `32969601857` | `32980009852` | `377208649` | **passed** | **failed** — recovery `32990280006` also failed | **`9d27f112`** | `32981835518` | **failed** — see below |
+| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32838086815` | `32969601857` | `32980009852` | `377208649` | **passed** | **failed** — recovery `32990280006` also failed | **`ded1feb1`** (tap PR #9) | `32991730400` | passed |
 | `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32995754608` | `32996124215` | `32996698520` | `377318696` | passed | passed | `345653c0` | `32997289004` | passed |
 | `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33003923022` | `33004349130` | `33004764036` | `377369388` | passed | passed | `3cc76f5d` | `33005207889` | passed |
 | `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33014779714` | `33015151916` | `33015551268` | `377435759` | passed | passed | `2aaf9df9` | `33016011545` | passed |
@@ -129,41 +142,47 @@ A **bold tap commit** was hand-authored by a person; the rest were written by th
 | `v0.4.0` | #9 | `f3106610e2ffe4aeb673721219592816a3ef8c1e` | `33037762660` | `33038031679` | `33038299518` | `377559153` | passed | passed | `2519d6f0` | `33038612791` | passed |
 | `v0.4.1` | #10 | `67898bb09280a5325b89c1b23a70f2fc8b64ffae` | `33042376451` | `33042645416` | `33042920074` | `377586076` | passed | passed | `dd0b55e0` | `33043233099` | passed |
 | `v0.4.2` | #11 | `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26` | `33048175244` | `33048572779` | `33048934828` | `377628533` | passed | passed | `3e30186f` | `33049332506` | passed |
-| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33222541721` | `33222845927` | `33223146605` | `378825128` | **passed** | **failed** — recovery `33223947922` passed | **`895c1d3b`** | `33223670639` | passed |
+| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33222541721` | `33222845927` | `33223146605` | `378825128` | **passed** | **failed** — recovery `33223947922` passed | **`a9a96e62`** (tap PR #13) | `33223845247` | passed |
 | `v0.6.0` | #13 | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `33232103954` | `33232339531` | `33232555139` | `378869000` | passed | passed | `f8719fb0` | `33232801566` | passed |
 
 ### Reading the two exceptional rows
 
-`v0.1.0` and `v0.5.0` are the two rows whose gate columns do not all read the same. **Their
-verdicts are in the table and are not repeated here** — this section only adds the evidence that
-does not fit in a cell.
+`v0.1.0` and `v0.5.0` are the two rows whose Homebrew step failed inside an otherwise successful
+release run, and the two whose tap Formula was hand-authored through a pull request rather than
+pushed by the publisher. **Their verdicts are in the table and are not repeated here** — this
+section records only the evidence that does not fit in a cell.
 
-**`v0.5.0`** — the tap Formula was hand-authored (`895c1d3b`, tap PR #13 `a9a96e62`) rather than
-written by the publisher, and `brew test-bot` `33223670639` ran against it.
+**Both reached the tap through a PR, and a PR produces two runs.** That distinction is the whole
+content of this section, because taking the wrong one gets the gate's verdict backwards:
 
-**`v0.1.0`** — one detail narrows *what* failed without softening *that* it failed. Job level on
-run `32981835518`:
-`test-bot (macos-15)` **failure**, `Claude RC proxy release tooling` success, and
-**`Published Formula gate` skipped** — the Formula-validating job never executed, because it was
-skipped once `test-bot` failed. So the gate failed on `test-bot`, and **no verdict was ever
-reached on the Formula itself**. `v0.1.1` superseded the version about four hours later, so none
-ever was. The gate outcome is in the table; the Formula's own status is *unknown*.
+| Version | Branch head | `pull_request` run | Landed on `main` | `push` run — **the gate's evidence** |
+|---|---|---|---|---|
+| `v0.1.0` | `9d27f112` | `32981835518` **failure** | `ded1feb1` | `32991730400` **success** |
+| `v0.5.0` | `895c1d3b` | `33223670639` success | `a9a96e62` | `33223845247` **success** |
 
-Every version from `0.1.1` on has `Published Formula gate: success` on its own tap commit.
-`v0.1.0` is the sole exception — and **nothing in a commit-only view could have surfaced it**,
-because a failing tap run and a passing one render identically when only the commit is recorded.
-That is the entire justification for the tap CI column existing.
+For `v0.1.0` the two disagree. The `pull_request` run failed on `test-bot (macos-15)`, which
+skipped `Published Formula gate`. The `push` run on the merge commit — `32991730400`, at
+`2026-08-26T17:00:55Z` — has **all three jobs green, `Published Formula gate` included**, and
+`Formula/hextap.rb` at `ded1feb1` carries the `v0.1.0` release URLs and SHA-256 values. So the
+published `0.1.0` Formula was validated and **the tap gate passed**.
 
-This row has been rewritten four times, and the last two swings are worth recording because they
-went in opposite directions. It was called *failed*, then over-corrected to *never evaluated* on
-the strength of the skipped job, and is now *failed* again with the skipped job kept as the
-narrower point it actually supports. The lesson is that the gate's verdict is whatever its own
-stated definition asks — here, "did tap CI pass on that exact SHA" — and a detail discovered one
-level down refines that answer without replacing it.
+Every one of the eleven versions passed the tap gate on its landed SHA.
 
-Nine of the eleven tap commits were written by the automated publisher. The two hand-authored
-exceptions are exactly the two versions whose Homebrew step failed, so commit authorship is a
-durable signal for which versions did not publish cleanly, independent of anyone recording it.
+**This row has been wrong five times, and the reason is worth more than the row.** It was written
+as "reached the tap anyway", then "the tap gate failed", then "never evaluated", then "failed"
+again, and is now "passed". The three middle versions all reasoned — with progressively better
+job-level evidence — about a run that **was never the right run**. Nobody asked the question the
+gate's own definition asks: *is this the SHA consumers receive?* The first version was the closest
+to correct, and it was corrected away from.
+
+The general form: **the same PR-head versus merged-`main` distinction that the source columns
+apply rigorously was never applied to the tap column.** Nine rows hid the gap because the publisher
+pushes directly, so head and landed commit coincide. Only the two PR-based rows could expose it.
+
+Nine of the eleven Formula commits were written by the automated publisher. The two hand-authored
+exceptions are exactly the two versions whose Homebrew step failed, so commit authorship remains a
+durable signal for which versions did not publish cleanly — but it says nothing about the tap
+gate's outcome, and both of those versions passed it.
 
 All eleven releases report `immutable: true`.
 
@@ -499,9 +518,14 @@ Every identifier in this document is checkable. None of these commands mutate an
 #   hextap-toolkit | claude-rc-proxy | better-ccflare
 # Release IDs and tags are per-repository. This endpoint is repository-scoped, so
 # querying the toolkit for an adopter's release ID (378892646, 378533895) returns
-# 404 rather than another project's data — the same signal as a wrong-repository
-# run ID below. A 404 here means the wrong repository was asked, not that the
-# release is missing.
+# 404 rather than another project's data.
+#
+# A 404 has SEVERAL causes and does not by itself diagnose a wrong repository:
+# the release may have been deleted, be invisible to the current token, or the ID
+# may be wrong. A deleted or inaccessible release is exactly the missing-evidence
+# condition this ledger exists to surface, so do not dismiss a 404 as a typo.
+# Check both: that the repository owns the row, AND that the resource still exists
+# by listing the repository's releases.
 gh release list --repo SijanC147/<REPO> --limit 20
 gh api repos/SijanC147/<REPO>/releases \
   --jq '.[]|"\(.tag_name) id=\(.id) immutable=\(.immutable)"'
@@ -533,6 +557,20 @@ gh api repos/SijanC147/homebrew-hextap/actions/runs/33237683107 --jq '.conclusio
 # from "an unrelated job failed and took the run's conclusion with it"
 gh api repos/SijanC147/<REPO>/actions/runs/<RUN_ID>/jobs \
   --jq '.jobs[]|"\(.name): \(.conclusion)"'
+
+# Source gate: a run ID alone does not establish protected merge. Compare the PR's
+# final head against the PR run's head_sha, and the merge commit against the tag,
+# or a green run from an earlier head or a different PR would appear to qualify.
+gh pr view <PR> --repo SijanC147/<REPO> \
+  --json number,headRefOid,mergeCommit,mergedAt,state
+gh api repos/SijanC147/<REPO>/actions/runs/<PR_RUN_ID> --jq '.head_sha'   # == headRefOid
+gh api repos/SijanC147/<REPO>/git/ref/tags/<TAG> --jq '.object.sha'       # tag -> commit
+
+# Tap gate: use the run against the commit that LANDED on tap main. A tap PR also
+# produces a pull_request run against its branch head, which is not the SHA
+# consumers receive and can disagree with the merged-SHA run.
+gh api "repos/SijanC147/homebrew-hextap/actions/runs?head_sha=<LANDED_SHA>" \
+  --jq '.workflow_runs[]|"\(.id) \(.event)/\(.conclusion)"'
 
 # Tap publication, and tap protection
 gh api repos/SijanC147/homebrew-hextap/commits/f8719fb0 --jq '.commit.message'
