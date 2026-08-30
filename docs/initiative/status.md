@@ -194,7 +194,23 @@ So the publisher pushed successfully almost immediately and then died in the **w
 tap-CI-correlation** phase — not in push, CAS, or retry. Whatever is wrong is downstream of
 publication, in run discovery and result interpretation.
 
+**Two axes, and reading this as licence to relax the first would be the wrong fix.** They are
+independent and both must hold:
+
+| Axis | Direction |
+|---|---|
+| **Which** tap run is consulted | **Stays exact** — event, branch and `head_sha`. Never widen this to "the latest run". |
+| **What counts as evidence** inside that correctly-identified run | **Narrows** — from the aggregate conclusion to the jobs that actually evidence Formula publication. |
+
+Narrowing what counts as evidence within the right run is the opposite of accepting the wrong run.
+A change that loosened run discovery would reintroduce the failure this platform exists to prevent
+while appearing to fix this one.
+
 Recorded here as evidence, not as a fix, and not as a called root cause — **SB23-745**.
+
+For the shape of the underlying mistake: SB23-642 was one gate **overwriting** another's work.
+This is one gate **reading** another's verdict. Both are gate conflation — here sitting inside the
+publisher itself.
 
 ## Gate status
 
