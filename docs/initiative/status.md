@@ -183,8 +183,13 @@ pushes directly, so head and landed commit coincide. Only the two PR-based rows 
 
 Nine of the eleven Formula commits were written by the automated publisher. The two hand-authored
 exceptions are exactly the two versions whose Homebrew step failed, so commit authorship remains a
-durable signal for which versions did not publish cleanly — but it says nothing about the tap
-gate's outcome, and both of those versions passed it.
+durable signal for which versions needed manual intervention to publish. It says nothing about the
+tap gate — for that, read the two rows.
+
+> **Standing rule for this section.** It records evidence and mechanism only. Every per-version
+> verdict lives in the ledger row and nowhere else. This section has drifted back to restating
+> outcomes three times; if you are editing it and about to write "passed" or "failed" next to a
+> version number, that belongs in a cell instead.
 
 All eleven releases report `immutable: true`.
 
