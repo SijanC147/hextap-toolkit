@@ -1,9 +1,13 @@
 # Hextap release architecture
 
-Status: shipped. The release platform and self-development orchestration are
-both published and in use across the toolkit itself and two adopters,
-`claude-rc-proxy` and `better-ccflare`; `hextap dev` shipped in `v0.3.0`. This
-document describes accepted design — for release, gate and defect state, see
+Status: shipped. The **release platform** is published and in use across three
+repositories: this toolkit and the adopters `claude-rc-proxy` and
+`better-ccflare`. The **self-development orchestration** (`hextap dev`, shipped
+in `v0.3.0`) is toolkit-only by construction — `internal/devcli` pins the
+toolkit repository and module and rejects any other origin, so it is not a
+workflow adopters can use.
+
+This document describes accepted design. For release, gate and defect state see
 `status.md` and the Linear `hextap` project.
 
 ## Components and trust boundaries

@@ -33,7 +33,7 @@ separate, and never collapsed into a single status:
 
 | Gate | Question it answers | What it explicitly does **not** prove |
 |---|---|---|
-| **Source** | Was the commit reviewed and merged under branch and tag protection? | That anything was ever built or released from it. |
+| **Source** | Did the commit reach `main` through the protected pull-request flow, with the required check green and tag protection enforced? | That a human reviewed it. `required_approving_review_count` is **0** on the owned rulesets (`internal/onboard/templates.go`), with no code-owner or last-push approval, so a PR can merge unapproved. This gate evidences protected merge, not review. It also does not prove anything was built or released. |
 | **Release** | Did the hosted matrix build, verify, attest and publish an immutable release? | That Homebrew received anything. Release publication and Formula publication are separate jobs and have failed independently — repeatedly. |
 | **Tap** | Was the tap-owned Formula updated by a real tap commit, and did tap CI pass on that exact SHA? | That the Formula installs, or that the tap itself is protected. Note the tap carries the download URL and SHA-256, not the package bytes. |
 | **Install** | Does the package install, and does the installed binary report the expected version and commit? | That the running service is healthy or that its data is compatible. |
@@ -49,7 +49,7 @@ that identity is itself the source gate's evidence, and it was checked, not assu
 
 | Release | PR | Merge / tag commit | Release run | Release ID | Outcome |
 |---|---|---|---|---|---|
-| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32980009852` | `377208649` | Source, build, publication, attestation and immutability passed; **failed only at `Publish Formula and wait for tap CI`**. Recovery `32990280006` also failed. The `0.1.0` Formula reached the tap anyway, by the tap-side bootstrap commit `9d27f112` (tap PR #9) rather than by the publisher. See the note below. |
+| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32980009852` | `377208649` | Source, build, publication, attestation and immutability passed; **failed only at `Publish Formula and wait for tap CI`**. Recovery `32990280006` also failed. A hand-authored bootstrap put the Formula in the tap (`9d27f112`, tap PR #9), but **tap CI failed on that SHA too** (`32981835518`), so the tap gate never passed for this version. `v0.1.1` superseded it. |
 | `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32996698520` | `377318696` | Passed. Fixed explicit recovery / tap-run selection. |
 | `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33004764036` | `377369388` | Passed. Made generated ruleset defaults explicit. |
 | `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33015551268` | `377435759` | Passed. Cross-agent skill installer. |
@@ -63,10 +63,15 @@ that identity is itself the source gate's evidence, and it was checked, not assu
 
 All eleven releases report `immutable: true`.
 
-`main` is currently `6632b029cee58feaa62736149a761f381388e323` — PR #14 (`docs: link operator
-manual`, main CI `33233091419`), one docs-only commit ahead of the `v0.6.0` tag. **A checkout
-ahead of the installed stable CLI is normal here.** Reason about what the CLI can do from
-`hextap --version`, not from the working tree.
+As of **2026-08-30**, before this document's own pull request merged, `main` was
+`6632b029cee58feaa62736149a761f381388e323` — PR #14 (`docs: link operator manual`, main CI
+`33233091419`), one docs-only commit ahead of the `v0.6.0` tag. That SHA is recorded as a dated
+snapshot, not as a claim about where `main` points now; merging this PR alone moves it.
+
+The durable point is the relationship, which survives the SHA going stale: **a checkout ahead of
+the installed stable CLI is normal here.** Reason about what the CLI can do from
+`hextap --version`, not from the working tree. For the current head:
+`gh api repos/SijanC147/hextap-toolkit/commits/main --jq .sha`
 
 ## Adopter ledger
 
@@ -96,19 +101,28 @@ the tap; they belong to `hextap-toolkit`, and the tap has none — see the tap g
 Every toolkit version has a corresponding tap commit. This is the **tap** gate's evidence, and it
 is deliberately listed separately from the release runs above, because the two do not always agree.
 
-| Version | Tap commit | Commit author | How it got there |
-|---|---|---|---|
-| `0.1.0` | `9d27f112` | **Sean Bugeja** | Hand-authored bootstrap, tap PR #9 — the release run's publisher had failed. |
-| `0.1.1` | `345653c0` | GitHub Actions | Publisher |
-| `0.1.2` | `3cc76f5d` | GitHub Actions | Publisher |
-| `0.2.0` | `2aaf9df9` | GitHub Actions | Publisher |
-| `0.3.0` | `dee6a25c` | GitHub Actions | Publisher |
-| `0.3.1` | `3ea83f86` | GitHub Actions | Publisher |
-| `0.4.0` | `2519d6f0` | GitHub Actions | Publisher |
-| `0.4.1` | `dd0b55e0` | GitHub Actions | Publisher |
-| `0.4.2` | `3e30186f` | GitHub Actions | Publisher |
-| `0.5.0` | `895c1d3b` | **Sean Bugeja** | Hand-authored, merged by tap PR #13 (`a9a96e62`) — see the sequence below. |
-| `0.6.0` | `f8719fb0` | GitHub Actions | Publisher, within release run `33232555139`. |
+The tap gate requires **both** a real tap commit **and** a passing `brew test-bot` run on that
+exact SHA. Both columns are therefore given; a commit alone does not pass this gate.
+
+| Version | Tap commit | Commit author | Tap CI on that SHA | How it got there |
+|---|---|---|---|---|
+| `0.1.0` | `9d27f112` | **Sean Bugeja** | `32981835518` **failure** | Hand-authored bootstrap, tap PR #9, after the publisher failed. **The tap gate did not pass for this version.** |
+| `0.1.1` | `345653c0` | GitHub Actions | `32997289004` success | Publisher |
+| `0.1.2` | `3cc76f5d` | GitHub Actions | `33005207889` success | Publisher |
+| `0.2.0` | `2aaf9df9` | GitHub Actions | `33016011545` success | Publisher |
+| `0.3.0` | `dee6a25c` | GitHub Actions | `33025200293` success | Publisher |
+| `0.3.1` | `3ea83f86` | GitHub Actions | `33026787454` success | Publisher |
+| `0.4.0` | `2519d6f0` | GitHub Actions | `33038612791` success | Publisher |
+| `0.4.1` | `dd0b55e0` | GitHub Actions | `33043233099` success | Publisher |
+| `0.4.2` | `3e30186f` | GitHub Actions | `33049332506` success | Publisher |
+| `0.5.0` | `895c1d3b` | **Sean Bugeja** | `33223670639` success | Hand-authored, merged by tap PR #13 (`a9a96e62`) — see the sequence below. |
+| `0.6.0` | `f8719fb0` | GitHub Actions | `33232801566` success | Publisher, within release run `33232555139`. |
+
+**`0.1.0` is the row that shows why both columns are needed.** Its Formula reached the tap, so a
+commit-only table would have read as a pass — but `brew test-bot` **failed** on that SHA. The tap
+gate never passed for `0.1.0`; `v0.1.1` superseded it four hours later. An earlier draft of this
+document recorded the commit without the run and stated the Formula "reached the tap anyway",
+which read as success. That is precisely the collapse this file is supposed to prevent.
 
 Nine of the eleven Formula commits were written by the automated publisher. The **two exceptions
 are exactly the two versions whose release run failed at the Homebrew boundary** — `0.1.0` and
@@ -198,45 +212,53 @@ So the publisher pushed successfully almost immediately and then died in the **w
 tap-CI-correlation** phase — not in push, CAS, or retry. Whatever is wrong is downstream of
 publication, in run discovery and result interpretation.
 
-**Two axes, and reading this as licence to relax the first would be the wrong fix.** They are
-independent and both must hold:
+**No remedy is proposed here, deliberately.** An earlier draft of this section prescribed how the
+wait step should be narrowed. That was a design change stated in an evidence index — the same
+category error as keeping a roadmap in this file — and it would have relaxed the Tap gate's
+requirement that tap CI pass, which `scripts/publish-homebrew.sh` enforces explicitly. Accepted
+design belongs in `architecture.md` and `decisions.md`; proposed work belongs in Linear.
 
-| Axis | Direction |
-|---|---|
-| **Which** tap run is consulted | **Stays exact** — event, branch and `head_sha`. Never widen this to "the latest run". |
-| **What counts as evidence** inside that correctly-identified run | **Narrows** — from the aggregate conclusion to the jobs that actually evidence Formula publication. |
-
-Narrowing what counts as evidence within the right run is the opposite of accepting the wrong run.
-A change that loosened run discovery would reintroduce the failure this platform exists to prevent
-while appearing to fix this one.
-
-Recorded here as evidence, not as a fix, and not as a called root cause — **SB23-745**.
+The evidence above is recorded here. The hypothesis, the argument about which axis may narrow and
+which must not, and the caution against loosening run discovery are on **SB23-745**, where they can
+be reviewed and decided. This is one instance and is **not** a called root cause — the toolkit
+`v0.1.0` failures (`32980009852`, `32990280006`) and `v0.5.0`'s failure cause are still untraced to
+job level.
 
 For the shape of the underlying mistake: SB23-642 was one gate **overwriting** another's work.
 This is one gate **reading** another's verdict. Both are gate conflation — here sitting inside the
 publisher itself.
 
-## Gate status
+## Gate status — as of 2026-08-30
 
-### Source — passing
+Each heading below states a **dated conclusion**, not a standing one. Conclusions move; the
+identifiers under them do not. When SB23-737 lands, the tap heading is wrong and this file is
+behind Linear — which is authoritative for current gate state. Re-derive before relying on any
+verdict here; each section names the command that does it.
+
+### Source — evidenced as of 2026-08-30
 
 Protected PR head CI, protected merge, merged-`main` CI, and tag-to-commit identity are green
 across all three repositories, with the run IDs in the adopter ledger above.
 
-### Release — passing
+### Release — evidenced as of 2026-08-30
 
 The full hosted matrix, hosted Windows proof, exact asset graph, attestations, immutable
 publication, and stable/prerelease routing are all evidenced by the run and release IDs above.
 Windows is proved through better-ccflare `33179109842`; the earlier Windows failure `33045627299`
 was corrected by toolkit `v0.4.2` before that proof was accepted.
 
-### Tap — publication passing, **protection failing**
+### Tap — publication evidenced; protection **absent as of 2026-08-30**
 
 Publication is evidenced: three real tap commits, each with a green `brew test-bot` run on that
 exact SHA.
 
-Protection is not. `homebrew-hextap` `main` reports `protected: false` and its rulesets endpoint
-returns `[]`, confirmed live on 2026-08-30.
+Protection was not, on the date checked. `homebrew-hextap` `main` reported `protected: false` and
+its rulesets endpoint returned `[]`. Re-derive rather than trusting this paragraph:
+
+```sh
+gh api repos/SijanC147/homebrew-hextap/branches/main --jq '{protected:.protected}'
+gh api repos/SijanC147/homebrew-hextap/rulesets
+```
 
 To be precise about why that matters, since it is easy to overstate: the tap does **not** hold the
 package bytes. A rendered Formula carries the release URL and its SHA-256
@@ -407,8 +429,15 @@ gh api repos/SijanC147/homebrew-hextap/commits/f8719fb0 --jq '.commit.message'
 gh api repos/SijanC147/homebrew-hextap/branches/main --jq '{protected:.protected}'
 gh api repos/SijanC147/homebrew-hextap/rulesets
 
-# Source protection
+# Source protection.
+# Listing id/name/enforcement is NOT sufficient: conditions, protected targets,
+# required checks and bypass actors can all drift while the name and enforcement
+# stay identical, leaving the gate looking green. Fetch each ruleset's detail
+# endpoint and compare the fields that actually confer protection, as
+# internal/onboard's validateOnlineRulesets does.
 gh api repos/SijanC147/hextap-toolkit/rulesets --jq '.[]|"\(.id) \(.name) \(.enforcement)"'
+gh api repos/SijanC147/hextap-toolkit/rulesets/21411731 \
+  --jq '{enforcement,conditions,bypass_actors,rules:[.rules[]|{type,parameters}]}'
 
 # Install gate
 hextap --version
