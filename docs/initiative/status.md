@@ -14,12 +14,16 @@ than as a soft yes.
 | The Linear `hextap` project (team SB23) | **State, work, and evidence.** What is broken, what is being done about it, who is doing it, and what proved it. |
 | This file | The **evidence index** — the identifiers a reader needs in order to check the platform's claims against GitHub directly. |
 
-This file never restates a defect. It names its Linear id and stops. That is deliberate: a defect
-described in two places drifts in one of them, and the copy in the repository is always the one
-that goes stale.
+This file does not restate defects. It names their Linear ids and stops. That is deliberate: a
+defect described in two places drifts in one of them, and the copy in the repository is always the
+one that goes stale — which is exactly how the document this one replaces became misleading.
 
 Identifiers below were verified live against GitHub and Linear on **2026-08-30**. Reverify before
-acting on them — the commands are in [Reverifying](#reverifying).
+acting on them — [Reverifying](#reverifying) gives the commands for both, including the Linear
+queries, since no `gh` command can check the defect list.
+
+One gate is an exception to the rule above and is marked as such where it appears: **install** rests
+on a local observation with no fetchable identifier behind it.
 
 ## The five gates
 
@@ -31,7 +35,7 @@ separate, and never collapsed into a single status:
 |---|---|---|
 | **Source** | Was the commit reviewed and merged under branch and tag protection? | That anything was ever built or released from it. |
 | **Release** | Did the hosted matrix build, verify, attest and publish an immutable release? | That Homebrew received anything. Release publication and Formula publication are separate jobs and have failed independently — repeatedly. |
-| **Tap** | Was the tap-owned Formula updated by a real tap commit, and did tap CI pass on that exact SHA? | That the Formula installs, or that the tap itself is protected. |
+| **Tap** | Was the tap-owned Formula updated by a real tap commit, and did tap CI pass on that exact SHA? | That the Formula installs, or that the tap itself is protected. Note the tap carries the download URL and SHA-256, not the package bytes. |
 | **Install** | Does the package install, and does the installed binary report the expected version and commit? | That the running service is healthy or that its data is compatible. |
 | **Runtime** | Is the running process actually serving correctly against its current data? | Nothing further — this is the last gate, and it is the weakest one here. |
 
@@ -232,20 +236,37 @@ Publication is evidenced: three real tap commits, each with a green `brew test-b
 exact SHA.
 
 Protection is not. `homebrew-hextap` `main` reports `protected: false` and its rulesets endpoint
-returns `[]`, confirmed live on 2026-08-30. The tap holds the bytes Homebrew serves to every
-consumer and is the least protected repository in the platform. → **SB23-737**
+returns `[]`, confirmed live on 2026-08-30.
+
+To be precise about why that matters, since it is easy to overstate: the tap does **not** hold the
+package bytes. A rendered Formula carries the release URL and its SHA-256
+(`internal/formula/render.go`), and the assets themselves stay in the source repository's immutable
+release. What the tap holds is the **download instruction** — which URL every consumer fetches and
+which digest it is checked against. Unprotected, that is still the most valuable thing to tamper
+with in the platform, and it is the least protected repository in it. → **SB23-737**
 
 The credential used to push those tap commits is a broad classic PAT rather than a tap-scoped
 one. → **SB23-736**
 
-### Install — passing on one machine
+### Install — observed on one machine, and the one gate with no durable evidence
 
-`hextap 0.6.0` reports commit `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c`, matching the `v0.6.0`
-tag exactly. `brew list --versions` reports `hextap 0.6.0`, `claude-rc-proxy 0.2.0`,
-`better-ccflare 3.9.0`. Installed agent skill: `1.3.0`.
+On 2026-08-30, `hextap 0.6.0` reported commit `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c`, matching
+the `v0.6.0` tag exactly, and `brew list --versions` reported `hextap 0.6.0`,
+`claude-rc-proxy 0.2.0`, `better-ccflare 3.9.0`, with agent skill `1.3.0`.
 
-This is **one machine's** evidence. It is an installation gate, not a distribution gate, and it
-says nothing about a consumer without tap access. → **SB23-751**
+**Read that as an observation, not as an identifier.** Every other gate in this file is anchored to
+something a later reader can fetch — a run ID, a commit, a release ID. This one is not. Re-running
+the install commands inspects *the reader's own machine now*; it cannot confirm that this gate
+passed here on that date, and no transcript or artifact was captured that would. By the standard
+the top of this document sets, that makes the install gate **unverified in the durable sense**,
+however green it looked at the time.
+
+The gap is worth closing rather than papering over: a hosted install check, or a stored transcript,
+would give this gate an identifier like every other. Until then, treat it as the weakest row in the
+file after runtime.
+
+It is also an installation gate, not a distribution gate — it says nothing about a consumer without
+tap access. → **SB23-751**
 
 ### Runtime — **not verified**
 
@@ -261,45 +282,57 @@ compatibility. Those are project-owned.
 
 ## Open defects
 
-Referenced by id and status only. The Linear issue is the description — do not restate it here.
-Statuses are as of 2026-08-30 and move without this file changing; Linear is the truth.
+Ids only, with the priority and status they carried on 2026-08-30. **No titles or summaries** —
+those are the part that goes stale silently while a status stays put, and duplicating them here
+would rebuild the second source of truth this document exists to remove. Read the issue.
+
+Even the priority and status columns below are a dated convenience, not authority. Get the current
+list, with titles, from Linear:
+
+```sh
+# Platform issues — requires the Linear MCP tools or the Linear API
+list_issues(project: "hextap", fields: ["id","title","priority","status"])
+```
+
+The same drift already happened once to the issue index in this project's agent memory, which was
+written and wrong within the hour. It was deleted rather than corrected, for this reason.
 
 ### Platform — the `hextap` project
 
-| Id | Priority | Status | One-line |
-|---|---|---|---|
-| SB23-680 | Urgent | In Progress | Tag-trigger exclusivity check is quote-sensitive and can be evaded. |
-| SB23-736 | Urgent | Todo | Over-scoped tap PAT; needs a tap-only fine-grained credential. |
-| SB23-737 | High | Todo | Tap has no repository protections. |
-| SB23-739 | High | In Progress | `doctor --online` falsely rejects the toolkit's own self-caller. |
-| SB23-742 | High | Todo | Capture authenticated online-doctor evidence. |
-| SB23-753 | High | In Progress | `dev validate` snapshots every file, so ignored volatile state can fail a release gate. |
-| SB23-754 | High | Todo | Migrate the coordinator bridge onto the authoritative Codex thread. |
-| SB23-755 | High | Todo | The toolkit was never onboarded against its own contract — `.hextap/**` is absent. |
-| SB23-756 | High | Todo | `rollback.resolveHomebrew` carries the same hardcoded-prefix bug; non-standard prefixes cannot roll back. |
-| SB23-738 | Medium | In Progress | `hextap status` cannot identify the Homebrew installation that owns the CLI. |
-| SB23-740 | Medium | In Progress | This document. |
-| SB23-741 | Medium | Backlog | Repin both adopters to the hardened toolkit SHA. |
-| SB23-743 | Medium | Backlog | Exercise Formula and Cask rollback end-to-end — never run live. |
-| SB23-745 | Medium | Backlog | Root-cause the recurring `Publish Formula and wait for tap CI` failures. |
-| SB23-746 | Medium | Todo | Operator Manual / GitBook access model — Site returns HTTP 401. |
-| SB23-751 | Medium | Backlog | Document the private-tap consumer access and bootstrap path. |
-| SB23-744 | Low | Backlog | Negative-path evidence: queued concurrency, immutable rerun, tap-CI retention, altered assets. |
-| SB23-747 | Low | Backlog | Document or retire the WebMCP surface. |
-| SB23-748 | Low | Backlog | Upgrade Actionlint once upstream understands the current workflow schema. |
-| SB23-749 | Low | In Progress | Ignore agent metadata directories in both repositories. |
-| SB23-752 | None | Backlog | Spike: what would actually force a schema 3. |
+| Id | Priority | Status |
+|---|---|---|
+| SB23-680 | Urgent | In Progress |
+| SB23-736 | Urgent | Todo |
+| SB23-737 | High | Todo |
+| SB23-739 | High | In Progress |
+| SB23-742 | High | Todo |
+| SB23-753 | High | In Progress |
+| SB23-754 | High | Todo |
+| SB23-755 | High | Todo |
+| SB23-756 | High | Todo |
+| SB23-738 | Medium | In Progress |
+| SB23-740 | Medium | In Progress |
+| SB23-741 | Medium | Backlog |
+| SB23-743 | Medium | Backlog |
+| SB23-745 | Medium | Backlog |
+| SB23-746 | Medium | Todo |
+| SB23-751 | Medium | Backlog |
+| SB23-744 | Low | Backlog |
+| SB23-747 | Low | Backlog |
+| SB23-748 | Low | Backlog |
+| SB23-749 | Low | In Progress |
+| SB23-752 | None | Backlog |
 
 ### Cross-linked — owned by adopter projects
 
 These are tagged `hextap:adopter` and stay visible from the platform side, but they are **not**
 platform work and must not be pulled into the platform backlog.
 
-| Id | Project | Priority | Status | One-line |
-|---|---|---|---|---|
-| SB23-314 | `better-ccflare` | Medium | Backlog | `bun test` teardown errors can make the exit code non-deterministic. |
-| SB23-750 | `better-ccflare` | Medium | Backlog | Verify the running process and SQLite schema compatibility — needs a maintenance window. |
-| SB23-713 | `claude-peers` | Low | — | Distribute claude-peers via the tap. |
+| Id | Project | Priority | Status |
+|---|---|---|---|
+| SB23-314 | `better-ccflare` | Medium | Backlog |
+| SB23-750 | `better-ccflare` | Medium | Backlog |
+| SB23-713 | `claude-peers` | Low | — |
 
 ### Documentation surfaces
 
@@ -344,9 +377,23 @@ gh api repos/SijanC147/hextap-toolkit/releases \
   --jq '.[]|"\(.tag_name) id=\(.id) immutable=\(.immutable)"'
 gh api repos/SijanC147/hextap-toolkit/tags --jq '.[]|"\(.name) \(.commit.sha)"'
 
-# Any run ID in this file: name, trigger, conclusion, and the commit it ran on
-gh api repos/SijanC147/hextap-toolkit/actions/runs/33232555139 \
+# Any run ID in this file: name, trigger, conclusion, and the commit it ran on.
+# Substitute the repository that owns the run — a run ID is only valid in its own
+# repository, and asking the wrong one returns a 404 that looks like a missing run.
+#   source runs  -> hextap-toolkit | claude-rc-proxy | better-ccflare
+#   tap CI runs  -> homebrew-hextap
+gh api repos/SijanC147/<REPO>/actions/runs/<RUN_ID> \
   --jq '"\(.name) | \(.head_branch) | \(.event) | \(.conclusion) | \(.head_sha)"'
+
+# Worked examples, one of each
+gh api repos/SijanC147/hextap-toolkit/actions/runs/33232555139 --jq '.conclusion'   # toolkit release
+gh api repos/SijanC147/claude-rc-proxy/actions/runs/33237547108 --jq '.conclusion'  # adopter release
+gh api repos/SijanC147/homebrew-hextap/actions/runs/33237683107 --jq '.conclusion'  # tap CI
+
+# Job-level detail, which is what distinguishes "the Formula failed to publish"
+# from "an unrelated job failed and took the run's conclusion with it"
+gh api repos/SijanC147/<REPO>/actions/runs/<RUN_ID>/jobs \
+  --jq '.jobs[]|"\(.name): \(.conclusion)"'
 
 # Tap publication, and tap protection
 gh api repos/SijanC147/homebrew-hextap/commits/f8719fb0 --jq '.commit.message'
@@ -361,9 +408,22 @@ hextap --version
 brew list --versions hextap claude-rc-proxy better-ccflare
 ```
 
-Recovery runs live in the **source** repository, not the tap — query
-`repos/SijanC147/<source-repo>/actions/runs/<id>`. Querying the tap for them returns `404` and
-that `404` means the wrong repository was asked, not that the recovery never happened.
+Recovery runs live in the **source** repository, not the tap. Querying the tap for them returns
+`404`, and that `404` means the wrong repository was asked, not that the recovery never happened.
+
+### Linear state
+
+The GitHub commands above cover the release, tap and install identifiers. They do **not** cover the
+defect list, which is Linear's, and no `gh` command can. Use the Linear MCP tools or the Linear API:
+
+```
+list_issues(project: "hextap")          # current platform issues, priorities, statuses
+get_issue("SB23-745")                   # one issue, with its full description and comments
+list_comments(issueId: "SB23-745")      # the worklog, including evidence posted by agents
+```
+
+Cross-linked adopter issues live in the `better-ccflare` and `claude-peers` projects, not in
+`hextap` — `list_issues(project: "hextap")` will not return them.
 
 ## Maintaining this file
 
