@@ -58,22 +58,28 @@ Read the gate columns independently. **A failed release run does not mean the re
 failed** — for `0.1.0` and `0.5.0` the immutable GitHub release published successfully and the run
 failed later, at the separate Homebrew boundary.
 
-The PR merge commit equals the tag commit in all eleven rows; that identity is the source gate's
-evidence, and it was checked, not assumed.
+**Source gate — evidenced for every row, not inferred from identity.** Merge/tag identity alone
+proves only that the tag names the merge commit; it does not prove the PR-head check passed or that
+protection was enforced. So each row carries its own **PR head CI** and **merged-`main` CI** run.
+All eleven pairs are `success`, the PR merge commit equals the tag commit in all eleven rows, and
+`hextap/main` + `hextap/release-tags` were `active` throughout. The source gate passed for every
+version; there is no column for it because the value never varies.
 
-| Version | PR | Merge / tag commit | Release run | Release ID | **Release gate** | Homebrew step in that run | Tap commit | Tap commit author | Tap CI run | **Tap gate** |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32980009852` | `377208649` | **passed** | **failed** — recovery `32990280006` also failed | `9d27f112` | **Sean Bugeja** | `32981835518` | **never evaluated** — `Published Formula gate` skipped |
-| `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32996698520` | `377318696` | passed | passed | `345653c0` | GitHub Actions | `32997289004` | passed |
-| `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33004764036` | `377369388` | passed | passed | `3cc76f5d` | GitHub Actions | `33005207889` | passed |
-| `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33015551268` | `377435759` | passed | passed | `2aaf9df9` | GitHub Actions | `33016011545` | passed |
-| `v0.3.0` | #7 | `16117b0839fc70487aab9491ee3665379c1f026c` | `33024860915` | `377484943` | passed | passed | `dee6a25c` | GitHub Actions | `33025200293` | passed |
-| `v0.3.1` | #8 | `b6a270c29aa02e9b0c76c1d638e8f0d100cba925` | `33026549801` | `377493707` | passed | passed | `3ea83f86` | GitHub Actions | `33026787454` | passed |
-| `v0.4.0` | #9 | `f3106610e2ffe4aeb673721219592816a3ef8c1e` | `33038299518` | `377559153` | passed | passed | `2519d6f0` | GitHub Actions | `33038612791` | passed |
-| `v0.4.1` | #10 | `67898bb09280a5325b89c1b23a70f2fc8b64ffae` | `33042920074` | `377586076` | passed | passed | `dd0b55e0` | GitHub Actions | `33043233099` | passed |
-| `v0.4.2` | #11 | `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26` | `33048934828` | `377628533` | passed | passed | `3e30186f` | GitHub Actions | `33049332506` | passed |
-| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33223146605` | `378825128` | **passed** | **failed** — recovery `33223947922` passed | `895c1d3b` | **Sean Bugeja** | `33223670639` | passed |
-| `v0.6.0` | #13 | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `33232555139` | `378869000` | passed | passed | `f8719fb0` | GitHub Actions | `33232801566` | passed |
+A **bold tap commit** was hand-authored by a person; the rest were written by the publisher.
+
+| Version | PR | Merge / tag commit | PR head CI | Merged-`main` CI | Release run | Release ID | **Release gate** | Homebrew step | Tap commit | Tap CI | **Tap gate** |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32838086815` | `32969601857` | `32980009852` | `377208649` | **passed** | **failed** — recovery `32990280006` also failed | **`9d27f112`** | `32981835518` | **failed** — see below |
+| `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32995754608` | `32996124215` | `32996698520` | `377318696` | passed | passed | `345653c0` | `32997289004` | passed |
+| `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33003923022` | `33004349130` | `33004764036` | `377369388` | passed | passed | `3cc76f5d` | `33005207889` | passed |
+| `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33014779714` | `33015151916` | `33015551268` | `377435759` | passed | passed | `2aaf9df9` | `33016011545` | passed |
+| `v0.3.0` | #7 | `16117b0839fc70487aab9491ee3665379c1f026c` | `33024390659` | `33024655766` | `33024860915` | `377484943` | passed | passed | `dee6a25c` | `33025200293` | passed |
+| `v0.3.1` | #8 | `b6a270c29aa02e9b0c76c1d638e8f0d100cba925` | `33026009028` | `33026299647` | `33026549801` | `377493707` | passed | passed | `3ea83f86` | `33026787454` | passed |
+| `v0.4.0` | #9 | `f3106610e2ffe4aeb673721219592816a3ef8c1e` | `33037762660` | `33038031679` | `33038299518` | `377559153` | passed | passed | `2519d6f0` | `33038612791` | passed |
+| `v0.4.1` | #10 | `67898bb09280a5325b89c1b23a70f2fc8b64ffae` | `33042376451` | `33042645416` | `33042920074` | `377586076` | passed | passed | `dd0b55e0` | `33043233099` | passed |
+| `v0.4.2` | #11 | `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26` | `33048175244` | `33048572779` | `33048934828` | `377628533` | passed | passed | `3e30186f` | `33049332506` | passed |
+| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33222541721` | `33222845927` | `33223146605` | `378825128` | **passed** | **failed** — recovery `33223947922` passed | **`895c1d3b`** | `33223670639` | passed |
+| `v0.6.0` | #13 | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `33232103954` | `33232339531` | `33232555139` | `378869000` | passed | passed | `f8719fb0` | `33232801566` | passed |
 
 ### Reading the two exceptional rows
 
@@ -84,17 +90,27 @@ in a way no single "did it ship?" column could express:
 
 - **`v0.5.0` — tap gate passed.** The Formula was hand-authored into the tap (`895c1d3b`, tap
   PR #13 `a9a96e62`) and `brew test-bot` `33223670639` passed on that SHA.
-- **`v0.1.0` — tap gate never evaluated.** The Formula was hand-authored (`9d27f112`, tap PR #9),
-  but job level on run `32981835518` shows `test-bot (macos-15)` **failure**,
-  `Claude RC proxy release tooling` success, and **`Published Formula gate` skipped**. The job
-  that validates the published Formula never executed. That is weaker than failure: *failed*
-  implies a verdict was reached against the Formula, and none was. `v0.1.1` superseded it about
-  four hours later, so none ever was.
+- **`v0.1.0` — tap gate failed.** The gate asks whether tap CI passed on that exact SHA. Run
+  `32981835518` concluded **failure**, so the answer is no and the gate did not pass.
+
+  One further detail, which narrows *what* failed without softening *that* it failed. Job level:
+  `test-bot (macos-15)` **failure**, `Claude RC proxy release tooling` success, and
+  **`Published Formula gate` skipped** — the Formula-validating job never executed, because it was
+  skipped once `test-bot` failed. So the gate failed on `test-bot`, and **no verdict was ever
+  reached on the Formula itself**. `v0.1.1` superseded the version about four hours later, so none
+  ever was. The gate outcome is *failed*; the Formula's own status is *unknown*.
 
 Every version from `0.1.1` on has `Published Formula gate: success` on its own tap commit.
 `v0.1.0` is the sole exception — and **nothing in a commit-only view could have surfaced it**,
-because a skipped gate and a passed gate render identically when only the commit is recorded. That
-is the entire justification for the tap CI column existing.
+because a failing tap run and a passing one render identically when only the commit is recorded.
+That is the entire justification for the tap CI column existing.
+
+This row has been rewritten four times, and the last two swings are worth recording because they
+went in opposite directions. It was called *failed*, then over-corrected to *never evaluated* on
+the strength of the skipped job, and is now *failed* again with the skipped job kept as the
+narrower point it actually supports. The lesson is that the gate's verdict is whatever its own
+stated definition asks — here, "did tap CI pass on that exact SHA" — and a detail discovered one
+level down refines that answer without replacing it.
 
 Nine of the eleven tap commits were written by the automated publisher. The two hand-authored
 exceptions are exactly the two versions whose Homebrew step failed, so commit authorship is a
