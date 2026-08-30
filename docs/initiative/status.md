@@ -106,7 +106,7 @@ exact SHA. Both columns are therefore given; a commit alone does not pass this g
 
 | Version | Tap commit | Commit author | Tap CI on that SHA | How it got there |
 |---|---|---|---|---|
-| `0.1.0` | `9d27f112` | **Sean Bugeja** | `32981835518` **failure** | Hand-authored bootstrap, tap PR #9, after the publisher failed. **The tap gate did not pass for this version.** |
+| `0.1.0` | `9d27f112` | **Sean Bugeja** | `32981835518` **failure — Formula gate skipped** | Hand-authored bootstrap, tap PR #9, after the publisher failed. **The tap gate was never evaluated for this version.** See below. |
 | `0.1.1` | `345653c0` | GitHub Actions | `32997289004` success | Publisher |
 | `0.1.2` | `3cc76f5d` | GitHub Actions | `33005207889` success | Publisher |
 | `0.2.0` | `2aaf9df9` | GitHub Actions | `33016011545` success | Publisher |
@@ -118,11 +118,28 @@ exact SHA. Both columns are therefore given; a commit alone does not pass this g
 | `0.5.0` | `895c1d3b` | **Sean Bugeja** | `33223670639` success | Hand-authored, merged by tap PR #13 (`a9a96e62`) — see the sequence below. |
 | `0.6.0` | `f8719fb0` | GitHub Actions | `33232801566` success | Publisher, within release run `33232555139`. |
 
-**`0.1.0` is the row that shows why both columns are needed.** Its Formula reached the tap, so a
-commit-only table would have read as a pass — but `brew test-bot` **failed** on that SHA. The tap
-gate never passed for `0.1.0`; `v0.1.1` superseded it four hours later. An earlier draft of this
-document recorded the commit without the run and stated the Formula "reached the tap anyway",
-which read as success. That is precisely the collapse this file is supposed to prevent.
+**`0.1.0` is the row that shows why both columns are needed**, and it needs stating carefully,
+because the run conclusion alone still overstates what is known. Job level, run `32981835518`:
+
+| Job | Conclusion |
+|---|---|
+| `test-bot (macos-15)` | **failure** |
+| `Claude RC proxy release tooling` | success |
+| `Published Formula gate` | **skipped** |
+
+The job that validates the published Formula **never executed** — it was skipped when `test-bot`
+failed. So `0.1.0` is not "the tap gate was evaluated and rejected it". It is **"the gate that
+validates the Formula was never run against that Formula"**. That is a weaker state of knowledge
+than failure, and the distinction is the point: *failed* implies a verdict was reached, and none
+was. `v0.1.1` superseded it about four hours later, so it never was.
+
+Every published version from `0.1.1` on has `Published Formula gate: success` on its own tap
+commit. `0.1.0` is the sole exception, and nothing in a commit-only view could have shown it — a
+skipped gate and a passed gate render identically when only the commit is recorded.
+
+Two earlier drafts of this file got this row wrong in the same direction. The first said the
+Formula "reached the tap anyway", which read as success. The second said the tap gate "failed",
+which claimed a verdict that was never reached. Both were more confident than the evidence.
 
 Nine of the eleven Formula commits were written by the automated publisher. The **two exceptions
 are exactly the two versions whose release run failed at the Homebrew boundary** — `0.1.0` and
