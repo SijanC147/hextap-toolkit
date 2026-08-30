@@ -133,17 +133,45 @@ the publisher worked. Neither is true.
 ### Recovery precedent
 
 `homebrew-only` dispatch completes the Homebrew stage without rebuilding or re-releasing, and has
-run green three times: `33223947922` (toolkit `v0.5.0`), `33000535526` (claude-rc-proxy `v0.1.1`),
-`33051618673` (better-ccflare, idempotent rerun). Each is a `workflow_dispatch` run in the
-**source** repository, not the tap — querying the tap for them returns `404`.
+run green three times. Each is a `workflow_dispatch` run in the **source** repository, not the tap
+— querying the tap for them returns `404`.
 
-How much each of those runs actually *recovered* varies, and the run's green conclusion does not
-say. For `v0.5.0` the Formula bytes were already in place from tap PR #13 before the recovery run
-started; the run validated them rather than authoring them. Treat a green `homebrew-only` run as
-evidence that the Homebrew stage **now passes**, not as evidence of what put the Formula there —
-check the tap commit's authorship for that.
+The three are routinely cited together as evidence that the recovery path works. Traced
+individually, **they are three different events**, and only one of them is a publisher failure
+recovered by re-publishing:
 
-The recovery path works. The underlying failure has never been root-caused — **SB23-745**.
+| Run | Version | What actually happened |
+|---|---|---|
+| `33223947922` | toolkit `v0.5.0` | Formula bytes were **already in the tap** from PR #13 (`895c1d3b`, hand-authored) before this run started. It validated them; it did not author them. |
+| `33000535526` | claude-rc-proxy `v0.1.1` | The publisher **succeeded** — it pushed `00098656` at `18:19:08`, inside the failing run. Tap CI `32999041554` then failed, and the release run failed 6 seconds later because it was waiting on it. This run is a **retry**, not a re-publication. |
+| `33051618673` | better-ccflare | Not a recovery at all. Stable run `33050987950` had already **succeeded** at `07:52:08`; this ran at `07:53:27` as the documented idempotent rerun. |
+
+None of the three is "the publisher failed, and the recovery published successfully". That is worth
+knowing before concluding the recovery path is self-sufficient — for `v0.5.0` a person edited the
+tap first, and for better-ccflare nothing needed recovering.
+
+### What failed in the claude-rc-proxy case — SB23-745
+
+The `v0.1.1` failure is the one with a legible cause, and it is not the publisher. Tap run
+`32999041554`, on the Formula commit the publisher had just pushed:
+
+| Job | Conclusion |
+|---|---|
+| `test-bot (macos-15)` | **success** |
+| `Published Formula gate` | **success** |
+| `Claude RC proxy release tooling` | **failure**, at step `Test release payload and publication logic` |
+
+The Formula published correctly and passed `brew test-bot`. An **unrelated job in the same tap
+workflow** failed, which set the run's overall conclusion to failure, which the source release run
+was waiting on — so the release failed at `Publish Formula and wait for tap CI` despite Homebrew
+publication having worked.
+
+That is this project's own founding error running backwards: a gate reading a *different* gate's
+result as its own. `Publish Formula and wait for tap CI` currently waits on the tap run's aggregate
+conclusion rather than on the jobs that actually evidence Formula publication.
+
+Recorded here as evidence, not as a fix. The remaining recurrences still need tracing before the
+cause is called — **SB23-745**.
 
 ## Gate status
 
