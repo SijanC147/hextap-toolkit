@@ -1,7 +1,9 @@
 # Hextap release architecture
 
-Status: release platform published; self-development orchestration is under
-review on an isolated toolkit feature branch.
+Status: shipped. The release platform and self-development orchestration are
+both published and in use across three adopters; `hextap dev` shipped in
+`v0.3.0`. This document describes accepted design — for release, gate and
+defect state, see `status.md` and the Linear `hextap` project.
 
 ## Components and trust boundaries
 
