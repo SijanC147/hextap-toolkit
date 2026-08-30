@@ -42,24 +42,63 @@ separate, and never collapsed into a single status:
 > **One passed gate never grants authority or proves the next.** Code approval is not tag
 > authority. A green source run is not Formula publication. Installation is not runtime health.
 
-## Toolkit release ledger
+## Per-version ledger
 
-Every `hextap-toolkit` release. The PR merge commit equals the tag commit in all eleven rows —
-that identity is itself the source gate's evidence, and it was checked, not assumed.
+**One row per version, and this table is the only place a version's outcome is stated.** Every
+identifier for a toolkit version — source, release, and tap — lives here. Prose elsewhere in this
+document points at these rows and does not restate them.
 
-| Release | PR | Merge / tag commit | Release run | Release ID | Outcome |
-|---|---|---|---|---|---|
-| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32980009852` | `377208649` | Source, build, publication, attestation and immutability passed; **failed only at `Publish Formula and wait for tap CI`**. Recovery `32990280006` also failed. A hand-authored bootstrap put the Formula in the tap (`9d27f112`, tap PR #9), but **tap CI failed on that SHA too** (`32981835518`), so the tap gate never passed for this version. `v0.1.1` superseded it. |
-| `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32996698520` | `377318696` | Passed. Fixed explicit recovery / tap-run selection. |
-| `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33004764036` | `377369388` | Passed. Made generated ruleset defaults explicit. |
-| `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33015551268` | `377435759` | Passed. Cross-agent skill installer. |
-| `v0.3.0` | #7 | `16117b0839fc70487aab9491ee3665379c1f026c` | `33024860915` | `377484943` | Passed. `hextap dev`. |
-| `v0.3.1` | #8 | `b6a270c29aa02e9b0c76c1d638e8f0d100cba925` | `33026549801` | `377493707` | Passed. Skill-discovery coverage. |
-| `v0.4.0` | #9 | `f3106610e2ffe4aeb673721219592816a3ef8c1e` | `33038299518` | `377559153` | Passed. Schema 2 — pinned Bun, explicit target artifacts, Windows amd64, tap-owned Formula profiles. |
-| `v0.4.1` | #10 | `67898bb09280a5325b89c1b23a70f2fc8b64ffae` | `33042920074` | `377586076` | Passed. Hardened output ownership and profile reconciliation. |
-| `v0.4.2` | #11 | `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26` | `33048934828` | `377628533` | Passed. Normalized Windows runner paths. |
-| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33223146605` | `378825128` | **Failed at Homebrew.** Recovery `33223947922` (`workflow_dispatch`, `homebrew-only`, same head `1cd2338f`) passed without rebuilding. |
-| `v0.6.0` | #13 | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `33232555139` | `378869000` | Passed **including** Homebrew publication. Current stable. |
+That constraint is deliberate and was learned the hard way: the `0.1.0` outcome was previously
+written in three places (a narrative sentence, a release row, and a job table), was wrong three
+times in three different directions, and each correction fixed one representation while leaving
+another standing. A fact stated once cannot go inconsistent with itself. It is the same argument
+this document makes about not duplicating Linear defect descriptions, applied one level up.
+
+Read the gate columns independently. **A failed release run does not mean the release gate
+failed** — for `0.1.0` and `0.5.0` the immutable GitHub release published successfully and the run
+failed later, at the separate Homebrew boundary.
+
+The PR merge commit equals the tag commit in all eleven rows; that identity is the source gate's
+evidence, and it was checked, not assumed.
+
+| Version | PR | Merge / tag commit | Release run | Release ID | **Release gate** | Homebrew step in that run | Tap commit | Tap commit author | Tap CI run | **Tap gate** |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32980009852` | `377208649` | **passed** | **failed** — recovery `32990280006` also failed | `9d27f112` | **Sean Bugeja** | `32981835518` | **never evaluated** — `Published Formula gate` skipped |
+| `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32996698520` | `377318696` | passed | passed | `345653c0` | GitHub Actions | `32997289004` | passed |
+| `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33004764036` | `377369388` | passed | passed | `3cc76f5d` | GitHub Actions | `33005207889` | passed |
+| `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33015551268` | `377435759` | passed | passed | `2aaf9df9` | GitHub Actions | `33016011545` | passed |
+| `v0.3.0` | #7 | `16117b0839fc70487aab9491ee3665379c1f026c` | `33024860915` | `377484943` | passed | passed | `dee6a25c` | GitHub Actions | `33025200293` | passed |
+| `v0.3.1` | #8 | `b6a270c29aa02e9b0c76c1d638e8f0d100cba925` | `33026549801` | `377493707` | passed | passed | `3ea83f86` | GitHub Actions | `33026787454` | passed |
+| `v0.4.0` | #9 | `f3106610e2ffe4aeb673721219592816a3ef8c1e` | `33038299518` | `377559153` | passed | passed | `2519d6f0` | GitHub Actions | `33038612791` | passed |
+| `v0.4.1` | #10 | `67898bb09280a5325b89c1b23a70f2fc8b64ffae` | `33042920074` | `377586076` | passed | passed | `dd0b55e0` | GitHub Actions | `33043233099` | passed |
+| `v0.4.2` | #11 | `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26` | `33048934828` | `377628533` | passed | passed | `3e30186f` | GitHub Actions | `33049332506` | passed |
+| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33223146605` | `378825128` | **passed** | **failed** — recovery `33223947922` passed | `895c1d3b` | **Sean Bugeja** | `33223670639` | passed |
+| `v0.6.0` | #13 | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `33232555139` | `378869000` | passed | passed | `f8719fb0` | GitHub Actions | `33232801566` | passed |
+
+### Reading the two exceptional rows
+
+`v0.1.0` and `v0.5.0` are why the release and tap gates are separate columns rather than one
+status. In both, the **release gate passed** — the immutable GitHub release was published — and the
+Homebrew step of the same run failed afterwards. Their tap outcomes then diverge, and they diverge
+in a way no single "did it ship?" column could express:
+
+- **`v0.5.0` — tap gate passed.** The Formula was hand-authored into the tap (`895c1d3b`, tap
+  PR #13 `a9a96e62`) and `brew test-bot` `33223670639` passed on that SHA.
+- **`v0.1.0` — tap gate never evaluated.** The Formula was hand-authored (`9d27f112`, tap PR #9),
+  but job level on run `32981835518` shows `test-bot (macos-15)` **failure**,
+  `Claude RC proxy release tooling` success, and **`Published Formula gate` skipped**. The job
+  that validates the published Formula never executed. That is weaker than failure: *failed*
+  implies a verdict was reached against the Formula, and none was. `v0.1.1` superseded it about
+  four hours later, so none ever was.
+
+Every version from `0.1.1` on has `Published Formula gate: success` on its own tap commit.
+`v0.1.0` is the sole exception — and **nothing in a commit-only view could have surfaced it**,
+because a skipped gate and a passed gate render identically when only the commit is recorded. That
+is the entire justification for the tap CI column existing.
+
+Nine of the eleven tap commits were written by the automated publisher. The two hand-authored
+exceptions are exactly the two versions whose Homebrew step failed, so commit authorship is a
+durable signal for which versions did not publish cleanly, independent of anyone recording it.
 
 All eleven releases report `immutable: true`.
 
@@ -96,57 +135,7 @@ first clean RC-to-stable sequence, and the intended shape of the flow.
 **source** repositories' rulesets. Earlier notes recorded `21411731` / `21411735` as belonging to
 the tap; they belong to `hextap-toolkit`, and the tap has none — see the tap gate below.
 
-### Tap Formula history — `Formula/hextap.rb`
-
-Every toolkit version has a corresponding tap commit. This is the **tap** gate's evidence, and it
-is deliberately listed separately from the release runs above, because the two do not always agree.
-
-The tap gate requires **both** a real tap commit **and** a passing `brew test-bot` run on that
-exact SHA. Both columns are therefore given; a commit alone does not pass this gate.
-
-| Version | Tap commit | Commit author | Tap CI on that SHA | How it got there |
-|---|---|---|---|---|
-| `0.1.0` | `9d27f112` | **Sean Bugeja** | `32981835518` **failure — Formula gate skipped** | Hand-authored bootstrap, tap PR #9, after the publisher failed. **The tap gate was never evaluated for this version.** See below. |
-| `0.1.1` | `345653c0` | GitHub Actions | `32997289004` success | Publisher |
-| `0.1.2` | `3cc76f5d` | GitHub Actions | `33005207889` success | Publisher |
-| `0.2.0` | `2aaf9df9` | GitHub Actions | `33016011545` success | Publisher |
-| `0.3.0` | `dee6a25c` | GitHub Actions | `33025200293` success | Publisher |
-| `0.3.1` | `3ea83f86` | GitHub Actions | `33026787454` success | Publisher |
-| `0.4.0` | `2519d6f0` | GitHub Actions | `33038612791` success | Publisher |
-| `0.4.1` | `dd0b55e0` | GitHub Actions | `33043233099` success | Publisher |
-| `0.4.2` | `3e30186f` | GitHub Actions | `33049332506` success | Publisher |
-| `0.5.0` | `895c1d3b` | **Sean Bugeja** | `33223670639` success | Hand-authored, merged by tap PR #13 (`a9a96e62`) — see the sequence below. |
-| `0.6.0` | `f8719fb0` | GitHub Actions | `33232801566` success | Publisher, within release run `33232555139`. |
-
-**`0.1.0` is the row that shows why both columns are needed**, and it needs stating carefully,
-because the run conclusion alone still overstates what is known. Job level, run `32981835518`:
-
-| Job | Conclusion |
-|---|---|
-| `test-bot (macos-15)` | **failure** |
-| `Claude RC proxy release tooling` | success |
-| `Published Formula gate` | **skipped** |
-
-The job that validates the published Formula **never executed** — it was skipped when `test-bot`
-failed. So `0.1.0` is not "the tap gate was evaluated and rejected it". It is **"the gate that
-validates the Formula was never run against that Formula"**. That is a weaker state of knowledge
-than failure, and the distinction is the point: *failed* implies a verdict was reached, and none
-was. `v0.1.1` superseded it about four hours later, so it never was.
-
-Every published version from `0.1.1` on has `Published Formula gate: success` on its own tap
-commit. `0.1.0` is the sole exception, and nothing in a commit-only view could have shown it — a
-skipped gate and a passed gate render identically when only the commit is recorded.
-
-Two earlier drafts of this file got this row wrong in the same direction. The first said the
-Formula "reached the tap anyway", which read as success. The second said the tap gate "failed",
-which claimed a verdict that was never reached. Both were more confident than the evidence.
-
-Nine of the eleven Formula commits were written by the automated publisher. The **two exceptions
-are exactly the two versions whose release run failed at the Homebrew boundary** — `0.1.0` and
-`0.5.0`. Commit authorship is therefore a cheap, durable signal for which versions did not publish
-cleanly, independent of whether anyone remembered to write it down.
-
-The `v0.5.0` sequence, from run and commit timestamps:
+### The `v0.5.0` ordering
 
 | Time (UTC, 2026-08-29) | Event |
 |---|---|
@@ -159,11 +148,6 @@ The `v0.5.0` sequence, from run and commit timestamps:
 That ordering matters and is easy to get backwards: the recovery run did not author the `0.5.0`
 Formula, it validated one that was already there. Recording the recovery as having "published"
 `0.5.0` would credit the automation with a step a person performed.
-
-These two rows are the point of keeping the release and tap gates apart. In both, the **release**
-gate failed while the **tap** gate ended up passing — by a different route each time. A reader who
-collapsed the two into one status would conclude either that those versions never shipped or that
-the publisher worked. Neither is true.
 
 ### Recovery precedent
 
@@ -454,7 +438,9 @@ gh api repos/SijanC147/homebrew-hextap/rulesets
 # internal/onboard's validateOnlineRulesets does.
 gh api repos/SijanC147/hextap-toolkit/rulesets --jq '.[]|"\(.id) \(.name) \(.enforcement)"'
 gh api repos/SijanC147/hextap-toolkit/rulesets/21411731 \
-  --jq '{enforcement,conditions,bypass_actors,rules:[.rules[]|{type,parameters}]}'
+  --jq '{target,enforcement,conditions,bypass_actors,rules:[.rules[]|{type,parameters}]}'
+# `target` matters: a ruleset drifting between branch and tag protection is
+# invisible if you compare only conditions and rules.
 
 # Install gate
 hextap --version
