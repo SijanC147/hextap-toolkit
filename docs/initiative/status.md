@@ -72,10 +72,24 @@ ruleset was enforced when the merge happened. Ruleset **version history** suppli
 | `21411735` `hextap/release-tags` | `47577264` | `2026-08-25T10:22:35Z` | tag | `active` |
 
 `hextap/main` has two versions, both created that day; `hextap/release-tags` has one and has never
-been modified. Both predate `v0.1.0`, published `2026-08-26T14:28:43Z`. So **both rulesets have
-been `active`, with unchanged definitions, since before the first release** — which covers every
-row in the table. Enforcement is part of a ruleset's definition, so toggling it would have created
-a later version, and none exists.
+been modified. Enforcement is part of a ruleset's definition, so toggling it would have created a
+later version, and none exists.
+
+Compare that against **the events the gate protects — the merge and the tag creation — not release
+publication**, which happens after the tag push and so is too late to evidence anything. The
+earliest protected events in this table belong to `v0.1.0`:
+
+| Event | Time (UTC) |
+|---|---|
+| Last ruleset change (`47577297`) | `2026-08-25T10:22:54Z` |
+| `v0.1.0` merge commit `2d4b4615` | `2026-08-26T12:37:51Z` |
+| `v0.1.0` tag created (annotated) | `2026-08-26T14:23:37Z` |
+
+The last ruleset change predates `v0.1.0`'s merge by **1d 2h** and its tag by **1d 4h**. Every
+later version's merge and tag are later still, so **both rulesets were `active` with unchanged
+definitions before the earliest protected event in the table, and remained so throughout** — which
+covers every row. (Release *publication* at `2026-08-26T14:28:43Z` is five minutes after the tag
+and is not what the claim rests on.)
 
 ```sh
 # The events protection must be compared against: the merge commit and the tag
@@ -483,8 +497,11 @@ Every identifier in this document is checkable. None of these commands mutate an
 # Releases, immutability, and tag-to-commit identity.
 # <REPO> is whichever repository owns the row you are checking:
 #   hextap-toolkit | claude-rc-proxy | better-ccflare
-# Release IDs and tags are per-repository, so querying the toolkit for an adopter's
-# release (378892646, 378533895) returns unrelated data rather than an error.
+# Release IDs and tags are per-repository. This endpoint is repository-scoped, so
+# querying the toolkit for an adopter's release ID (378892646, 378533895) returns
+# 404 rather than another project's data — the same signal as a wrong-repository
+# run ID below. A 404 here means the wrong repository was asked, not that the
+# release is missing.
 gh release list --repo SijanC147/<REPO> --limit 20
 gh api repos/SijanC147/<REPO>/releases \
   --jq '.[]|"\(.tag_name) id=\(.id) immutable=\(.immutable)"'
