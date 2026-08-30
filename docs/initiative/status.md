@@ -160,13 +160,12 @@ content of this section, because taking the wrong one gets the gate's verdict ba
 | `v0.1.0` | `9d27f112` | `32981835518` **failure** | `ded1feb1` | `32991730400` **success** |
 | `v0.5.0` | `895c1d3b` | `33223670639` success | `a9a96e62` | `33223845247` **success** |
 
-For `v0.1.0` the two disagree. The `pull_request` run failed on `test-bot (macos-15)`, which
-skipped `Published Formula gate`. The `push` run on the merge commit — `32991730400`, at
-`2026-08-26T17:00:55Z` — has **all three jobs green, `Published Formula gate` included**, and
-`Formula/hextap.rb` at `ded1feb1` carries the `v0.1.0` release URLs and SHA-256 values. So the
-published `0.1.0` Formula was validated and **the tap gate passed**.
-
-Every one of the eleven versions passed the tap gate on its landed SHA.
+For `v0.1.0` the two runs disagree, which is why picking the right one decides the row. The
+`pull_request` run failed on `test-bot (macos-15)`, which skipped `Published Formula gate`. The
+`push` run on the merge commit — `32991730400`, at `2026-08-26T17:00:55Z` — has all three jobs
+green, `Published Formula gate` included, and `Formula/hextap.rb` at `ded1feb1` carries the
+`v0.1.0` release URLs and SHA-256 values, so it is the published `0.1.0` Formula that was
+validated. The verdict this evidence supports is in the ledger row, not here.
 
 **This row has been wrong five times, and the reason is worth more than the row.** It was written
 as "reached the tap anyway", then "the tap gate failed", then "never evaluated", then "failed"
@@ -564,13 +563,23 @@ gh api repos/SijanC147/<REPO>/actions/runs/<RUN_ID>/jobs \
 gh pr view <PR> --repo SijanC147/<REPO> \
   --json number,headRefOid,mergeCommit,mergedAt,state
 gh api repos/SijanC147/<REPO>/actions/runs/<PR_RUN_ID> --jq '.head_sha'   # == headRefOid
-gh api repos/SijanC147/<REPO>/git/ref/tags/<TAG> --jq '.object.sha'       # tag -> commit
+# Annotated tags need dereferencing: git/ref returns the TAG OBJECT's sha, not the
+# commit, so comparing it to a merge commit reports a false mismatch every time.
+# All three current tags are annotated.
+TAG_OBJ=$(gh api repos/SijanC147/<REPO>/git/ref/tags/<TAG> --jq '.object.sha')
+gh api repos/SijanC147/<REPO>/git/ref/tags/<TAG> --jq '.object.type'      # "tag" = annotated
+gh api repos/SijanC147/<REPO>/git/tags/$TAG_OBJ --jq '.object.sha'        # the commit
+# A lightweight tag instead returns .object.type == "commit"; use that sha directly.
 
 # Tap gate: use the run against the commit that LANDED on tap main. A tap PR also
 # produces a pull_request run against its branch head, which is not the SHA
 # consumers receive and can disagree with the merged-SHA run.
-gh api "repos/SijanC147/homebrew-hextap/actions/runs?head_sha=<LANDED_SHA>" \
-  --jq '.workflow_runs[]|"\(.id) \(.event)/\(.conclusion)"'
+# Scope to the tap's test workflow. The repository-wide runs endpoint returns every
+# workflow that ran on the SHA, so an unrelated green run can be mistaken for the tap
+# gate. scripts/publish-homebrew.sh queries tests.yml specifically for this reason;
+# the projection below also prints .path so the workflow can be confirmed.
+gh api "repos/SijanC147/homebrew-hextap/actions/workflows/tests.yml/runs?head_sha=<LANDED_SHA>" \
+  --jq '.workflow_runs[]|"\(.id) \(.path) \(.event)/\(.conclusion)"'
 
 # Tap publication, and tap protection
 gh api repos/SijanC147/homebrew-hextap/commits/f8719fb0 --jq '.commit.message'
