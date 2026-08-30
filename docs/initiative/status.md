@@ -137,8 +137,7 @@ run green three times. Each is a `workflow_dispatch` run in the **source** repos
 — querying the tap for them returns `404`.
 
 The three are routinely cited together as evidence that the recovery path works. Traced
-individually, **they are three different events**, and only one of them is a publisher failure
-recovered by re-publishing:
+individually, **they are three different events**:
 
 | Run | Version | What actually happened |
 |---|---|---|
@@ -146,9 +145,20 @@ recovered by re-publishing:
 | `33000535526` | claude-rc-proxy `v0.1.1` | The publisher **succeeded** — it pushed `00098656` at `18:19:08`, inside the failing run. Tap CI `32999041554` then failed, and the release run failed 6 seconds later because it was waiting on it. This run is a **retry**, not a re-publication. |
 | `33051618673` | better-ccflare | Not a recovery at all. Stable run `33050987950` had already **succeeded** at `07:52:08`; this ran at `07:53:27` as the documented idempotent rerun. |
 
-None of the three is "the publisher failed, and the recovery published successfully". That is worth
-knowing before concluding the recovery path is self-sufficient — for `v0.5.0` a person edited the
-tap first, and for better-ccflare nothing needed recovering.
+**`homebrew-only` has never authored a Formula into the tap.** In all three cases the bytes were
+already there — placed by a person for `v0.5.0`, by the failing run's own publisher for
+claude-rc-proxy `v0.1.1`, and by an entirely successful run for better-ccflare. All three runs
+finished in **under 70 seconds** (58s, 65s, 61s), which is consistent with finding the tap already
+current rather than performing work.
+
+State the property precisely, because the loose version of this sentence has already misled this
+project once:
+
+> **Proven: idempotent `homebrew-only` re-validation, three times.**
+> **Never exercised: republish-after-publisher-failure.**
+
+"Recovery repeatedly proven" is the phrasing to avoid. It reads as the second property while only
+the first has evidence.
 
 ### What failed in the claude-rc-proxy case — SB23-745
 
@@ -167,11 +177,24 @@ was waiting on — so the release failed at `Publish Formula and wait for tap CI
 publication having worked.
 
 That is this project's own founding error running backwards: a gate reading a *different* gate's
-result as its own. `Publish Formula and wait for tap CI` currently waits on the tap run's aggregate
+result as its own. `Publish Formula and wait for tap CI` waits on the tap run's aggregate
 conclusion rather than on the jobs that actually evidence Formula publication.
 
-Recorded here as evidence, not as a fix. The remaining recurrences still need tracing before the
-cause is called — **SB23-745**.
+The source-side job timings localise the fault further, and rule the push logic out:
+
+| Time (UTC, 2026-08-26) | Event |
+|---|---|
+| `18:18:38` | `Publish Homebrew Formula` job starts. |
+| `18:19:06` | Step 8, `Publish Formula and wait for tap CI`, starts. |
+| `18:19:08` | Formula commit `00098656` lands in the tap — **2 seconds in**. The push succeeded. |
+| `18:21:47` | The same step **fails**, after a further 2m 39s. |
+| `18:21:50` | The job ends. |
+
+So the publisher pushed successfully almost immediately and then died in the **wait and
+tap-CI-correlation** phase — not in push, CAS, or retry. Whatever is wrong is downstream of
+publication, in run discovery and result interpretation.
+
+Recorded here as evidence, not as a fix, and not as a called root cause — **SB23-745**.
 
 ## Gate status
 
