@@ -45,7 +45,7 @@ that identity is itself the source gate's evidence, and it was checked, not assu
 
 | Release | PR | Merge / tag commit | Release run | Release ID | Outcome |
 |---|---|---|---|---|---|
-| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32980009852` | `377208649` | Source, build, publication, attestation and immutability passed; **failed only at `Publish Formula and wait for tap CI`**. Recovery `32990280006` also failed. Formula publication for this version was never completed — `v0.1.1` superseded it. |
+| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32980009852` | `377208649` | Source, build, publication, attestation and immutability passed; **failed only at `Publish Formula and wait for tap CI`**. Recovery `32990280006` also failed. The `0.1.0` Formula reached the tap anyway, by the tap-side bootstrap commit `9d27f112` (tap PR #9) rather than by the publisher. See the note below. |
 | `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32996698520` | `377318696` | Passed. Fixed explicit recovery / tap-run selection. |
 | `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33004764036` | `377369388` | Passed. Made generated ruleset defaults explicit. |
 | `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33015551268` | `377435759` | Passed. Cross-agent skill installer. |
@@ -87,13 +87,63 @@ first clean RC-to-stable sequence, and the intended shape of the flow.
 **source** repositories' rulesets. Earlier notes recorded `21411731` / `21411735` as belonging to
 the tap; they belong to `hextap-toolkit`, and the tap has none — see the tap gate below.
 
+### Tap Formula history — `Formula/hextap.rb`
+
+Every toolkit version has a corresponding tap commit. This is the **tap** gate's evidence, and it
+is deliberately listed separately from the release runs above, because the two do not always agree.
+
+| Version | Tap commit | Commit author | How it got there |
+|---|---|---|---|
+| `0.1.0` | `9d27f112` | **Sean Bugeja** | Hand-authored bootstrap, tap PR #9 — the release run's publisher had failed. |
+| `0.1.1` | `345653c0` | GitHub Actions | Publisher |
+| `0.1.2` | `3cc76f5d` | GitHub Actions | Publisher |
+| `0.2.0` | `2aaf9df9` | GitHub Actions | Publisher |
+| `0.3.0` | `dee6a25c` | GitHub Actions | Publisher |
+| `0.3.1` | `3ea83f86` | GitHub Actions | Publisher |
+| `0.4.0` | `2519d6f0` | GitHub Actions | Publisher |
+| `0.4.1` | `dd0b55e0` | GitHub Actions | Publisher |
+| `0.4.2` | `3e30186f` | GitHub Actions | Publisher |
+| `0.5.0` | `895c1d3b` | **Sean Bugeja** | Hand-authored, merged by tap PR #13 (`a9a96e62`) — see the sequence below. |
+| `0.6.0` | `f8719fb0` | GitHub Actions | Publisher, within release run `33232555139`. |
+
+Nine of the eleven Formula commits were written by the automated publisher. The **two exceptions
+are exactly the two versions whose release run failed at the Homebrew boundary** — `0.1.0` and
+`0.5.0`. Commit authorship is therefore a cheap, durable signal for which versions did not publish
+cleanly, independent of whether anyone remembered to write it down.
+
+The `v0.5.0` sequence, from run and commit timestamps:
+
+| Time (UTC, 2026-08-29) | Event |
+|---|---|
+| `00:18:40` | Release run `33223146605` starts. |
+| `00:24:56` | It **fails** at the Homebrew boundary. |
+| `00:32:39` | Tap PR #13 merges as `a9a96e62`, carrying the hand-authored Formula commit `895c1d3b`. |
+| `00:34:48` | `homebrew-only` recovery `33223947922` starts. |
+| `00:35:46` | It **passes** — against Formula bytes a human had already placed. |
+
+That ordering matters and is easy to get backwards: the recovery run did not author the `0.5.0`
+Formula, it validated one that was already there. Recording the recovery as having "published"
+`0.5.0` would credit the automation with a step a person performed.
+
+These two rows are the point of keeping the release and tap gates apart. In both, the **release**
+gate failed while the **tap** gate ended up passing — by a different route each time. A reader who
+collapsed the two into one status would conclude either that those versions never shipped or that
+the publisher worked. Neither is true.
+
 ### Recovery precedent
 
-`homebrew-only` dispatch recovers Formula publication without rebuilding or re-releasing, and has
-done so three times: `33223947922` (toolkit `v0.5.0`), `33000535526` (claude-rc-proxy `v0.1.1`),
+`homebrew-only` dispatch completes the Homebrew stage without rebuilding or re-releasing, and has
+run green three times: `33223947922` (toolkit `v0.5.0`), `33000535526` (claude-rc-proxy `v0.1.1`),
 `33051618673` (better-ccflare, idempotent rerun). Each is a `workflow_dispatch` run in the
-**source** repository, not the tap. The recovery path works; the underlying failure has never been
-root-caused — **SB23-745**.
+**source** repository, not the tap — querying the tap for them returns `404`.
+
+How much each of those runs actually *recovered* varies, and the run's green conclusion does not
+say. For `v0.5.0` the Formula bytes were already in place from tap PR #13 before the recovery run
+started; the run validated them rather than authoring them. Treat a green `homebrew-only` run as
+evidence that the Homebrew stage **now passes**, not as evidence of what put the Formula there —
+check the tap commit's authorship for that.
+
+The recovery path works. The underlying failure has never been root-caused — **SB23-745**.
 
 ## Gate status
 
