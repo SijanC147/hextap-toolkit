@@ -242,8 +242,15 @@ To be precise about why that matters, since it is easy to overstate: the tap doe
 package bytes. A rendered Formula carries the release URL and its SHA-256
 (`internal/formula/render.go`), and the assets themselves stay in the source repository's immutable
 release. What the tap holds is the **download instruction** — which URL every consumer fetches and
-which digest it is checked against. Unprotected, that is still the most valuable thing to tamper
-with in the platform, and it is the least protected repository in it. → **SB23-737**
+which digest it is checked against.
+
+That is not a smaller problem than "holding the bytes", it is a different one. Write access to the
+tap does not let an attacker swap the payload behind a fixed checksum; it lets them repoint the URL
+**and** supply a matching `sha256` in the same commit. Controlling both halves defeats checksum
+verification entirely, because the checksum is only ever compared against the value the tap itself
+supplies. The mitigation is therefore review and protection of tap commits, not stronger hashing.
+Unprotected, this is the least protected repository in the platform and the most valuable one to
+tamper with. → **SB23-737**
 
 The credential used to push those tap commits is a broad classic PAT rather than a tap-scoped
 one. → **SB23-736**
