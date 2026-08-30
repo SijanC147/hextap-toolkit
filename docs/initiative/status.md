@@ -61,9 +61,35 @@ failed later, at the separate Homebrew boundary.
 **Source gate — evidenced for every row, not inferred from identity.** Merge/tag identity alone
 proves only that the tag names the merge commit; it does not prove the PR-head check passed or that
 protection was enforced. So each row carries its own **PR head CI** and **merged-`main` CI** run.
-All eleven pairs are `success`, the PR merge commit equals the tag commit in all eleven rows, and
-`hextap/main` + `hextap/release-tags` were `active` throughout. The source gate passed for every
-version; there is no column for it because the value never varies.
+All eleven pairs are `success`, and the PR merge commit equals the tag commit in all eleven rows.
+
+Protection needs separate, dated evidence, because a CI run proves a conclusion and not that a
+ruleset was enforced when the merge happened. Ruleset **version history** supplies it:
+
+| Ruleset | Latest version | Last modified (UTC) | Target | Enforcement |
+|---|---|---|---|---|
+| `21411731` `hextap/main` | `47577297` | `2026-08-25T10:22:54Z` | branch | `active` |
+| `21411735` `hextap/release-tags` | `47577264` | `2026-08-25T10:22:35Z` | tag | `active` |
+
+`hextap/main` has two versions, both created that day; `hextap/release-tags` has one and has never
+been modified. Both predate `v0.1.0`, published `2026-08-26T14:28:43Z`. So **both rulesets have
+been `active`, with unchanged definitions, since before the first release** — which covers every
+row in the table. Enforcement is part of a ruleset's definition, so toggling it would have created
+a later version, and none exists.
+
+```sh
+gh api repos/SijanC147/hextap-toolkit/rulesets/21411731/history
+gh api repos/SijanC147/hextap-toolkit/rulesets/21411731/history/47577297 \
+  --jq '{name:.state.name,target:.state.target,enforcement:.state.enforcement}'
+```
+
+**The limit of that evidence, stated rather than glossed:** it establishes the rulesets' continuous
+configuration, not that any individual historical merge was evaluated against them.
+`repos/SijanC147/hextap-toolkit/rulesets/rule-suites`, which would carry per-evaluation records,
+returns `[]`. So per-merge enforcement records are **not available** for these releases, and no
+claim in this document rests on them.
+
+The source gate passed for every version; there is no column for it because the value never varies.
 
 A **bold tap commit** was hand-authored by a person; the rest were written by the publisher.
 
