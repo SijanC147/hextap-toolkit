@@ -184,6 +184,17 @@ platform work and must not be pulled into the platform backlog.
 | SB23-750 | `better-ccflare` | Medium | Backlog | Verify the running process and SQLite schema compatibility — needs a maintenance window. |
 | SB23-713 | `claude-peers` | Low | — | Distribute claude-peers via the tap. |
 
+### Documentation surfaces
+
+**GitBook — published and public.** GitBook project `hextap-toolkit` (workspace SB23,
+`site_qHQ9P`) is connected by Git Sync to `./docs` and serves
+**<https://sb23.gitbook.io/hextap-toolkit/>**, which returns HTTP `200` unauthenticated. The
+`GitBook (./docs)` check runs on every pull request, so sync is gated rather than assumed — which
+is what makes this URL safe to record here.
+
+The Operator Manual Codex Site is a **separate** surface from that GitBook site, and is not in the
+same state — see below.
+
 ### Unverified surfaces
 
 Absence of evidence, recorded as such rather than as failure:
@@ -194,8 +205,8 @@ Absence of evidence, recorded as such rather than as failure:
   an exact stable toolkit version and full SHA pin` — that is SB23-739, the self-caller false
   negative, **not** a real drift finding. An authenticated transcript against an *external* adopter
   is still uncaptured.
-- **GitBook** (`site_qHQ9P`, Git Sync on `./docs`) — last seen Synced/Published/Public, not
-  reverified; the public URL is not recorded anywhere in this repository.
+- **The Operator Manual Codex Site** — an unauthenticated request returns HTTP `401`. That may be
+  intentional; the access model has never been decided or written down. → **SB23-746**
 - **WebMCP** — only ever exposed `ask_hextap_manual`, and it has not been discovered from recent
   clients. Not being discovered is not proof the Site stopped exposing it.
 - **Required-secret inventory and the immutable-release repository setting** — functionally
