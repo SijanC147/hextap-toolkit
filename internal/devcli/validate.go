@@ -126,8 +126,14 @@ func snapshotPaths(ctx context.Context, runner Runner, project string) ([]string
 // running snapshot. A path Git lists but that no longer exists is recorded as
 // missing rather than failing, so a deletion during validation is reported as
 // the working-tree mutation it is instead of an unrelated I/O error.
+//
+// Directories Git reports as a single opaque entry are refused rather than
+// hashed. See opaqueDirectoryError.
 func hashProjectFile(hash io.Writer, project, relative string) error {
 	path := filepath.Join(project, filepath.FromSlash(relative))
+	if strings.HasSuffix(relative, "/") {
+		return opaqueDirectoryError(relative)
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -135,6 +141,9 @@ func hashProjectFile(hash io.Writer, project, relative string) error {
 			return nil
 		}
 		return fmt.Errorf("inspect %q: %w", path, err)
+	}
+	if info.IsDir() {
+		return opaqueDirectoryError(relative)
 	}
 	fmt.Fprintf(hash, "%d:%s:%s:%d\n", len(relative), relative, info.Mode().String(), info.Size())
 	switch {
@@ -159,6 +168,23 @@ func hashProjectFile(hash io.Writer, project, relative string) error {
 		fmt.Fprintf(hash, "%d:%s\n", len(target), target)
 	}
 	return nil
+}
+
+// opaqueDirectoryError refuses a checkout containing a directory Git reports as
+// one entry rather than as its contents: an initialized submodule, which Git
+// lists as a single gitlink, or an embedded repository, which Git lists as a
+// single trailing-slash path.
+//
+// Such a directory cannot be snapshotted. Its mode and size do not change when
+// a file inside it changes, and `git status --porcelain` reports the same entry
+// either way, so a gate could rewrite a file inside it and validation would
+// still report the working tree as unchanged. That is the false pass this whole
+// check exists to prevent, so the gate fails closed and names the path instead
+// of reporting coverage it does not have. Recursing would mean reimplementing
+// nested ignore, nested submodule and uninitialized-submodule semantics, which
+// is exactly what delegating enumeration to Git avoids.
+func opaqueDirectoryError(relative string) error {
+	return fmt.Errorf("cannot validate %q: Git reports it as one opaque entry (an initialized submodule or an embedded repository), so a gate could change a file inside it without changing this snapshot", relative)
 }
 
 func resolveValidationProject(ctx context.Context, runner Runner, requested string) (string, error) {

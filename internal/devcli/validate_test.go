@@ -198,3 +198,71 @@ func writeFixtureFile(t *testing.T, path, contents string) {
 		t.Fatal(err)
 	}
 }
+
+// TestValidateRefusesGitOpaqueDirectories covers the two shapes Git reports as a
+// single entry rather than as their contents. Both are false-pass hazards: the
+// entry's mode and size do not change when a file inside it changes, and
+// `git status --porcelain` reports the same entry either way, so a gate could
+// rewrite a file inside one and the working tree would still look unchanged.
+func TestValidateRefusesGitOpaqueDirectories(t *testing.T) {
+	t.Run("initialized submodule with a modified file inside is refused", func(t *testing.T) {
+		project := createGitToolkitFixture(t)
+		addSubmoduleFixture(t, project)
+		writeFixtureFile(t, filepath.Join(project, "vendor", "file.txt"), "changed inside the submodule\n")
+		_, err := (Service{Runner: gateMutationRunner(t, project, func() {})}).Validate(context.Background(), ValidateOptions{Project: project})
+		if err == nil || !strings.Contains(err.Error(), "one opaque entry") || !strings.Contains(err.Error(), "vendor") {
+			t.Fatalf("Validate(dirty submodule) error = %v", err)
+		}
+	})
+
+	t.Run("embedded repository is refused", func(t *testing.T) {
+		project := createGitToolkitFixture(t)
+		embedded := filepath.Join(project, "embedded")
+		writeFixtureFile(t, filepath.Join(embedded, "file.txt"), "one\n")
+		runGit(t, embedded, "init")
+		_, err := (Service{Runner: gateMutationRunner(t, project, func() {})}).Validate(context.Background(), ValidateOptions{Project: project})
+		if err == nil || !strings.Contains(err.Error(), "one opaque entry") || !strings.Contains(err.Error(), "embedded") {
+			t.Fatalf("Validate(embedded repository) error = %v", err)
+		}
+	})
+}
+
+// TestSnapshotProjectFilesRefusesOpaqueEntriesFromGit pins the refusal to the two
+// signals Git gives, independently of how a repository came to contain them: a
+// trailing-slash path, and a listed path that is a directory on disk.
+func TestSnapshotProjectFilesRefusesOpaqueEntriesFromGit(t *testing.T) {
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, "vendor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, listing := range map[string]string{
+		"trailing slash": "embedded/\x00",
+		"gitlink":        "vendor\x00",
+	} {
+		runner := &scriptedRunner{handler: func(Command) (Result, error) {
+			return Result{Stdout: listing}, nil
+		}}
+		_, err := snapshotProjectFiles(context.Background(), runner, project)
+		if err == nil || !strings.Contains(err.Error(), "one opaque entry") {
+			t.Errorf("snapshotProjectFiles(%s) error = %v", name, err)
+		}
+	}
+}
+
+// addSubmoduleFixture adds a real initialized submodule at vendor/. Git refuses
+// the file transport by default, so it is enabled for these commands only.
+func addSubmoduleFixture(t *testing.T, project string) {
+	t.Helper()
+	inner, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve submodule source directory: %v", err)
+	}
+	writeFixtureFile(t, filepath.Join(inner, "file.txt"), "one\n")
+	runGit(t, inner, "init")
+	runGit(t, inner, "config", "user.name", "Hextap Fixture")
+	runGit(t, inner, "config", "user.email", "fixture@example.invalid")
+	runGit(t, inner, "add", "file.txt")
+	runGit(t, inner, "commit", "--no-gpg-sign", "-m", "test: submodule fixture")
+	runGit(t, project, "-c", "protocol.file.allow=always", "submodule", "add", "--quiet", inner, "vendor")
+	runGit(t, project, "commit", "--no-gpg-sign", "-m", "test: add submodule")
+}
