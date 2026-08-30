@@ -54,9 +54,9 @@ times in three different directions, and each correction fixed one representatio
 another standing. A fact stated once cannot go inconsistent with itself. It is the same argument
 this document makes about not duplicating Linear defect descriptions, applied one level up.
 
-Read the gate columns independently. **A failed release run does not mean the release gate
-failed** — for `0.1.0` and `0.5.0` the immutable GitHub release published successfully and the run
-failed later, at the separate Homebrew boundary.
+Read the gate columns independently. **A run's overall conclusion is not any gate's verdict** —
+the release gate and the Homebrew step are separate columns because they can and do disagree. Which
+versions they disagree on is in the table, not in this sentence.
 
 **Source gate — evidenced for every row, not inferred from identity.** Merge/tag identity alone
 proves only that the tag names the merge commit; it does not prove the PR-head check passed or that
@@ -78,7 +78,12 @@ row in the table. Enforcement is part of a ruleset's definition, so toggling it 
 a later version, and none exists.
 
 ```sh
-gh api repos/SijanC147/hextap-toolkit/rulesets/21411731/history
+# Ruleset history is per-repository; the adopter ruleset IDs are in the table above.
+gh api repos/SijanC147/<REPO>/rulesets/<RULESET_ID>/history
+gh api repos/SijanC147/<REPO>/rulesets/<RULESET_ID>/history/<VERSION_ID> \
+  --jq '{name:.state.name,target:.state.target,enforcement:.state.enforcement}'
+
+# e.g. the toolkit's branch ruleset
 gh api repos/SijanC147/hextap-toolkit/rulesets/21411731/history/47577297 \
   --jq '{name:.state.name,target:.state.target,enforcement:.state.enforcement}'
 ```
@@ -109,22 +114,20 @@ A **bold tap commit** was hand-authored by a person; the rest were written by th
 
 ### Reading the two exceptional rows
 
-`v0.1.0` and `v0.5.0` are why the release and tap gates are separate columns rather than one
-status. In both, the **release gate passed** — the immutable GitHub release was published — and the
-Homebrew step of the same run failed afterwards. Their tap outcomes then diverge, and they diverge
-in a way no single "did it ship?" column could express:
+`v0.1.0` and `v0.5.0` are the two rows whose gate columns do not all read the same. **Their
+verdicts are in the table and are not repeated here** — this section only adds the evidence that
+does not fit in a cell.
 
-- **`v0.5.0` — tap gate passed.** The Formula was hand-authored into the tap (`895c1d3b`, tap
-  PR #13 `a9a96e62`) and `brew test-bot` `33223670639` passed on that SHA.
-- **`v0.1.0` — tap gate failed.** The gate asks whether tap CI passed on that exact SHA. Run
-  `32981835518` concluded **failure**, so the answer is no and the gate did not pass.
+**`v0.5.0`** — the tap Formula was hand-authored (`895c1d3b`, tap PR #13 `a9a96e62`) rather than
+written by the publisher, and `brew test-bot` `33223670639` ran against it.
 
-  One further detail, which narrows *what* failed without softening *that* it failed. Job level:
-  `test-bot (macos-15)` **failure**, `Claude RC proxy release tooling` success, and
-  **`Published Formula gate` skipped** — the Formula-validating job never executed, because it was
-  skipped once `test-bot` failed. So the gate failed on `test-bot`, and **no verdict was ever
-  reached on the Formula itself**. `v0.1.1` superseded the version about four hours later, so none
-  ever was. The gate outcome is *failed*; the Formula's own status is *unknown*.
+**`v0.1.0`** — one detail narrows *what* failed without softening *that* it failed. Job level on
+run `32981835518`:
+`test-bot (macos-15)` **failure**, `Claude RC proxy release tooling` success, and
+**`Published Formula gate` skipped** — the Formula-validating job never executed, because it was
+skipped once `test-bot` failed. So the gate failed on `test-bot`, and **no verdict was ever
+reached on the Formula itself**. `v0.1.1` superseded the version about four hours later, so none
+ever was. The gate outcome is in the table; the Formula's own status is *unknown*.
 
 Every version from `0.1.1` on has `Published Formula gate: success` on its own tap commit.
 `v0.1.0` is the sole exception — and **nothing in a commit-only view could have surfaced it**,
@@ -281,7 +284,30 @@ verdict here; each section names the command that does it.
 ### Source — evidenced as of 2026-08-30
 
 Protected PR head CI, protected merge, merged-`main` CI, and tag-to-commit identity are green
-across all three repositories, with the run IDs in the adopter ledger above.
+across all three repositories, with the run IDs in the per-version and adopter ledgers above.
+
+Protection needs dated evidence in each repository, not just the toolkit. Ruleset version history,
+with each repository's current tag for comparison:
+
+| Repository | Ruleset | Latest version | Last modified (UTC) | Target | Current tag published |
+|---|---|---|---|---|---|
+| `hextap-toolkit` | `21411731` `hextap/main` | `47577297` | `2026-08-25T10:22:54Z` | branch | `v0.6.0` `2026-08-29T04:00:50Z` |
+| `hextap-toolkit` | `21411735` `hextap/release-tags` | `47577264` | `2026-08-25T10:22:35Z` | tag | — |
+| `claude-rc-proxy` | `21345746` `hextap/main` | `47762670` | `2026-08-26T19:05:23Z` | branch | `v0.2.0` `2026-08-29T06:05:58Z` |
+| `claude-rc-proxy` | `21345761` `hextap/release-tags` | `47762343` | `2026-08-26T19:02:32Z` | tag | — |
+| `better-ccflare` | `21627513` `hextap/main` | `47809441` | `2026-08-27T05:46:09Z` | branch | `v3.9.0` `2026-08-28T14:17:24Z` |
+| `better-ccflare` | `21627514` `hextap/release-tags` | `47809443` | `2026-08-27T05:46:10Z` | tag | — |
+
+All six are `enforcement: active`, and every one was last modified **before** its repository's
+current tag was published. So each repository's protection was configured and unchanged across the
+merge and tag of the release its ledger row describes.
+
+**Two limits, both narrower than the toolkit's case.** First, the adopter rulesets *were* modified
+during the period — `claude-rc-proxy`'s `hextap/main` has three versions and its `release-tags` two
+— so unlike the toolkit, "unchanged since before the **first** release" is **not** true for them.
+The claim above is deliberately scoped to the current tag only. Second, as for the toolkit, this is
+evidence of continuous configuration, not of per-merge evaluation: `rule-suites` returns `[]` in
+all three repositories.
 
 ### Release — evidenced as of 2026-08-30
 
@@ -443,11 +469,24 @@ it is **not** evidence that those objects do not exist.
 Every identifier in this document is checkable. None of these commands mutate anything.
 
 ```sh
-# Releases, immutability, and tag-to-commit identity
-gh release list --repo SijanC147/hextap-toolkit --limit 20
-gh api repos/SijanC147/hextap-toolkit/releases \
+# Releases, immutability, and tag-to-commit identity.
+# <REPO> is whichever repository owns the row you are checking:
+#   hextap-toolkit | claude-rc-proxy | better-ccflare
+# Release IDs and tags are per-repository, so querying the toolkit for an adopter's
+# release (378892646, 378533895) returns unrelated data rather than an error.
+gh release list --repo SijanC147/<REPO> --limit 20
+gh api repos/SijanC147/<REPO>/releases \
   --jq '.[]|"\(.tag_name) id=\(.id) immutable=\(.immutable)"'
-gh api repos/SijanC147/hextap-toolkit/tags --jq '.[]|"\(.name) \(.commit.sha)"'
+gh api repos/SijanC147/<REPO>/tags --jq '.[]|"\(.name) \(.commit.sha)"'
+
+# One release by ID, for the Release ID column
+gh api repos/SijanC147/<REPO>/releases/<RELEASE_ID> \
+  --jq '{tag:.tag_name,immutable,published:.published_at}'
+
+# Worked examples, one per repository
+gh api repos/SijanC147/hextap-toolkit/releases/378869000  --jq '.tag_name'  # v0.6.0
+gh api repos/SijanC147/claude-rc-proxy/releases/378892646 --jq '.tag_name'  # v0.2.0
+gh api repos/SijanC147/better-ccflare/releases/378533895  --jq '.tag_name'  # v3.9.0
 
 # Any run ID in this file: name, trigger, conclusion, and the commit it ran on.
 # Substitute the repository that owns the run — a run ID is only valid in its own
@@ -478,7 +517,7 @@ gh api repos/SijanC147/homebrew-hextap/rulesets
 # stay identical, leaving the gate looking green. Fetch each ruleset's detail
 # endpoint and compare the fields that actually confer protection, as
 # internal/onboard's validateOnlineRulesets does.
-gh api repos/SijanC147/hextap-toolkit/rulesets --jq '.[]|"\(.id) \(.name) \(.enforcement)"'
+gh api repos/SijanC147/<REPO>/rulesets --jq '.[]|"\(.id) \(.name) \(.enforcement)"'
 gh api repos/SijanC147/hextap-toolkit/rulesets/21411731 \
   --jq '{target,enforcement,conditions,bypass_actors,rules:[.rules[]|{type,parameters}]}'
 # `target` matters: a ruleset drifting between branch and tag protection is
