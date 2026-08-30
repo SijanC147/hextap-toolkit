@@ -22,8 +22,9 @@ Identifiers below were verified live against GitHub and Linear on **2026-08-30**
 acting on them — [Reverifying](#reverifying) gives the commands for both, including the Linear
 queries, since no `gh` command can check the defect list.
 
-One gate is an exception to the rule above and is marked as such where it appears: **install** rests
-on a local observation with no fetchable identifier behind it.
+Two claims are exceptions to the rule above, and both are marked where they appear. The **install**
+gate rests on a local observation with no fetchable identifier behind it. The **tap credential's
+scope** was observed once and cannot be reverified by any command a reader can run.
 
 ## The five gates
 
@@ -122,7 +123,9 @@ configuration, not that any individual historical merge was evaluated against th
 returns `[]`. So per-merge enforcement records are **not available** for these releases, and no
 claim in this document rests on them.
 
-The source gate passed for every version; there is no column for it because the value never varies.
+The **Source gate** column sits in the table with the others, so a reader auditing only the ledger
+sees all three represented gates. It reads `passed` in all eleven rows today; carrying it anyway
+means a future version whose source evidence differs needs a cell rather than a prose exception.
 
 **The tap commit column is the SHA that landed on tap `main`, and the tap CI run is the one that
 ran against *that* SHA.** The nine publisher rows are direct pushes, so the landed commit and its
@@ -131,19 +134,19 @@ produces *two* runs — a `pull_request` run against the branch head and a `push
 merge commit. Only the second evidences the gate, because the merge commit is the SHA consumers
 receive.
 
-| Version | PR | Merge / tag commit | PR head CI | Merged-`main` CI | Release run | Release ID | **Release gate** | Homebrew step | Tap commit | Tap CI | **Tap gate** |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32838086815` | `32969601857` | `32980009852` | `377208649` | **passed** | **failed** — recovery `32990280006` also failed | **`ded1feb1`** (tap PR #9) | `32991730400` | passed |
-| `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32995754608` | `32996124215` | `32996698520` | `377318696` | passed | passed | `345653c0` | `32997289004` | passed |
-| `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33003923022` | `33004349130` | `33004764036` | `377369388` | passed | passed | `3cc76f5d` | `33005207889` | passed |
-| `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33014779714` | `33015151916` | `33015551268` | `377435759` | passed | passed | `2aaf9df9` | `33016011545` | passed |
-| `v0.3.0` | #7 | `16117b0839fc70487aab9491ee3665379c1f026c` | `33024390659` | `33024655766` | `33024860915` | `377484943` | passed | passed | `dee6a25c` | `33025200293` | passed |
-| `v0.3.1` | #8 | `b6a270c29aa02e9b0c76c1d638e8f0d100cba925` | `33026009028` | `33026299647` | `33026549801` | `377493707` | passed | passed | `3ea83f86` | `33026787454` | passed |
-| `v0.4.0` | #9 | `f3106610e2ffe4aeb673721219592816a3ef8c1e` | `33037762660` | `33038031679` | `33038299518` | `377559153` | passed | passed | `2519d6f0` | `33038612791` | passed |
-| `v0.4.1` | #10 | `67898bb09280a5325b89c1b23a70f2fc8b64ffae` | `33042376451` | `33042645416` | `33042920074` | `377586076` | passed | passed | `dd0b55e0` | `33043233099` | passed |
-| `v0.4.2` | #11 | `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26` | `33048175244` | `33048572779` | `33048934828` | `377628533` | passed | passed | `3e30186f` | `33049332506` | passed |
-| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33222541721` | `33222845927` | `33223146605` | `378825128` | **passed** | **failed** — recovery `33223947922` passed | **`a9a96e62`** (tap PR #13) | `33223845247` | passed |
-| `v0.6.0` | #13 | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `33232103954` | `33232339531` | `33232555139` | `378869000` | passed | passed | `f8719fb0` | `33232801566` | passed |
+| Version | PR | Merge / tag commit | PR head CI | Merged-`main` CI | **Source gate** | Release run | Release ID | **Release gate** | Homebrew step | Tap commit | Tap CI | **Tap gate** |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32838086815` | `32969601857` | passed | `32980009852` | `377208649` | **passed** | **failed** — recovery `32990280006` also failed | **`ded1feb1`** (tap PR #9) | `32991730400` | passed |
+| `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32995754608` | `32996124215` | passed | `32996698520` | `377318696` | passed | passed | `345653c0` | `32997289004` | passed |
+| `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33003923022` | `33004349130` | passed | `33004764036` | `377369388` | passed | passed | `3cc76f5d` | `33005207889` | passed |
+| `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33014779714` | `33015151916` | passed | `33015551268` | `377435759` | passed | passed | `2aaf9df9` | `33016011545` | passed |
+| `v0.3.0` | #7 | `16117b0839fc70487aab9491ee3665379c1f026c` | `33024390659` | `33024655766` | passed | `33024860915` | `377484943` | passed | passed | `dee6a25c` | `33025200293` | passed |
+| `v0.3.1` | #8 | `b6a270c29aa02e9b0c76c1d638e8f0d100cba925` | `33026009028` | `33026299647` | passed | `33026549801` | `377493707` | passed | passed | `3ea83f86` | `33026787454` | passed |
+| `v0.4.0` | #9 | `f3106610e2ffe4aeb673721219592816a3ef8c1e` | `33037762660` | `33038031679` | passed | `33038299518` | `377559153` | passed | passed | `2519d6f0` | `33038612791` | passed |
+| `v0.4.1` | #10 | `67898bb09280a5325b89c1b23a70f2fc8b64ffae` | `33042376451` | `33042645416` | passed | `33042920074` | `377586076` | passed | passed | `dd0b55e0` | `33043233099` | passed |
+| `v0.4.2` | #11 | `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26` | `33048175244` | `33048572779` | passed | `33048934828` | `377628533` | passed | passed | `3e30186f` | `33049332506` | passed |
+| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33222541721` | `33222845927` | passed | `33223146605` | `378825128` | **passed** | **failed** — recovery `33223947922` passed | **`a9a96e62`** (tap PR #13) | `33223845247` | passed |
+| `v0.6.0` | #13 | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `33232103954` | `33232339531` | passed | `33232555139` | `378869000` | passed | passed | `f8719fb0` | `33232801566` | passed |
 
 ### Reading the two exceptional rows
 
@@ -342,8 +345,9 @@ confirms the tag was pushed immediately rather than created locally and held.
 
 All six rulesets are `enforcement: active`, targeting `branch` and `tag` respectively, and in every
 repository the **last** ruleset change predates **both** the merge and the tag creation of the
-release its ledger row describes. Individual ruleset versions and their timestamps are listed under
-[Reverifying](#reverifying)'s ruleset-history commands.
+release its ledger row describes. The `/history` commands that produce these version IDs and
+timestamps are in the [per-version ledger](#per-version-ledger)'s reverification block above —
+[Reverifying](#reverifying) carries the current-state ruleset calls, which cannot show history.
 
 **Two limits, stated rather than glossed.** First, the adopter rulesets *were* modified during the
 overall period — `claude-rc-proxy`'s `hextap/main` has three versions and its `release-tags` two —
@@ -386,8 +390,12 @@ supplies. The mitigation is therefore review and protection of tap commits, not 
 Unprotected, this is the least protected repository in the platform and the most valuable one to
 tamper with. → **SB23-737**
 
-The credential used to push those tap commits is a broad classic PAT rather than a tap-scoped
-one. → **SB23-736**
+The credential used to push those tap commits was characterised as a broad classic PAT rather than
+a tap-scoped one. **That characterisation is unverified here and cannot be reverified from this
+document.** It is loaded from `op://CICD/GH_PAT/credential`, and no command below — nor any command
+available to a reader — can inspect a 1Password item or a token's scopes; if the item is rotated the
+observation becomes unreproducible. It is recorded because it drove SB23-736, not because this file
+evidences it. → **SB23-736**
 
 ### Install — observed on one machine, and the one gate with no durable evidence
 
