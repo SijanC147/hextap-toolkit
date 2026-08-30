@@ -1,0 +1,17 @@
+# Agent tooling writes state into this repository. Ignoring it keeps `git status`
+# honest and stops a stray `git add -A` from sweeping it into a commit.
+# `hextap dev validate` consults these rules too, so ignored state mutating
+# mid-run cannot produce a false `working tree changed during validation`.
+
+# oh-my-claudecode operational state. `.omc/skills/**` is the intentional
+# committable exception for project-scoped skills, so the direct children of
+# `.omc/` are ignored individually rather than the directory as a whole — Git
+# cannot re-include a path underneath an excluded directory.
+/.omc/*
+!/.omc/skills/
+
+# Serena project memories and language-server cache.
+/.serena/
+
+# macOS Finder metadata, which Finder can drop into any directory at any time.
+.DS_Store
