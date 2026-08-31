@@ -651,7 +651,7 @@ func scanFlowNode(text string, index, number, depth int) (*node, int, error) {
 	case '{':
 		return scanFlowMapping(text, index, number, depth)
 	default:
-		return scanFlowScalar(text, index, number)
+		return scanFlowScalar(text, index, number, false)
 	}
 }
 
@@ -695,7 +695,7 @@ func scanFlowMapping(text string, index, number, depth int) (*node, int, error) 
 		return result, index + 1, nil
 	}
 	for {
-		key, next, err := scanFlowScalar(text, skipFlowSpaces(text, index), number)
+		key, next, err := scanFlowScalar(text, skipFlowSpaces(text, index), number, true)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -733,7 +733,10 @@ func scanFlowMapping(text string, index, number, depth int) (*node, int, error) 
 	}
 }
 
-func scanFlowScalar(text string, index, number int) (*node, int, error) {
+// scanFlowScalar reads one flow scalar. In key position a colon ends the
+// scalar, because a flow mapping key is terminated by its own colon; elsewhere a
+// colon is an ordinary character so that values such as an image tag stay whole.
+func scanFlowScalar(text string, index, number int, keyPosition bool) (*node, int, error) {
 	if index >= len(text) {
 		return nil, 0, fmt.Errorf("line %d has an unterminated flow collection", number)
 	}
@@ -754,6 +757,9 @@ func scanFlowScalar(text string, index, number int) (*node, int, error) {
 	}
 	end := index
 	for end < len(text) && !strings.ContainsRune(",[]{}", rune(text[end])) {
+		if keyPosition && text[end] == ':' {
+			break
+		}
 		end++
 	}
 	raw := strings.TrimSpace(text[index:end])

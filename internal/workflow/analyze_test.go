@@ -429,6 +429,214 @@ jobs:
 	}
 }
 
+// TestCallerExemptionCoversTheWholeFile guards the review finding that a single
+// matching job was enough to exempt a file. The exemption is granted to the
+// whole workflow, so every job in it has to be the call.
+func TestCallerExemptionCoversTheWholeFile(t *testing.T) {
+	smuggled := `name: Hextap release
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: SijanC147/hextap-toolkit/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567
+    with:
+      manifest_path: .hextap.json
+      tag: ${{ github.ref_name }}
+      mode: full
+  extra:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release upload "${{ github.ref_name }}" extra.exe
+`
+	report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: smuggled})
+	if findWorkflow(t, report, DefaultCallerFile).HextapCaller {
+		t.Fatal("a caller carrying a second asset-uploading job must not be recognised as the caller")
+	}
+	findings := report.TagExclusivityFindings("")
+	if len(findings) != 1 || findings[0].Rule != RuleCompetingTagTrigger {
+		t.Fatalf("findings = %v, want one competing-tag-trigger", findings)
+	}
+}
+
+// TestCallerExemptionRequiresTheToolkitRepository guards the review finding that
+// a suffix match accepted any repository publishing a file at the same path.
+func TestCallerExemptionRequiresTheToolkitRepository(t *testing.T) {
+	tests := map[string]string{
+		"foreign repository at the same path": "attacker/repo/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567",
+		"toolkit path without a commit SHA":   "SijanC147/hextap-toolkit/.github/workflows/release-go.yml@main",
+		"relative escape out of the checkout": "./../evil/.github/workflows/release-go.yml",
+	}
+	for name, reference := range tests {
+		t.Run(name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: `name: Hextap release
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  release:
+    uses: ` + reference + `
+`,
+			})
+			if findWorkflow(t, report, DefaultCallerFile).HextapCaller {
+				t.Fatalf("%q was accepted as the Hextap reusable release workflow", reference)
+			}
+			if findings := report.TagExclusivityFindings(""); len(findings) != 1 {
+				t.Fatalf("findings = %v, want one", findings)
+			}
+		})
+	}
+}
+
+// TestUnreadableWorkflowNameIsRefused guards the review finding that a name the
+// reader could not represent was recorded as empty, which let a sibling
+// workflow_run trigger watching that name go unresolved.
+func TestUnreadableWorkflowNameIsRefused(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: `name: >-
+  Hextap release
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  release:
+    uses: ./.github/workflows/release-go.yml
+`,
+	})
+	caller := findWorkflow(t, report, DefaultCallerFile)
+	if caller.TagTrigger != TagTriggerUnknown {
+		t.Fatalf("trigger = %v, want unknown when the name cannot be represented", caller.TagTrigger)
+	}
+	findings := report.TagExclusivityFindings("")
+	if len(findings) != 1 || findings[0].Rule != RuleUnreadableWorkflow {
+		t.Fatalf("findings = %v, want one unreadable-workflow finding", findings)
+	}
+}
+
+// TestWorkflowRunResolvesTheDefaultWorkflowName covers the GitHub fallback: a
+// workflow that declares no name is referred to by its file path.
+func TestWorkflowRunResolvesTheDefaultWorkflowName(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"tagged.yml": `on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo tagged
+`,
+		"chained.yml": `name: Chained
+on:
+  workflow_run:
+    workflows:
+      - .github/workflows/tagged.yml
+    types:
+      - completed
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo chained
+`,
+	})
+	flagged := make(map[string]bool)
+	for _, finding := range report.TagExclusivityFindings("") {
+		flagged[finding.File] = true
+	}
+	if !flagged["tagged.yml"] || !flagged["chained.yml"] {
+		t.Fatalf("flagged = %v, want both the unnamed tag responder and the workflow chained off its default name", flagged)
+	}
+}
+
+// TestFlowMappingTriggersAreRead guards the review finding that an unquoted flow
+// mapping key was consumed through its colon, so every flow mapping was reported
+// unreadable rather than classified.
+func TestFlowMappingTriggersAreRead(t *testing.T) {
+	document := parseFixture(t, "on: {push: {tags: ['v*']}}\n")
+	analysis := analyzeTriggers(document)
+	if analysis.trigger != TagTriggerFiltered {
+		t.Fatalf("trigger = %v (%s), want a filtered tag trigger", analysis.trigger, analysis.reason)
+	}
+
+	colonised := parseFixture(t, "jobs: {build: {image: node:18}}\n")
+	if got := colonised.child("jobs").child("build").child("image").value; got != "node:18" {
+		t.Fatalf("image = %q, a colon inside a flow value must not end the scalar", got)
+	}
+}
+
+func TestPinAuditRejectsPartialRuntimeVersions(t *testing.T) {
+	floating := []string{"22", "1.24", "20"}
+	exact := []string{"1.3.14", "v1.3.14", "1.3.14-canary.1", "22.11.0"}
+
+	audit := func(t *testing.T, version string) []Finding {
+		t.Helper()
+		report := analyzeWorkflows(t, map[string]string{
+			DefaultCallerFile: hextapCallerWorkflow,
+			"release.yml": `name: Runtime
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          node-version: "` + version + `"
+`,
+		})
+		return report.PinFindings()
+	}
+
+	for _, version := range floating {
+		t.Run("floating "+version, func(t *testing.T) {
+			if findings := audit(t, version); len(findings) != 1 || findings[0].Rule != RuleFloatingRuntimeVersion {
+				t.Fatalf("findings = %v, want one floating-runtime-version finding", findings)
+			}
+		})
+	}
+	for _, version := range exact {
+		t.Run("exact "+version, func(t *testing.T) {
+			if findings := audit(t, version); len(findings) != 0 {
+				t.Fatalf("exact version %q produced findings: %v", version, findings)
+			}
+		})
+	}
+}
+
+func TestPinAuditReportsLocalActionsAsUnaudited(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"release.yml": `name: Local action
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/build
+`,
+	})
+	findings := report.PinFindings()
+	if len(findings) != 1 || findings[0].Rule != RuleUnauditedLocalAction {
+		t.Fatalf("findings = %v, want one unaudited-local-action finding", findings)
+	}
+}
+
 // TestTagExclusivityAcceptsSafeWorkflows is the other half of the contract. A
 // checker that refuses everything is as useless as one that refuses nothing.
 func TestTagExclusivityAcceptsSafeWorkflows(t *testing.T) {

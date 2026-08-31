@@ -38,10 +38,16 @@ const DefaultWorkflowDirectory = ".github/workflows"
 // exempt from tag exclusivity.
 const DefaultCallerFile = "hextap-release.yml"
 
-// hextapReusableWorkflowSuffix is the path every genuine Hextap caller resolves
-// to, whether it is an adopter's full-SHA pinned reference or the toolkit's own
-// same-repository relative call.
-const hextapReusableWorkflowSuffix = ".github/workflows/release-go.yml"
+// hextapReusableWorkflow is the exact external reference an adopter's caller
+// must use. Comparing it exactly, rather than by path suffix, is what stops a
+// repository that merely publishes a file at the same path from being mistaken
+// for the toolkit.
+const hextapReusableWorkflow = "SijanC147/hextap-toolkit/.github/workflows/release-go.yml"
+
+// hextapRelativeReusableWorkflow is the toolkit's own same-repository call,
+// which is deliberately unlike every adopter's full-SHA pin because it resolves
+// inside the commit already under review.
+const hextapRelativeReusableWorkflow = "./.github/workflows/release-go.yml"
 
 // Rule names identify why a workflow was refused. They are stable strings so
 // that callers and tests can assert on a specific refusal.
@@ -51,6 +57,7 @@ const (
 	RuleMissingHextapCaller    = "missing-hextap-caller"
 	RuleUnpinnedAction         = "unpinned-action"
 	RuleFloatingRuntimeVersion = "floating-runtime-version"
+	RuleUnauditedLocalAction   = "unaudited-local-action"
 )
 
 // Finding is one refusal. Detail names the exact construct and, where the
@@ -158,15 +165,23 @@ func analyze(
 			continue
 		}
 
+		name, readable := declaredName(document)
+		if !readable {
+			workflow.TagTrigger = TagTriggerUnknown
+			workflow.TriggerReason = "the workflow name is not a readable scalar, so a sibling workflow_run trigger cannot be matched against it"
+			report.Workflows = append(report.Workflows, workflow)
+			continue
+		}
+
 		analysis := analyzeTriggers(document)
 		workflow.document = document
-		workflow.Name = declaredName(document)
+		workflow.Name = name
 		workflow.TagTrigger = analysis.trigger
 		workflow.TriggerReason = analysis.reason
 		workflow.Events = analysis.events
 		workflow.TagPatterns = analysis.patterns
 		workflow.watches = analysis.watches
-		workflow.HextapCaller = callsHextapReleaseWorkflow(document)
+		workflow.HextapCaller = isHextapCaller(document)
 		workflow.ReleaseCapable = workflow.TagTrigger.RespondsToTagPush() || grantsContentsWrite(document)
 		report.Workflows = append(report.Workflows, workflow)
 	}
@@ -189,12 +204,30 @@ func hasWorkflowExtension(name string) bool {
 	return strings.HasSuffix(lowered, ".yml") || strings.HasSuffix(lowered, ".yaml")
 }
 
-func declaredName(document *node) string {
+// declaredName reads the workflow's name. The second result is false when a
+// name is present but cannot be represented exactly. A name that is only
+// approximately known cannot be matched against a sibling workflow_run trigger,
+// and treating it as absent would let a chained workflow escape the policy.
+func declaredName(document *node) (string, bool) {
+	if !document.has("name") {
+		return "", true
+	}
 	name := document.child("name")
 	if name == nil || name.kind != nodeScalar || name.style == scalarBlock {
-		return ""
+		return "", false
 	}
-	return name.value
+	return name.value, true
+}
+
+// triggerNames lists every name by which a sibling workflow_run trigger can
+// refer to this workflow. GitHub falls back to the file path when a workflow
+// declares no name, so both forms have to resolve.
+func (workflow Workflow) triggerNames() []string {
+	names := make([]string, 0, 2)
+	if workflow.Name != "" {
+		names = append(names, workflow.Name)
+	}
+	return append(names, DefaultWorkflowDirectory+"/"+workflow.File)
 }
 
 // resolveWorkflowRunChains upgrades every workflow_run trigger that chains from
@@ -206,8 +239,11 @@ func resolveWorkflowRunChains(report *Report) {
 		changed = false
 		responders := make(map[string]bool)
 		for _, workflow := range report.Workflows {
-			if workflow.Active && workflow.Name != "" && workflow.TagTrigger.RespondsToTagPush() {
-				responders[workflow.Name] = true
+			if !workflow.Active || !workflow.TagTrigger.RespondsToTagPush() {
+				continue
+			}
+			for _, name := range workflow.triggerNames() {
+				responders[name] = true
 			}
 		}
 		for index := range report.Workflows {
@@ -230,38 +266,51 @@ func resolveWorkflowRunChains(report *Report) {
 	}
 }
 
-// callsHextapReleaseWorkflow reports whether a job in the document calls the
+// isHextapCaller reports whether the document is nothing but a call into the
 // Hextap reusable release workflow. This is what earns the caller exemption:
-// the file name alone never does, so a hostile file named hextap-release.yml
-// is refused like any other competing workflow.
-func callsHextapReleaseWorkflow(document *node) bool {
+// the file name alone never does, so a hostile file named hextap-release.yml is
+// refused like any other competing workflow.
+//
+// Every job must be such a call, not merely one of them. The exemption is
+// granted to the whole file, so a caller carrying the genuine release job plus a
+// second job that uploads an asset of its own would otherwise be waved through
+// while recreating the exact race this package exists to remove.
+func isHextapCaller(document *node) bool {
 	jobs := document.child("jobs")
-	if jobs == nil || jobs.kind != nodeMapping {
+	if jobs == nil || jobs.kind != nodeMapping || len(jobs.keys) == 0 {
 		return false
 	}
 	for _, key := range jobs.keys {
 		job := jobs.values[key]
 		if job == nil || job.kind != nodeMapping {
-			continue
+			return false
 		}
 		uses := job.child("uses")
 		if uses == nil || uses.kind != nodeScalar || uses.style == scalarBlock {
-			continue
+			return false
 		}
-		if referencesHextapReleaseWorkflow(uses.value) {
-			return true
+		if !referencesHextapReleaseWorkflow(uses.value) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
+// referencesHextapReleaseWorkflow reports whether a uses: value is the Hextap
+// reusable release workflow itself. The external form is compared exactly and
+// must carry a full commit SHA: a suffix match would accept any repository that
+// happens to publish a file at the same path, which would hand the tag-trigger
+// exemption to attacker-controlled workflow code.
 func referencesHextapReleaseWorkflow(reference string) bool {
 	reference = strings.TrimSpace(reference)
-	if at := strings.LastIndex(reference, "@"); at >= 0 {
-		reference = reference[:at]
+	if reference == hextapRelativeReusableWorkflow {
+		return true
 	}
-	reference = strings.TrimPrefix(reference, "./")
-	return strings.HasSuffix(reference, hextapReusableWorkflowSuffix)
+	at := strings.LastIndex(reference, "@")
+	if at < 0 {
+		return false
+	}
+	return reference[:at] == hextapReusableWorkflow && isHexadecimal(reference[at+1:], 40)
 }
 
 // grantsContentsWrite reports whether the workflow or any of its jobs asks for
@@ -334,7 +383,7 @@ func (report *Report) TagExclusivityFindings(callerFile string) []Finding {
 		if workflow.File == callerFile {
 			detail = fmt.Sprintf(
 				"%s sits at the Hextap caller path but no job of it calls %s, so it earns no exemption: %s",
-				workflow.File, hextapReusableWorkflowSuffix, workflow.TriggerReason)
+				workflow.File, hextapReusableWorkflow, workflow.TriggerReason)
 		}
 		findings = append(findings, Finding{
 			File:   workflow.File,
@@ -371,7 +420,7 @@ func (report *Report) PreflightFindings(callerFile string) []Finding {
 		findings = append(findings, Finding{
 			File:   callerFile,
 			Rule:   RuleMissingHextapCaller,
-			Detail: fmt.Sprintf("no active workflow named %s calls %s, so no workflow in this source tree is the recognised owner of the pushed tag", callerFile, hextapReusableWorkflowSuffix),
+			Detail: fmt.Sprintf("no active workflow named %s calls %s, so no workflow in this source tree is the recognised owner of the pushed tag", callerFile, hextapReusableWorkflow),
 			Remedy: "restore the Hextap caller workflow generated by onboarding before publishing from this source",
 		})
 	}
@@ -455,9 +504,17 @@ func auditActionReference(file string, uses *node) []Finding {
 	reference := strings.TrimSpace(uses.value)
 	switch {
 	case strings.HasPrefix(reference, "./"):
-		// A relative reference resolves inside the same commit that is already
-		// under review, so it carries no separate mutable identity.
-		return nil
+		if strings.HasPrefix(reference, "./"+DefaultWorkflowDirectory+"/") {
+			// A reusable workflow in the analysed directory resolves inside the
+			// commit under review and is audited in its own right by this pass.
+			return nil
+		}
+		return []Finding{{
+			File:   file,
+			Rule:   RuleUnauditedLocalAction,
+			Detail: fmt.Sprintf("the local action %q resolves inside the reviewed commit, but the external references in its own definition live outside the workflow directory and are not audited here", reference),
+			Remedy: "pin every external reference inside the local action definition to a full commit SHA, or inline the step so its dependencies are visible to this audit",
+		}}
 	case strings.Contains(reference, "${{"):
 		return unpinned(
 			fmt.Sprintf("the action reference %q resolves through an expression, so no fixed revision can be established from the source", reference),
@@ -542,6 +599,10 @@ var floatingVersionAliases = map[string]struct{}{
 	"stable":  {},
 }
 
+// isFloatingVersion reports whether a runtime selector can resolve to different
+// releases over time. A bare major or major.minor selector is a range rather
+// than a pin: node-version "22" selects whichever 22.x is current when the job
+// runs, so the same tag can build against a different toolchain later.
 func isFloatingVersion(version string) bool {
 	lowered := strings.ToLower(strings.TrimSpace(version))
 	if _, floating := floatingVersionAliases[lowered]; floating {
@@ -550,7 +611,34 @@ func isFloatingVersion(version string) bool {
 	if strings.ContainsAny(lowered, "^~><*") {
 		return true
 	}
-	return strings.HasPrefix(lowered, "lts/") || strings.HasSuffix(lowered, ".x")
+	if strings.HasPrefix(lowered, "lts/") || strings.HasSuffix(lowered, ".x") {
+		return true
+	}
+	return !isExactVersion(lowered)
+}
+
+// isExactVersion requires a complete major.minor.patch, optionally prefixed
+// with v and optionally carrying a prerelease or build suffix.
+func isExactVersion(version string) bool {
+	version = strings.TrimPrefix(version, "v")
+	if index := strings.IndexAny(version, "-+"); index >= 0 {
+		version = version[:index]
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for index := 0; index < len(part); index++ {
+			if part[index] < '0' || part[index] > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func isHexadecimal(value string, width int) bool {
