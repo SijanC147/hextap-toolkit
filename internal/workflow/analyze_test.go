@@ -959,6 +959,128 @@ jobs:
 	}
 }
 
+func TestPinAuditRejectsMutableContainerImages(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"release.yml": `name: Containers
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: build-env:latest
+    services:
+      cache:
+        image: redis:7
+    steps:
+      - run: make release
+  shorthand:
+    runs-on: ubuntu-latest
+    container: build-env:latest
+    steps:
+      - run: make release
+  pinned:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/example/build@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    steps:
+      - run: make release
+`,
+	})
+
+	findings := report.PinFindings()
+	if len(findings) != 3 {
+		t.Fatalf("findings = %v, want one each for the job container, the service and the shorthand form", findings)
+	}
+	for _, finding := range findings {
+		if finding.Rule != RuleUnpinnedContainer {
+			t.Fatalf("unexpected rule in %#v", finding)
+		}
+	}
+}
+
+// TestOmittedPermissionsAreNotProofOfSafety guards the review finding that a
+// workflow with no permissions block was certified as unable to reach a
+// release. The effective default is a repository setting this analysis cannot
+// see, so only an explicit restriction proves it.
+func TestOmittedPermissionsAreNotProofOfSafety(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"manual.yml": `name: Manual
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+	})
+
+	if !findWorkflow(t, report, "manual.yml").ReleaseCapable {
+		t.Fatal("a workflow with no permissions block must not be certified as unable to reach a release")
+	}
+	findings := report.PinFindings()
+	if len(findings) != 1 || findings[0].Rule != RuleUnpinnedAction {
+		t.Fatalf("findings = %v, want the unpinned action to be audited", findings)
+	}
+}
+
+// TestJobPermissionsCanEscalateBeyondTheWorkflowDefault covers a read-only
+// workflow carrying one job that grants itself write access.
+func TestJobPermissionsCanEscalateBeyondTheWorkflowDefault(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"mixed.yml": `name: Mixed
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+`,
+	})
+
+	if !findWorkflow(t, report, "mixed.yml").ReleaseCapable {
+		t.Fatal("a job escalating to contents: write must make the workflow release capable")
+	}
+}
+
+func TestPinAuditAcceptsUppercaseCommitRevisions(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"release.yml": `name: Uppercase
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3D3C42E5AAC5BA805825DA76410C181273BA90B1
+`,
+	})
+
+	if findings := report.PinFindings(); len(findings) != 0 {
+		t.Fatalf("an uppercase commit revision was reported as mutable: %v", findings)
+	}
+}
+
 func TestPinAuditSkipsWorkflowsThatCannotReachARelease(t *testing.T) {
 	report := analyzeWorkflows(t, map[string]string{
 		DefaultCallerFile: hextapCallerWorkflow,

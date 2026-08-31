@@ -58,6 +58,7 @@ const (
 	RuleUnpinnedAction         = "unpinned-action"
 	RuleFloatingRuntimeVersion = "floating-runtime-version"
 	RuleUnauditedLocalAction   = "unaudited-local-action"
+	RuleUnpinnedContainer      = "unpinned-container-image"
 )
 
 // Finding is one refusal. Detail names the exact construct and, where the
@@ -100,9 +101,10 @@ type Workflow struct {
 	// HextapCaller reports whether a job in this file calls the Hextap
 	// reusable release workflow.
 	HextapCaller bool
-	// ReleaseCapable reports whether the file can reach a release: it either
-	// responds to a tag push or grants itself write access to repository
-	// contents. Only these files are pin-audited.
+	// ReleaseCapable reports whether the file can reach a release. It is true
+	// unless the workflow is proven unable to: absent permissions are not
+	// proof, because the effective default is a repository setting this
+	// analysis cannot see. Only these files are pin-audited.
 	ReleaseCapable bool
 
 	document *node
@@ -182,7 +184,7 @@ func analyze(
 		workflow.TagPatterns = analysis.patterns
 		workflow.watches = analysis.watches
 		workflow.HextapCaller = isHextapCaller(document)
-		workflow.ReleaseCapable = workflow.TagTrigger.RespondsToTagPush() || grantsContentsWrite(document)
+		workflow.ReleaseCapable = workflow.TagTrigger.RespondsToTagPush() || !provablyReadOnly(document)
 		report.Workflows = append(report.Workflows, workflow)
 	}
 
@@ -313,42 +315,53 @@ func referencesHextapReleaseWorkflow(reference string) bool {
 	return reference[:at] == hextapReusableWorkflow && isHexadecimal(reference[at+1:], 40)
 }
 
-// grantsContentsWrite reports whether the workflow or any of its jobs asks for
-// write access to repository contents, which is what a competing workflow needs
-// in order to alter a release.
-func grantsContentsWrite(document *node) bool {
-	if permissionsGrantContentsWrite(document.child("permissions")) {
-		return true
+// provablyReadOnly reports whether the document demonstrably cannot write to
+// repository contents.
+//
+// Absent permissions are not proof. The effective default for GITHUB_TOKEN is a
+// repository setting this directory-only analysis cannot see, and in a
+// repository still configured for read/write a workflow with no permissions
+// block can modify a release. Only an explicit restriction proves it; anything
+// else is pin-audited, which over-reports rather than certifying a mutable
+// release path as pinned.
+func provablyReadOnly(document *node) bool {
+	permissions := document.child("permissions")
+	if permissions == nil || !restrictsContentsWrite(permissions) {
+		return false
 	}
 	jobs := document.child("jobs")
 	if jobs == nil || jobs.kind != nodeMapping {
-		return false
+		return true
 	}
 	for _, key := range jobs.keys {
 		job := jobs.values[key]
 		if job == nil || job.kind != nodeMapping {
 			continue
 		}
-		if permissionsGrantContentsWrite(job.child("permissions")) {
-			return true
+		// A job may escalate beyond the workflow-level default.
+		if jobPermissions := job.child("permissions"); jobPermissions != nil &&
+			!restrictsContentsWrite(jobPermissions) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
-func permissionsGrantContentsWrite(permissions *node) bool {
-	if permissions == nil {
-		return false
-	}
+// restrictsContentsWrite reports whether an explicit permissions block denies
+// write access to repository contents. A block that omits contents grants it
+// nothing, which is a restriction.
+func restrictsContentsWrite(permissions *node) bool {
 	if permissions.kind == nodeScalar {
-		return permissions.style != scalarBlock && permissions.value == "write-all"
+		return permissions.style != scalarBlock && permissions.value == "read-all"
 	}
 	if permissions.kind != nodeMapping {
 		return false
 	}
 	contents := permissions.child("contents")
-	return contents != nil && contents.kind == nodeScalar &&
-		contents.style != scalarBlock && contents.value == "write"
+	if contents == nil {
+		return true
+	}
+	return contents.kind == nodeScalar && contents.style != scalarBlock && contents.value != "write"
 }
 
 // TagExclusivityFindings reports every active workflow, other than the verified
@@ -465,11 +478,21 @@ func resolveCallerFile(callerFile string) string {
 func auditPins(file string, document *node) []Finding {
 	var findings []Finding
 	walkNodes(document, func(current *node) {
-		if current.kind != nodeMapping || !current.has("uses") {
+		if current.kind != nodeMapping {
 			return
 		}
-		findings = append(findings, auditActionReference(file, current.child("uses"))...)
-		findings = append(findings, auditRuntimeVersions(file, current.child("with"))...)
+		if current.has("uses") {
+			findings = append(findings, auditActionReference(file, current.child("uses"))...)
+			findings = append(findings, auditRuntimeVersions(file, current.child("with"))...)
+		}
+		if current.has("container") {
+			findings = append(findings, auditContainerImage(file, current.child("container"))...)
+		}
+		if services := current.child("services"); services != nil && services.kind == nodeMapping {
+			for _, name := range services.keys {
+				findings = append(findings, auditContainerImage(file, services.values[name])...)
+			}
+		}
 	})
 	return findings
 }
@@ -540,6 +563,41 @@ func auditActionReference(file string, uses *node) []Finding {
 			"pin the action to a full 40-character commit SHA, keeping the version tag as a trailing comment")
 	}
 	return nil
+}
+
+// auditContainerImage requires a job or service container to name an immutable
+// image. A container is executed code exactly as an action is, so rebuilding the
+// same tag against a mutable image runs something different.
+func auditContainerImage(file string, container *node) []Finding {
+	if container == nil || container.kind == nodeNull {
+		return nil
+	}
+	image := container
+	if container.kind == nodeMapping {
+		image = container.child("image")
+	}
+	if image == nil || image.kind != nodeScalar || image.style == scalarBlock {
+		return []Finding{{
+			File:   file,
+			Rule:   RuleUnpinnedContainer,
+			Detail: "a job or service container image is not a readable literal",
+			Remedy: "name the image as a plain or quoted scalar pinned to an @sha256: digest",
+		}}
+	}
+	reference := strings.TrimSpace(image.value)
+	if strings.Contains(reference, "${{") {
+		return nil
+	}
+	if digest := strings.LastIndex(reference, "@sha256:"); digest >= 0 &&
+		isHexadecimal(reference[digest+len("@sha256:"):], 64) {
+		return nil
+	}
+	return []Finding{{
+		File:   file,
+		Rule:   RuleUnpinnedContainer,
+		Detail: fmt.Sprintf("the container image %q carries no image digest, so the same tag can execute a different image later", reference),
+		Remedy: "pin the image to an immutable @sha256: digest",
+	}}
 }
 
 func auditRuntimeVersions(file string, with *node) []Finding {
@@ -641,13 +699,19 @@ func isExactVersion(version string) bool {
 	return true
 }
 
+// isHexadecimal accepts either case, because Git resolves a commit identifier
+// case-insensitively. Refusing an uppercase revision would report an already
+// immutable reference as mutable.
 func isHexadecimal(value string, width int) bool {
 	if len(value) != width {
 		return false
 	}
 	for index := 0; index < len(value); index++ {
-		character := value[index]
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+		switch character := value[index]; {
+		case character >= '0' && character <= '9':
+		case character >= 'a' && character <= 'f':
+		case character >= 'A' && character <= 'F':
+		default:
 			return false
 		}
 	}
