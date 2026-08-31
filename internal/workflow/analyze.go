@@ -83,7 +83,10 @@ type Workflow struct {
 	TagTrigger TagTrigger
 	// TagPatterns holds the explicit tag filters, when the workflow has any.
 	TagPatterns []string
-	// Events lists the events declared under the on: key.
+	// Events lists the events declared under the on: key. It is populated only
+	// when the document parsed; on a parse failure it is nil and TagTrigger is
+	// TagTriggerUnknown. Any later check layered on this field must test for
+	// that first, or an unreadable workflow will read as declaring no events.
 	Events []string
 	// TriggerReason explains the classification in the terms of the file.
 	TriggerReason string
@@ -175,8 +178,15 @@ func analyze(
 	return report, nil
 }
 
+// hasWorkflowExtension reports whether GitHub loads the file as a workflow. The
+// comparison is deliberately case-insensitive. Whether GitHub's loader accepts
+// an uppercased extension is not established here, and the two possible errors
+// are not symmetric: matching too strictly would treat a live workflow as inert,
+// which under-reports and fails open, while matching too loosely can only
+// over-report an inert file, which fails safe.
 func hasWorkflowExtension(name string) bool {
-	return strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".yaml")
+	lowered := strings.ToLower(name)
+	return strings.HasSuffix(lowered, ".yml") || strings.HasSuffix(lowered, ".yaml")
 }
 
 func declaredName(document *node) string {

@@ -266,6 +266,11 @@ func classifyPush(filters *node) (TagTrigger, []string, []string, string) {
 // classifyWorkflowRun records which workflows a chained trigger watches. The
 // classification is completed by the directory-wide pass, which knows whether
 // any watched workflow is itself reachable from a tag push.
+//
+// Branch filters on workflow_run are read for validity but deliberately not
+// applied. GitHub reports a tag push to the chained run as a head_branch, and
+// resolving whether a filter excludes it would decide safety on a value this
+// analysis cannot pin down. Ignoring the filter can only over-report.
 func classifyWorkflowRun(filters *node) (TagTrigger, []string, []string, string) {
 	if filters.isEmpty() || filters.kind != nodeMapping {
 		return TagTriggerUnknown, nil, nil, "workflow_run carries no readable filter block, so the workflows it chains from cannot be resolved"

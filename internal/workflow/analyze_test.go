@@ -272,6 +272,12 @@ jobs:
 			rule:    RuleCompetingTagTrigger,
 		},
 		{
+			name:    "an uppercased extension is not assumed to be inert",
+			file:    "Signpath-Release.YML",
+			content: incidentWorkflow,
+			rule:    RuleCompetingTagTrigger,
+		},
+		{
 			name: "create fires on every new tag and cannot be filtered",
 			file: "create.yml",
 			content: `name: Create
