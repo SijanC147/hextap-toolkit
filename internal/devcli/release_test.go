@@ -145,6 +145,8 @@ func canonicalMainRunner(t *testing.T, project string) *scriptedRunner {
 			return Result{}, nil
 		case "gofmt -l .":
 			return Result{}, nil
+		case "git -C " + project + " ls-files -z --cached --others --exclude-standard":
+			return fixtureListing("go.mod", ".hextap.json", "scripts/check-actionlint.sh"), nil
 		case "git -C " + project + " diff --check":
 			return Result{}, nil
 		case filepath.Join(project, "scripts", "check-actionlint.sh"):
