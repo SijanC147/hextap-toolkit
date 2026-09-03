@@ -24,7 +24,12 @@ import (
 const (
 	maximumManifestSize      int64 = 1 << 20
 	maximumRegistryEntries         = 1024
+	maximumWarningPathLength       = 1024
 	defaultCollectionTimeout       = 30 * time.Second
+	homebrewCellarDirectory        = "Cellar"
+	homebrewBinaryDirectory        = "bin"
+	homebrewExecutableName         = "brew"
+	toolkitExecutableName          = "brew-hextap"
 )
 
 var (
@@ -56,12 +61,13 @@ func (service Service) Collect(ctx context.Context, options Options) Report {
 	}
 	service.collectSkills(&report, options.Project)
 
-	brew, ok := service.findOwningHomebrew(ctx)
-	if !ok {
-		addWarning(&report, "homebrew", "could not identify the Homebrew installation that owns the active Hextap CLI")
+	ownership := service.findOwningHomebrew(ctx)
+	if !ownership.Owned {
+		addWarning(&report, "homebrew", "could not identify the Homebrew installation that owns the active Hextap CLI: "+ownership.Reason+"; Homebrew, tap and package inventory are unknown here, not proven absent")
 		service.collectLocalProject(&report, options.Project, false)
 		return report
 	}
+	brew := ownership.Executable
 	report.Homebrew.Executable = brew
 	if result, err := service.runner().Run(ctx, Command{Name: brew, Args: []string{"--prefix"}, Env: homebrewReadOnlyEnvironment()}); err == nil {
 		if prefix, parseOK := parseLine(result.Stdout); parseOK {
@@ -133,10 +139,25 @@ func (service Service) executable() string {
 	return executable
 }
 
-func (service Service) findOwningHomebrew(ctx context.Context) (string, bool) {
+// homebrewOwnership is the outcome of proving which Homebrew installation owns
+// the active Hextap CLI. Reason explains a failure precisely enough that an
+// unproven ownership can never be read as an empty system.
+type homebrewOwnership struct {
+	Executable string
+	Owned      bool
+	Reason     string
+}
+
+// findOwningHomebrew proves which Homebrew installation owns the running Hextap
+// CLI. Ownership is granted only by asking a candidate Homebrew for the toolkit
+// Formula prefix and requiring that the brew-hextap beneath it resolve to the
+// same file as the running executable. Candidate discovery widens where that
+// proof is attempted; it never widens what the proof accepts, so a candidate
+// derived from the running executable is rejected like any other when it fails.
+func (service Service) findOwningHomebrew(ctx context.Context) homebrewOwnership {
 	executable := service.executable()
 	if executable == "" {
-		return "", false
+		return homebrewOwnership{Reason: "the path of the running executable is unavailable"}
 	}
 	resolve := service.ResolvePath
 	if resolve == nil {
@@ -144,39 +165,106 @@ func (service Service) findOwningHomebrew(ctx context.Context) (string, bool) {
 	}
 	active, err := resolve(executable)
 	if err != nil {
-		return "", false
+		return homebrewOwnership{Reason: fmt.Sprintf("the running executable %s could not be resolved through its symlink chain", reportablePath(executable))}
 	}
-	candidates := append([]string(nil), service.BrewCandidates...)
-	if len(candidates) == 0 {
-		candidates = append(candidates, "/opt/homebrew/bin/brew", "/usr/local/bin/brew")
-		lookPath := service.LookPath
-		if lookPath == nil {
-			lookPath = exec.LookPath
-		}
-		if path, lookErr := lookPath("brew"); lookErr == nil {
-			candidates = append(candidates, path)
-		}
-	}
-	seen := make(map[string]bool)
+	candidates := service.brewCandidates(active)
+	rejections := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		if candidate == "" || seen[candidate] {
-			continue
-		}
-		seen[candidate] = true
 		result, runErr := service.runner().Run(ctx, Command{Name: candidate, Args: []string{"--prefix", ToolkitFormula}, Env: homebrewReadOnlyEnvironment()})
 		if runErr != nil {
+			rejections = append(rejections, fmt.Sprintf("%s (unavailable)", reportablePath(candidate)))
 			continue
 		}
 		prefix, parseOK := parseLine(result.Stdout)
 		if !parseOK {
+			rejections = append(rejections, fmt.Sprintf("%s (returned an invalid prefix record)", reportablePath(candidate)))
 			continue
 		}
-		owned, resolveErr := resolve(filepath.Join(prefix, "bin", "brew-hextap"))
-		if resolveErr == nil && owned == active {
-			return candidate, true
+		owned, resolveErr := resolve(filepath.Join(prefix, homebrewBinaryDirectory, toolkitExecutableName))
+		if resolveErr != nil {
+			rejections = append(rejections, fmt.Sprintf("%s (installs no resolvable %s)", reportablePath(candidate), toolkitExecutableName))
+			continue
 		}
+		if owned != active {
+			rejections = append(rejections, fmt.Sprintf("%s (owns a different Hextap)", reportablePath(candidate)))
+			continue
+		}
+		return homebrewOwnership{Executable: candidate, Owned: true}
 	}
-	return "", false
+	if len(rejections) == 0 {
+		return homebrewOwnership{Reason: fmt.Sprintf("no Homebrew installation could be located to examine for ownership of %s", reportablePath(active))}
+	}
+	return homebrewOwnership{Reason: fmt.Sprintf("no examined Homebrew installation owns %s: %s", reportablePath(active), strings.Join(rejections, "; "))}
+}
+
+// brewCandidates lists the Homebrew executables worth asking about ownership,
+// most specific first. The installation that owns the running CLI names itself
+// in that CLI's resolved path, so it is examined before the two conventional
+// prefixes and the PATH lookup, which between them cannot see a Homebrew
+// installed anywhere else. Explicitly supplied candidates are still honoured
+// exactly, and every candidate remains subject to the same ownership proof.
+func (service Service) brewCandidates(active string) []string {
+	candidates := make([]string, 0, 4)
+	seen := make(map[string]bool)
+	appendCandidate := func(candidate string) {
+		if candidate == "" || seen[candidate] {
+			return
+		}
+		seen[candidate] = true
+		candidates = append(candidates, candidate)
+	}
+	if prefix := homebrewPrefixOfCellarPath(active); prefix != "" {
+		appendCandidate(filepath.Join(prefix, homebrewBinaryDirectory, homebrewExecutableName))
+	}
+	if len(service.BrewCandidates) != 0 {
+		for _, candidate := range service.BrewCandidates {
+			appendCandidate(candidate)
+		}
+		return candidates
+	}
+	appendCandidate("/opt/homebrew/bin/brew")
+	appendCandidate("/usr/local/bin/brew")
+	lookPath := service.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	if path, lookErr := lookPath(homebrewExecutableName); lookErr == nil {
+		appendCandidate(path)
+	}
+	return candidates
+}
+
+// homebrewPrefixOfCellarPath returns the Homebrew prefix that owns a resolved
+// Cellar path such as /opt/homebrew/Cellar/hextap/0.6.0/bin/brew-hextap, or an
+// empty string when the path is not inside a Cellar. Homebrew keeps the Cellar
+// immediately beneath its prefix, so every installed binary's real path names
+// its own prefix no matter where that prefix lives. The innermost Cellar wins,
+// which is the correct answer when a prefix is itself nested under one.
+func homebrewPrefixOfCellarPath(path string) string {
+	if !filepath.IsAbs(path) {
+		return ""
+	}
+	directory := filepath.Dir(path)
+	for {
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return ""
+		}
+		if filepath.Base(directory) == homebrewCellarDirectory {
+			return parent
+		}
+		directory = parent
+	}
+}
+
+// reportablePath renders a filesystem path for a warning message, substituting
+// a fixed placeholder for any path that is empty, over-long, or carries control
+// characters, so that a diagnostic can never smuggle terminal control bytes.
+func reportablePath(path string) string {
+	if !safeText(path, maximumWarningPathLength) {
+		return "an unreportable path"
+	}
+	return strconv.Quote(path)
 }
 
 func (service Service) collectTapGit(ctx context.Context, report *Report) {
