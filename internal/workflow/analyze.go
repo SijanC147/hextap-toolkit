@@ -60,6 +60,8 @@ const (
 	RuleUnauditedLocalAction   = "unaudited-local-action"
 	RuleUnpinnedContainer      = "unpinned-container-image"
 	RuleMutableSourceRef       = "mutable-source-ref"
+	RuleUnpinnedRemoteScript   = "unpinned-remote-script"
+	RuleUnpinnedRemoteInput    = "unpinned-remote-input"
 )
 
 // Finding is one refusal. Detail names the exact construct and, where the
@@ -379,16 +381,22 @@ func resolveWorkflowRunChains(report *Report, external []Workflow, selfSeeds boo
 // use the same form. The exemption is granted to the whole file, so a caller
 // carrying the genuine release job plus a second job that uploads an asset of
 // its own would otherwise be waved through while recreating the exact race
-// this package exists to remove.
+// this package exists to remove. A job carrying an if: condition is not a
+// call either: whether the condition holds for the pushed tag would need the
+// expression evaluated, and a caller whose only job is skipped owns nothing.
+// Nor is a job carrying a strategy: a matrix runs the release once per leg
+// against the same tag, which is the shape this package exists to remove, and
+// for the same reason the file must carry exactly one job: two calls, parallel
+// or chained, are two release runs against one tag.
 func callerForms(document *node) (external, relative bool) {
 	jobs := document.child("jobs")
-	if jobs == nil || jobs.kind != nodeMapping || len(jobs.keys) == 0 {
+	if jobs == nil || jobs.kind != nodeMapping || len(jobs.keys) != 1 {
 		return false, false
 	}
 	external, relative = true, true
 	for _, key := range jobs.keys {
 		job := jobs.values[key]
-		if job == nil || job.kind != nodeMapping {
+		if job == nil || job.kind != nodeMapping || job.has("if") || job.has("strategy") {
 			return false, false
 		}
 		uses := job.child("uses")
@@ -532,7 +540,8 @@ func grantsReleaseScope(permissions *node) bool {
 // credential this analysis cannot see the scope of: a literal GitHub token
 // anywhere in its text, a literal value under a credential-named key, or an
 // expression reading the secrets context for anything other than
-// GITHUB_TOKEN or one of the input channels a caller or dispatcher fills. A
+// GITHUB_TOKEN, one of the input channels a caller or dispatcher fills, a
+// variable, the env or matrix contexts, or the output of a step or job. A
 // single one anywhere in the file makes the workflow release capable.
 // GITHUB_TOKEN is the one exception, because the permissions block bounds it.
 func readsCredentialChannel(document *node) bool {
@@ -790,12 +799,22 @@ func expressionReadsCredentialChannel(expression string) bool {
 		property := start > 0 && expression[start-1] == '.'
 		switch {
 		case property:
-		case strings.EqualFold(word, "inputs"), strings.EqualFold(word, "vars"), strings.EqualFold(word, "env"):
+		case strings.EqualFold(word, "inputs"), strings.EqualFold(word, "vars"), strings.EqualFold(word, "env"), strings.EqualFold(word, "matrix"):
 			// Repository, organisation and environment variables are
 			// externally mutable strings and can hold a token as readily as
 			// a dispatch input; the env context can carry one set by an
-			// earlier step from a source this analysis never sees.
+			// earlier step from a source this analysis never sees; a matrix
+			// can be built from a job output.
 			return true
+		case strings.EqualFold(word, "steps"), strings.EqualFold(word, "needs"):
+			// An output of a step or a job is computed by code this
+			// analysis does not read, which can fetch a token from the
+			// network or a runner. Only the outputs are a channel; a
+			// step's outcome or a job's result is an enumerated state.
+			path := strings.ToLower(contextPath(remainder))
+			if path == "" || strings.Contains("."+path+".", ".outputs.") {
+				return true
+			}
 		case strings.EqualFold(word, "secrets"):
 			if path := contextPath(remainder); !strings.EqualFold(path, "github_token") {
 				return true
@@ -1173,6 +1192,18 @@ func (report *Report) callerVerification(policy Policy) (string, bool) {
 			return fmt.Sprintf("%s calls the release workflow only through the relative self-call %s, which is the toolkit's own form; an adopter's caller must use %s pinned to a full commit SHA",
 				callerFile, hextapRelativeReusableWorkflow, hextapReusableWorkflow), false
 		case !workflow.HextapCaller && !workflow.SelfCaller:
+			if count := jobCount(workflow.document); count > 1 {
+				return fmt.Sprintf("%s carries %d jobs, and every job of a caller is a release run against the same tag; the caller must carry exactly one",
+					callerFile, count), false
+			}
+			if job, key, found := guardedJob(workflow.document); found {
+				if key == "strategy" {
+					return fmt.Sprintf("job %q of %s carries a strategy, so it would run the release once per matrix leg against the same tag",
+						job, callerFile), false
+				}
+				return fmt.Sprintf("job %q of %s carries an if: condition, so it cannot be shown to run for the pushed tag, and a caller whose call is skipped owns nothing",
+					job, callerFile), false
+			}
 			return fmt.Sprintf("%s does not call %s in every job, so it is not the recognised owner of the pushed tag",
 				callerFile, hextapReusableWorkflow), false
 		case workflow.TagTrigger == TagTriggerUnknown:
@@ -1184,6 +1215,43 @@ func (report *Report) callerVerification(policy Policy) (string, bool) {
 		}
 	}
 	return fmt.Sprintf("no active workflow named %s exists, so no workflow in this source tree is the recognised owner of the pushed tag", callerFile), false
+}
+
+// jobCount reports how many jobs the document declares, or zero when the
+// jobs block is not a readable mapping.
+func jobCount(document *node) int {
+	if document == nil {
+		return 0
+	}
+	jobs := document.child("jobs")
+	if jobs == nil || jobs.kind != nodeMapping {
+		return 0
+	}
+	return len(jobs.keys)
+}
+
+// guardedJob names the first job carrying an if: condition or a strategy,
+// and which of the two, if any.
+func guardedJob(document *node) (job, key string, found bool) {
+	if document == nil {
+		return "", "", false
+	}
+	jobs := document.child("jobs")
+	if jobs == nil || jobs.kind != nodeMapping {
+		return "", "", false
+	}
+	for _, name := range jobs.keys {
+		current := jobs.values[name]
+		if current == nil || current.kind != nodeMapping {
+			continue
+		}
+		for _, guard := range []string{"if", "strategy"} {
+			if current.has(guard) {
+				return name, guard, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func resolveCallerFile(callerFile string) string {
@@ -1199,6 +1267,15 @@ func resolveCallerFile(callerFile string) string {
 // else, such as a workflow_dispatch input or a with: value, is data, and
 // auditing it produced refusals against workflows that were fully pinned. A
 // job or step list the reader cannot represent is reported rather than skipped.
+//
+// Two boundaries are deliberate. A run: step is the tagged source's own shell
+// code and is not read as a program; the one shape refused is a downloader
+// piped into an interpreter, which fetches code the tag does not fix and is
+// the idiom by which floating toolchains arrive. And the runner image a job
+// selects with runs-on is the platform's chosen execution environment, revised
+// by GitHub over time; Hextap's release contract builds natively on hosted
+// runners for every target, so that drift is a platform decision recorded
+// outside this package rather than a finding it can raise.
 func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 	file, document, events := workflow.File, workflow.document, workflow.Events
 	jobs := document.child("jobs")
@@ -1251,9 +1328,232 @@ func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 				findings = append(findings, auditRemoteContexts(file, step.child("uses"), step.child("with"), policy)...)
 				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"), events, false, policy)...)
 			}
+			if step.has("run") {
+				findings = append(findings, auditRunStep(file, step.child("run"))...)
+			}
 		}
 	}
 	return findings
+}
+
+// auditRunStep refuses the one shape of shell code the audit reads: a
+// downloader piped into an interpreter, or a download substituted into a
+// command line. The script that arrives is fixed by nothing in the tagged
+// source, so the same tag can run different code on a rerun while every
+// action stays pinned, and the idiom is how floating toolchains are usually
+// installed. Everything else in a run: body is the tagged source's own code
+// and is left alone: a download saved to a file and executed afterwards, on
+// the same line or a later one, is not caught, and this doc says so rather
+// than implying a shell audit.
+func auditRunStep(file string, run *node) []Finding {
+	if run == nil || run.kind != nodeScalar {
+		return nil
+	}
+	var findings []Finding
+	for _, line := range strings.Split(run.value, "\n") {
+		switch fetchesAndUses(line) {
+		case downloadExecuted:
+			findings = append(findings, Finding{
+				File:   file,
+				Rule:   RuleUnpinnedRemoteScript,
+				Detail: fmt.Sprintf("a run step executes code it downloads while running: %q", strings.TrimSpace(line)),
+				Remedy: "install the tool through a setup action pinned to a full commit SHA with an exact version, or commit the script to the tagged source",
+			})
+		case downloadCaptured:
+			findings = append(findings, Finding{
+				File:   file,
+				Rule:   RuleUnpinnedRemoteInput,
+				Detail: fmt.Sprintf("a run step captures a value it downloads while running, so the build depends on what the network returns when the job runs: %q", strings.TrimSpace(line)),
+				Remedy: "commit the value to the tagged source, or compute it from data the tag fixes",
+			})
+		}
+	}
+	return findings
+}
+
+// downloadUse classifies what one line of shell does with a download.
+type downloadUse int
+
+const (
+	downloadUnused downloadUse = iota
+	// downloadCaptured means the download's text is captured into a variable
+	// or an argument, so the build depends on it without executing it.
+	downloadCaptured
+	// downloadExecuted means the download's text is run as code.
+	downloadExecuted
+)
+
+// downloaders and interpreters are the command names the run-step rule
+// recognises: a downloader anywhere in a pipe segment or a substitution, an
+// interpreter only in command position of a later pipe segment.
+var (
+	downloaders  = []string{"curl", "wget", "invoke-webrequest", "iwr"}
+	interpreters = []string{"sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "perl", "ruby", "pwsh", "powershell", "iex", "invoke-expression"}
+	// commandPrefixes are the words that may precede the command in a pipe
+	// segment without being it.
+	commandPrefixes = map[string]struct{}{"sudo": {}, "env": {}, "exec": {}, "time": {}, "nice": {}, "command": {}}
+	// executors are the words after which a substituted download is run as
+	// code rather than captured: an interpreter, or eval, source, exec, the
+	// dot builtin, or an interpreter's -c, -e and -Command flags.
+	executors = map[string]struct{}{"eval": {}, "source": {}, ".": {}, "exec": {}, "-c": {}, "-e": {}, "-command": {}, "--command": {}}
+)
+
+// fetchesAndUses classifies one line of shell. A downloader's output piped
+// into an interpreter that is the command of a later segment (curl … | sh,
+// wget -qO- … | sudo bash, curl … | /usr/bin/env bash, iwr … |
+// Invoke-Expression), or a download substituted where a command is expected
+// (bash <(curl …), sh -c "$(curl …)", eval "$(curl …)", $(curl …) at the
+// start of a line), is a download executed. A download substituted anywhere
+// else (VERSION=$(curl …), an argument built from one) is a download
+// captured. A substitution counts only when the downloader is inside it: a
+// header built from $(cat token) on a curl line downloads nothing it then
+// uses. A pipe counts only when the interpreter is the command of a later
+// segment, so curl … | jq -r '.node' is a filter, and || is a fallback, not
+// a pipe. A quoted pipeline handed to an interpreter (sh -c "curl … | sh")
+// is read like an unquoted one.
+func fetchesAndUses(line string) downloadUse {
+	lowered := strings.ToLower(line)
+	if !containsCommand(lowered, downloaders) {
+		return downloadUnused
+	}
+	// Each substitution's body is scanned to its closing parenthesis, which
+	// on a line of nested or unclosed openers reaches the end of the line
+	// every time. A line carrying more substitutions than any real command
+	// does is read as an execution rather than scanned quadratically.
+	const maxSubstitutions = 64
+	use := downloadUnused
+	examined := 0
+	for _, opener := range []string{"$(", "<("} {
+		for start := strings.Index(lowered, opener); start >= 0; {
+			if examined++; examined > maxSubstitutions {
+				return downloadExecuted
+			}
+			if containsCommand(substitutionBody(lowered[start+len(opener):]), downloaders) {
+				if executesSubstitution(lowered[:start], opener) {
+					return downloadExecuted
+				}
+				use = downloadCaptured
+			}
+			next := strings.Index(lowered[start+1:], opener)
+			if next < 0 {
+				break
+			}
+			start += 1 + next
+		}
+	}
+	segments := strings.Split(strings.ReplaceAll(lowered, "||", " ; "), "|")
+	downloaded := false
+	for _, segment := range segments {
+		if downloaded && commandOf(segment, interpreters) {
+			return downloadExecuted
+		}
+		if containsCommand(segment, downloaders) {
+			downloaded = true
+		}
+	}
+	return use
+}
+
+// executesSubstitution reports whether the text before a substitution puts
+// the substituted download where a command is expected: at the start of a
+// command, as the standard input redirected from a process substitution
+// (< <(curl …), where the download itself is read; < $(curl …) names a file
+// and is a capture), or as the operand of an interpreter or an executor
+// word. A prefix that is nothing but whitespace the shell would not even
+// split, such as a pasted non-breaking space, is read as a command start.
+func executesSubstitution(prefix, opener string) bool {
+	prefix = strings.TrimRight(prefix, " \t\"'`")
+	if prefix == "" {
+		return true
+	}
+	terminators := []string{"|", ";", "&&", "(", "{"}
+	if opener == "<(" {
+		terminators = append(terminators, "<")
+	}
+	for _, terminator := range terminators {
+		if strings.HasSuffix(prefix, terminator) {
+			return true
+		}
+	}
+	words := strings.Fields(prefix)
+	if len(words) == 0 {
+		return true
+	}
+	last := strings.Trim(words[len(words)-1], "\"'`")
+	if _, executor := executors[last]; executor {
+		return true
+	}
+	command := last[strings.LastIndex(last, "/")+1:]
+	for _, name := range interpreters {
+		if command == name {
+			return true
+		}
+	}
+	return false
+}
+
+// substitutionBody returns the text of a substitution up to its closing
+// parenthesis, or to the end of the line when none closes it.
+func substitutionBody(text string) string {
+	depth := 1
+	for index := 0; index < len(text); index++ {
+		switch text[index] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return text[:index]
+			}
+		}
+	}
+	return text
+}
+
+// commandOf reports whether the command a pipe segment runs is one of the
+// names. Each word is stripped of surrounding quotes and of any directory
+// first, then sudo -E, /usr/bin/env -i, exec and a VAR=value assignment are
+// skipped as prefixes, so that curl … | /usr/bin/env bash and a quoted
+// pipeline such as sh -c "curl … | sh" both read their real command.
+func commandOf(segment string, names []string) bool {
+	for _, word := range strings.Fields(segment) {
+		word = strings.Trim(word, "\"'`")
+		if word == "" {
+			continue
+		}
+		command := word[strings.LastIndex(word, "/")+1:]
+		if _, prefix := commandPrefixes[command]; prefix || strings.HasPrefix(command, "-") || (strings.Contains(word, "=") && !strings.HasPrefix(word, "=")) {
+			continue
+		}
+		for _, name := range names {
+			if command == name {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// containsCommand reports whether any of the names appears in the text as a
+// whole word, so that curl matches and curly does not.
+func containsCommand(text string, names []string) bool {
+	for _, name := range names {
+		for start := strings.Index(text, name); start >= 0; {
+			end := start + len(name)
+			before := start == 0 || !isIdentifierByte(text[start-1])
+			after := end == len(text) || !isIdentifierByte(text[end])
+			if before && after {
+				return true
+			}
+			next := strings.Index(text[start+1:], name)
+			if next < 0 {
+				break
+			}
+			start += 1 + next
+		}
+	}
+	return false
 }
 
 // fetchesSource reports whether a readable uses: value names an action that

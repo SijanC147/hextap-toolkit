@@ -1630,6 +1630,44 @@ jobs:
         with:
           token: not-an-expression
 `,
+		"a token produced by a step": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh release upload "$TAG" dist/app.exe
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+`,
+		"a token produced by an earlier job": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ needs.auth.outputs.token }}"
+`,
+		"a token carried by the matrix": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ matrix.token }}"
+`,
 		"a literal app private key": `name: Manual
 on:
   workflow_dispatch:
@@ -1878,7 +1916,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: echo "${{ needs.build.outputs.secrets }}"
+      - run: echo "${{ runner.secrets }}"
+`,
+		"a job result and a step outcome are states, not outputs": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ needs.build.result }} ${{ steps.build.outcome }} ${{ steps.build.conclusion }}"
 `,
 		"read-all shorthand": `name: Manual
 on:
@@ -2112,6 +2162,66 @@ jobs:
 			}
 		})
 	}
+
+	t.Run("conditional caller job", func(t *testing.T) {
+		conditional := strings.Replace(caller("  push:\n    tags:\n      - \"v*\"\n"), "  release:\n", "  release:\n    if: github.event_name == 'push'\n", 1)
+		report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: conditional})
+		if findWorkflow(t, report, DefaultCallerFile).HextapCaller {
+			t.Fatal("a caller whose only job is conditional was recognised as the caller")
+		}
+		findings := preflightFindings(t, report, Policy{})
+		var missing bool
+		for _, finding := range findings {
+			if finding.Rule == RuleMissingHextapCaller && strings.Contains(finding.Detail, "if: condition") {
+				missing = true
+			}
+		}
+		if !missing {
+			t.Fatalf("findings = %v, want the conditional job named as the reason no caller is verified", findings)
+		}
+	})
+
+	t.Run("caller with two jobs", func(t *testing.T) {
+		doubled := caller("  push:\n    tags:\n      - \"v*\"\n") + `  again:
+    uses: SijanC147/hextap-toolkit/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567
+    with:
+      manifest_path: .hextap.json
+      tag: ${{ github.ref_name }}
+      mode: homebrew-only
+`
+		report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: doubled})
+		if findWorkflow(t, report, DefaultCallerFile).HextapCaller {
+			t.Fatal("a caller running the release twice was recognised as the caller")
+		}
+		findings := preflightFindings(t, report, Policy{})
+		var missing bool
+		for _, finding := range findings {
+			if finding.Rule == RuleMissingHextapCaller && strings.Contains(finding.Detail, "exactly one") {
+				missing = true
+			}
+		}
+		if !missing {
+			t.Fatalf("findings = %v, want the job count named as the reason no caller is verified", findings)
+		}
+	})
+
+	t.Run("caller job with a strategy", func(t *testing.T) {
+		matrixed := strings.Replace(caller("  push:\n    tags:\n      - \"v*\"\n"), "  release:\n", "  release:\n    strategy:\n      matrix:\n        mode: [full, homebrew-only]\n", 1)
+		report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: matrixed})
+		if findWorkflow(t, report, DefaultCallerFile).HextapCaller {
+			t.Fatal("a caller whose job runs once per matrix leg was recognised as the caller")
+		}
+		findings := preflightFindings(t, report, Policy{})
+		var missing bool
+		for _, finding := range findings {
+			if finding.Rule == RuleMissingHextapCaller && strings.Contains(finding.Detail, "matrix leg") {
+				missing = true
+			}
+		}
+		if !missing {
+			t.Fatalf("findings = %v, want the matrix named as the reason no caller is verified", findings)
+		}
+	})
 
 	t.Run("unreadable trigger", func(t *testing.T) {
 		report := analyzeWorkflows(t, map[string]string{
@@ -2873,5 +2983,97 @@ jobs:
 		if finding.Rule != RuleMutableSourceRef {
 			t.Fatalf("unexpected rule in %v", finding)
 		}
+	}
+}
+
+// TestRunStepsThatExecuteDownloadsAreRefused covers the one shape of shell
+// code the audit reads: a downloader piped or substituted into an interpreter,
+// which runs code the tagged source does not fix.
+func TestRunStepsThatExecuteDownloadsAreRefused(t *testing.T) {
+	audit := func(t *testing.T, run string) []Finding {
+		t.Helper()
+		report := analyzeWorkflows(t, map[string]string{
+			DefaultCallerFile: hextapCallerWorkflow,
+			"release.yml": `name: Scripts
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ` + run + `
+`,
+		})
+		return report.PinFindings(Policy{})
+	}
+	refused := map[string]string{
+		"curl piped into sh":                                "curl -fsSL https://host/build.sh | sh",
+		"wget piped into sudo bash":                         "wget -qO- https://host/install.sh | sudo bash",
+		"process substitution":                              "bash <(curl -s https://host/setup.sh)",
+		"command substitution":                              "sh -c \"$(curl -fsSL https://host/get.sh)\"",
+		"eval of a download":                                "eval \"$(curl -s https://host/env.sh)\"",
+		"a block body with the idiom":                       "|\n          set -euo pipefail\n          curl https://sh.rustup.rs -sSf | sh -s -- -y\n",
+		"powershell download and run":                       "iwr https://host/setup.ps1 | iex",
+		"the cmdlet spelled out":                            "Invoke-WebRequest https://host/setup.ps1 | Invoke-Expression",
+		"an interpreter behind a path":                      "curl -s https://host/x.sh | /bin/sh",
+		"an interpreter behind sudo":                        "curl -s https://host/x.sh | sudo -E bash -s -- --yes",
+		"an interpreter behind env":                         "curl -sL https://host/x.sh | /usr/bin/env bash",
+		"a quoted pipeline handed to sh":                    "sh -c \"curl https://host/x.sh | sh\"",
+		"a quoted pipeline handed to bash":                  "bash -c 'curl https://host/x.sh | bash'",
+		"a substitution at the start of a line":             "$(curl -s https://host/cmd)",
+		"a substitution sourced":                            ". <(curl -s https://host/env.sh)",
+		"a substitution after a non-breaking space":         "\u00a0$(curl -sL https://host/cmd)",
+		"a powershell command from a download":              "pwsh -Command \"$(iwr https://host/x.ps1)\"",
+		"a script fed to standard input":                    "bash -s < <(curl -sL https://host/x.sh)",
+		"a powershell long flag":                            "pwsh --command \"$(iwr https://host/x.ps1)\"",
+		"a line with more substitutions than a command has": "curl https://host/x " + strings.Repeat("$(", 100) + "$(curl https://host/y)",
+	}
+	for name, run := range refused {
+		t.Run(name, func(t *testing.T) {
+			findings := audit(t, run)
+			if len(findings) != 1 || findings[0].Rule != RuleUnpinnedRemoteScript {
+				t.Fatalf("findings = %v, want one unpinned-remote-script finding", findings)
+			}
+		})
+	}
+	accepted := map[string]string{
+		"a download saved to disk":           "curl -fsSLo dist/tool.tar.gz https://host/tool.tar.gz",
+		"a header built by substitution":     "curl -H \"Authorization: Bearer $(cat token)\" https://api.example.com/x -o out.json",
+		"a url built by substitution":        "curl -sS \"https://api.example.com/$(cat id.txt)\" -o out.json",
+		"a filter reading a field":           "curl -s https://api.example.com/x | jq -r '.node'",
+		"a sed that mentions shells":         "curl -s https://host/list | sed 's/sh/bash/'",
+		"a same-line save then run":          "curl -sL https://host/i.sh -o i.sh && sh i.sh",
+		"a fallback after a failed download": "curl -f https://host/x || bash retry.sh",
+		"a lockfile-managed install":         "bun install --frozen-lockfile",
+		"a build":                            "go build -trimpath ./...",
+		"a word that contains a name":        "echo curly | shred -u -",
+		"a pipe into a non-interpreter":      "curl -s https://host/list | grep tool",
+	}
+	for name, run := range accepted {
+		t.Run(name, func(t *testing.T) {
+			if findings := audit(t, run); len(findings) != 0 {
+				t.Fatalf("a run step that executes nothing it downloads was refused: %v", findings)
+			}
+		})
+	}
+
+	// A download captured into a variable or an argument is not executed,
+	// but the build then depends on what the network returned; it is
+	// reported as an unpinned input with a remedy that fits.
+	captured := map[string]string{
+		"a version captured from an api":          "VERSION=$(curl -s https://api.github.com/repos/x/y/releases/latest | jq -r .tag_name)",
+		"a tag captured in quotes":                "TAG=\"$(curl -s https://api.example.com/latest)\"",
+		"a checksum of a download":                "echo \"sha=$(curl -sL https://host/x | sha256sum)\" >> $GITHUB_OUTPUT",
+		"a redirect from a file a download names": "foo < $(curl -sL https://host/name)",
+	}
+	for name, run := range captured {
+		t.Run(name, func(t *testing.T) {
+			findings := audit(t, run)
+			if len(findings) != 1 || findings[0].Rule != RuleUnpinnedRemoteInput {
+				t.Fatalf("findings = %v, want one unpinned-remote-input finding", findings)
+			}
+		})
 	}
 }
