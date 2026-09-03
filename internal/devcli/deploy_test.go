@@ -163,6 +163,8 @@ func canonicalDeployRunner(t *testing.T, project string, unresolved bool) *scrip
 			return Result{Stdout: validReleaseViewJSON("v0.3.0")}, nil
 		case "gh release verify v0.3.0 --repo " + ToolkitRepository:
 			return Result{}, nil
+		case "git -C " + project + " ls-files -z --cached --others --exclude-standard":
+			return fixtureListing("go.mod", ".hextap.json", "scripts/check-actionlint.sh"), nil
 		case "gofmt -l .", "git -C " + project + " diff --check", filepath.Join(project, "scripts", "check-actionlint.sh"), "bash -n " + filepath.Join(project, "scripts", "check-actionlint.sh"), "shellcheck " + filepath.Join(project, "scripts", "check-actionlint.sh"):
 			return Result{}, nil
 		}
