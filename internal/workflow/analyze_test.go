@@ -88,6 +88,15 @@ func analyzeWorkflows(t *testing.T, files map[string]string) *Report {
 	return report
 }
 
+func preflightFindings(t *testing.T, report *Report, policy Policy) []Finding {
+	t.Helper()
+	findings, err := report.PreflightFindings(policy)
+	if err != nil {
+		t.Fatalf("preflight findings: %v", err)
+	}
+	return findings
+}
+
 func findWorkflow(t *testing.T, report *Report, file string) Workflow {
 	t.Helper()
 	for _, workflow := range report.Workflows {
@@ -412,7 +421,7 @@ jobs:
 				DefaultCallerFile: hextapCallerWorkflow,
 				test.file:         test.content,
 			})
-			findings := report.TagExclusivityFindings("")
+			findings := report.TagExclusivityFindings(Policy{})
 			if len(findings) != 1 {
 				t.Fatalf("findings = %v, want exactly one against %s", findings, test.file)
 			}
@@ -458,7 +467,7 @@ jobs:
 	if findWorkflow(t, report, DefaultCallerFile).HextapCaller {
 		t.Fatal("a caller carrying a second asset-uploading job must not be recognised as the caller")
 	}
-	findings := report.TagExclusivityFindings("")
+	findings := report.TagExclusivityFindings(Policy{})
 	if len(findings) != 1 || findings[0].Rule != RuleCompetingTagTrigger {
 		t.Fatalf("findings = %v, want one competing-tag-trigger", findings)
 	}
@@ -468,9 +477,10 @@ jobs:
 // a suffix match accepted any repository publishing a file at the same path.
 func TestCallerExemptionRequiresTheToolkitRepository(t *testing.T) {
 	tests := map[string]string{
-		"foreign repository at the same path": "attacker/repo/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567",
-		"toolkit path without a commit SHA":   "SijanC147/hextap-toolkit/.github/workflows/release-go.yml@main",
-		"relative escape out of the checkout": "./../evil/.github/workflows/release-go.yml",
+		"foreign repository at the same path":    "attacker/repo/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567",
+		"toolkit path without a commit SHA":      "SijanC147/hextap-toolkit/.github/workflows/release-go.yml@main",
+		"relative escape out of the checkout":    "./../evil/.github/workflows/release-go.yml",
+		"relative self-call outside the toolkit": "./.github/workflows/release-go.yml",
 	}
 	for name, reference := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -486,9 +496,9 @@ jobs:
 `,
 			})
 			if findWorkflow(t, report, DefaultCallerFile).HextapCaller {
-				t.Fatalf("%q was accepted as the Hextap reusable release workflow", reference)
+				t.Fatalf("%q was accepted as the external Hextap reusable release workflow", reference)
 			}
-			if findings := report.TagExclusivityFindings(""); len(findings) != 1 {
+			if findings := report.TagExclusivityFindings(Policy{}); len(findings) != 1 {
 				t.Fatalf("findings = %v, want one", findings)
 			}
 		})
@@ -515,7 +525,7 @@ jobs:
 	if caller.TagTrigger != TagTriggerUnknown {
 		t.Fatalf("trigger = %v, want unknown when the name cannot be represented", caller.TagTrigger)
 	}
-	findings := report.TagExclusivityFindings("")
+	findings := report.TagExclusivityFindings(Policy{})
 	if len(findings) != 1 || findings[0].Rule != RuleUnreadableWorkflow {
 		t.Fatalf("findings = %v, want one unreadable-workflow finding", findings)
 	}
@@ -551,7 +561,7 @@ jobs:
 `,
 	})
 	flagged := make(map[string]bool)
-	for _, finding := range report.TagExclusivityFindings("") {
+	for _, finding := range report.TagExclusivityFindings(Policy{}) {
 		flagged[finding.File] = true
 	}
 	if !flagged["tagged.yml"] || !flagged["chained.yml"] {
@@ -850,7 +860,7 @@ jobs:
 		"notes.md":                      "not a workflow at all\n",
 	})
 
-	if findings := report.TagExclusivityFindings(""); len(findings) != 0 {
+	if findings := report.TagExclusivityFindings(Policy{}); len(findings) != 0 {
 		t.Fatalf("safe workflows produced findings: %v", findings)
 	}
 
@@ -884,7 +894,7 @@ jobs:
 `
 
 	report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: squatter})
-	findings := report.TagExclusivityFindings("")
+	findings := report.TagExclusivityFindings(Policy{})
 	if len(findings) != 1 || findings[0].Rule != RuleCompetingTagTrigger {
 		t.Fatalf("findings = %v, want one competing-tag-trigger against the unverified caller", findings)
 	}
@@ -913,24 +923,48 @@ jobs:
       mode: full
 `
 
-	for name, content := range map[string]string{
-		"adopter full SHA pin":       hextapCallerWorkflow,
-		"toolkit relative self call": selfCaller,
+	for name, test := range map[string]struct {
+		content string
+		policy  Policy
+	}{
+		"adopter full SHA pin":       {hextapCallerWorkflow, Policy{}},
+		"toolkit relative self call": {selfCaller, Policy{SelfRelease: true}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: content})
+			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: test.content})
 			caller := findWorkflow(t, report, DefaultCallerFile)
-			if !caller.HextapCaller {
+			if !caller.HextapCaller && !caller.SelfCaller {
 				t.Fatalf("caller not recognised, trigger reason %q", caller.TriggerReason)
 			}
 			if caller.TagTrigger != TagTriggerFiltered {
 				t.Fatalf("caller trigger = %v, want a filtered tag trigger", caller.TagTrigger)
 			}
-			if findings := report.TagExclusivityFindings(""); len(findings) != 0 {
+			if findings := report.TagExclusivityFindings(test.policy); len(findings) != 0 {
 				t.Fatalf("verified caller produced findings: %v", findings)
 			}
 		})
 	}
+
+	// The relative self-call is the toolkit's own form. A directory cannot show
+	// which repository it belongs to, so outside a stated self-release an
+	// adopter-authored release-go.yml at that path must earn nothing.
+	t.Run("relative self call outside the toolkit", func(t *testing.T) {
+		report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: selfCaller})
+		findings := report.TagExclusivityFindings(Policy{})
+		if len(findings) != 1 || findings[0].Rule != RuleCompetingTagTrigger || !strings.Contains(findings[0].Detail, "relative self-call") {
+			t.Fatalf("findings = %v, want the self-caller refused as competing", findings)
+		}
+		rules := make(map[string]string)
+		for _, finding := range preflightFindings(t, report, Policy{}) {
+			rules[finding.Rule] = finding.Detail
+		}
+		if !strings.Contains(rules[RuleMissingHextapCaller], "toolkit's own form") {
+			t.Fatalf("preflight rules = %v, want no verified caller, explained as the toolkit's own form", rules)
+		}
+		if _, refused := rules[RuleUnauditedLocalAction]; !refused {
+			t.Fatalf("preflight rules = %v, want the absent callee reported as unaudited", rules)
+		}
+	})
 }
 
 func TestPreflightRefusesSourceWithoutAVerifiedCaller(t *testing.T) {
@@ -946,7 +980,7 @@ jobs:
 `,
 	})
 
-	findings := report.PreflightFindings("")
+	findings := preflightFindings(t, report, Policy{})
 	if len(findings) != 1 || findings[0].Rule != RuleMissingHextapCaller {
 		t.Fatalf("findings = %v, want one missing-hextap-caller finding", findings)
 	}
@@ -968,7 +1002,7 @@ jobs:
 `,
 	})
 
-	findings, err := Preflight(directory, "")
+	findings, err := Preflight(directory, Policy{DefaultBranchDirectory: directory})
 	if err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
@@ -1300,16 +1334,28 @@ func TestToolkitOwnWorkflowsSatisfyTheirOwnPolicy(t *testing.T) {
 			t.Errorf("%s was not readable: %s", workflow.File, workflow.TriggerReason)
 		}
 	}
-	if findings := report.PreflightFindings(""); len(findings) != 0 {
+	if findings := preflightFindings(t, report, Policy{SelfRelease: true}); len(findings) != 0 {
 		t.Fatalf("the toolkit's own workflows fail the policy: %v", findings)
 	}
 
 	caller := findWorkflow(t, report, DefaultCallerFile)
-	if !caller.HextapCaller {
-		t.Fatal("the toolkit's own release caller was not recognised as a Hextap caller")
+	if !caller.SelfCaller {
+		t.Fatal("the toolkit's own release caller was not recognised as the relative self-caller")
 	}
 	if !caller.TagTrigger.RespondsToTagPush() {
 		t.Fatal("the toolkit's own release caller must respond to a tag push")
+	}
+
+	// Under the adopter policy the same tree must be refused: the self-call
+	// form is exactly what an adopter-authored release-go.yml would use.
+	strict := preflightFindings(t, report, Policy{})
+	if len(strict) == 0 {
+		t.Fatal("the toolkit's own self-call passed the adopter policy")
+	}
+	for _, finding := range strict {
+		if finding.Rule != RuleCompetingTagTrigger && finding.Rule != RuleMissingHextapCaller {
+			t.Fatalf("unexpected finding under the adopter policy: %v", finding)
+		}
 	}
 }
 
@@ -1762,10 +1808,10 @@ jobs:
 	for name, triggers := range tests {
 		t.Run(name, func(t *testing.T) {
 			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: caller(triggers)})
-			if findings := report.TagExclusivityFindings(""); len(findings) != 0 {
+			if findings := report.TagExclusivityFindings(Policy{}); len(findings) != 0 {
 				t.Fatalf("nothing competes for the tag, yet exclusivity reported %v", findings)
 			}
-			findings := report.PreflightFindings("")
+			findings := preflightFindings(t, report, Policy{})
 			if len(findings) != 1 || findings[0].Rule != RuleMissingHextapCaller {
 				t.Fatalf("findings = %v, want one missing-hextap-caller finding", findings)
 			}
@@ -1779,11 +1825,11 @@ jobs:
 		report := analyzeWorkflows(t, map[string]string{
 			DefaultCallerFile: caller("  push:\n    tags:\n      - \"v*\"\n  puush:\n"),
 		})
-		exclusivity := report.TagExclusivityFindings("")
+		exclusivity := report.TagExclusivityFindings(Policy{})
 		if len(exclusivity) != 1 || exclusivity[0].Rule != RuleUnreadableWorkflow {
 			t.Fatalf("exclusivity findings = %v, want the caller refused as unreadable rather than exempted", exclusivity)
 		}
-		preflight := report.PreflightFindings("")
+		preflight := preflightFindings(t, report, Policy{})
 		if len(preflight) != 2 || preflight[1].Rule != RuleMissingHextapCaller {
 			t.Fatalf("preflight findings = %v, want the unreadable refusal plus a missing caller", preflight)
 		}
@@ -1833,10 +1879,295 @@ jobs:
 			if ci.TagTrigger != test.trigger {
 				t.Fatalf("trigger = %v (%s), want %v", ci.TagTrigger, ci.TriggerReason, test.trigger)
 			}
-			findings := report.TagExclusivityFindings("")
+			findings := report.TagExclusivityFindings(Policy{})
 			if want := map[bool]int{true: 1, false: 0}[test.trigger.RespondsToTagPush()]; len(findings) != want {
 				t.Fatalf("findings = %v, want %d", findings, want)
 			}
 		})
+	}
+}
+
+// TestWorkflowRunCompetitorOnTheDefaultBranchIsRefused guards the review
+// finding that chains were resolved only inside the tagged tree. GitHub runs a
+// workflow_run workflow from the default branch's definition, and only if the
+// file exists there, so a chained publisher that exists only on the default
+// branch was invisible, and the preflight certified a surface it never read.
+func TestWorkflowRunCompetitorOnTheDefaultBranchIsRefused(t *testing.T) {
+	chained := `name: Chained publisher
+on:
+  workflow_run:
+    workflows:
+      - Hextap release
+    types:
+      - completed
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh release upload "$TAG" extra.exe
+`
+	tagged := writeWorkflows(t, map[string]string{DefaultCallerFile: hextapCallerWorkflow})
+	defaultBranch := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"chained.yml":     chained,
+	})
+
+	if _, err := Preflight(tagged, Policy{}); err == nil {
+		t.Fatal("a policy without a default-branch directory must be refused, not read as the same tree")
+	}
+
+	findings, err := Preflight(tagged, Policy{DefaultBranchDirectory: defaultBranch})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	rules := make(map[string]int)
+	for _, finding := range findings {
+		if finding.File != "chained.yml" {
+			t.Fatalf("finding against %s: %v", finding.File, finding)
+		}
+		if !strings.Contains(finding.Detail, "default branch") && finding.Rule == RuleCompetingTagTrigger {
+			t.Fatalf("the competing finding must say where the definition lives: %v", finding)
+		}
+		rules[finding.Rule]++
+	}
+	if rules[RuleCompetingTagTrigger] != 1 || rules[RuleUnpinnedAction] != 1 {
+		t.Fatalf("rules = %v, want the chained workflow refused and its unpinned action audited", rules)
+	}
+
+	// A chained publisher that also declares its own tag trigger is no less
+	// chained: on the default branch the chain is the only route by which the
+	// file runs, since GitHub reads push from the tagged commit where it does
+	// not exist.
+	bothTriggers := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"chained.yml":     strings.Replace(chained, "on:\n  workflow_run:", "on:\n  push:\n    tags:\n      - \"v*\"\n  workflow_run:", 1),
+	})
+	findings, err = Preflight(tagged, Policy{DefaultBranchDirectory: bothTriggers})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	rules = make(map[string]int)
+	for _, finding := range findings {
+		rules[finding.Rule]++
+	}
+	if rules[RuleCompetingTagTrigger] != 1 || rules[RuleUnpinnedAction] != 1 {
+		t.Fatalf("rules = %v, want a chained publisher with its own push trigger refused all the same", rules)
+	}
+
+	// A local reusable workflow the chained publisher calls runs on the tag
+	// too, and is audited with it.
+	viaCallee := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"publish.yml": `name: Publish
+on:
+  workflow_run:
+    workflows:
+      - Hextap release
+    types:
+      - completed
+jobs:
+  add:
+    uses: ./.github/workflows/helper.yml
+`,
+		"helper.yml": `name: Helper
+on:
+  workflow_call:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: evil:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+`,
+	})
+	findings, err = Preflight(tagged, Policy{DefaultBranchDirectory: viaCallee})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	rules = make(map[string]int)
+	for _, finding := range findings {
+		rules[finding.File+" "+finding.Rule]++
+	}
+	want := map[string]int{
+		"publish.yml " + RuleCompetingTagTrigger: 1,
+		"helper.yml " + RuleUnpinnedContainer:    1,
+		"helper.yml " + RuleUnpinnedAction:       1,
+		"helper.yml " + RuleMutableSourceRef:     1,
+	}
+	for key, count := range want {
+		if rules[key] != count {
+			t.Fatalf("rules = %v, want %v: the callee of a chained publisher must be audited", rules, want)
+		}
+	}
+
+	// Two trees with the same content must not report the same file twice;
+	// two directories are used so that the dedupe, not the same-pointer
+	// shortcut, is what is exercised.
+	first := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"chained.yml":     chained,
+	})
+	second := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"chained.yml":     chained,
+	})
+	once, err := Preflight(first, Policy{DefaultBranchDirectory: second})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	if len(once) != 2 {
+		t.Fatalf("findings = %v, want one competing finding and one unpinned action, not duplicates", once)
+	}
+
+	// The single-tree method refuses a policy naming another tree rather than
+	// ignoring it.
+	report, err := Analyze(tagged)
+	if err != nil {
+		t.Fatalf("analyse: %v", err)
+	}
+	if _, err := report.PreflightFindings(Policy{DefaultBranchDirectory: defaultBranch}); err == nil {
+		t.Fatal("a single-tree preflight silently ignored a policy naming another default-branch directory")
+	}
+	if _, err := report.PreflightFindings(Policy{DefaultBranchDirectory: tagged}); err != nil {
+		t.Fatalf("a policy naming the analysed directory itself was refused: %v", err)
+	}
+
+	// A push workflow that exists only on the default branch does not run for
+	// the tag push: GitHub reads push workflows from the tagged commit.
+	pushOnly := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"later.yml":       incidentWorkflow,
+	})
+	quiet, err := Preflight(tagged, Policy{DefaultBranchDirectory: pushOnly})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	if len(quiet) != 0 {
+		t.Fatalf("a push workflow only on the default branch was reported: %v", quiet)
+	}
+}
+
+// TestCheckoutMustSelectAnImmutableCommit guards the review finding that a
+// full-SHA-pinned actions/checkout selecting repository: other/project with
+// ref: main was reported as pinned, though rerunning the tag builds whatever
+// main holds at the time.
+func TestCheckoutMustSelectAnImmutableCommit(t *testing.T) {
+	audit := func(t *testing.T, with string) []Finding {
+		t.Helper()
+		report := analyzeWorkflows(t, map[string]string{
+			DefaultCallerFile: hextapCallerWorkflow,
+			"release.yml": `name: Checkout
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+` + with,
+		})
+		return report.PinFindings()
+	}
+	mutable := map[string]string{
+		"another repository without a ref": "        with:\n          repository: other/project\n",
+		"another repository on a branch":   "        with:\n          repository: other/project\n          ref: main\n",
+		"a tag name":                       "        with:\n          ref: v1.2.3\n",
+		"the event ref name":               "        with:\n          ref: ${{ github.ref_name }}\n",
+		"a dispatch input":                 "        with:\n          ref: ${{ inputs.tag }}\n",
+		"an unreadable ref":                "        with:\n          ref: |\n            main\n",
+		"a capitalised input name":         "        with:\n          Ref: main\n",
+		"an uppercased repository input":   "        with:\n          REPOSITORY: other/project\n",
+		"two spellings of one input":       "        with:\n          ref: 3d3c42e5aac5ba805825da76410c181273ba90b1\n          Ref: main\n",
+	}
+	for name, with := range mutable {
+		t.Run("mutable "+name, func(t *testing.T) {
+			findings := audit(t, strings.ReplaceAll(with, "\\n", "\n"))
+			if len(findings) != 1 || findings[0].Rule != RuleMutableSourceRef {
+				t.Fatalf("findings = %v, want one mutable-source-ref finding", findings)
+			}
+		})
+	}
+	immutable := map[string]string{
+		"no ref and no repository":     "",
+		"a full commit SHA":            "        with:\n          ref: 3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"the event commit":             "        with:\n          ref: ${{ github.sha }}\n",
+		"the event commit in any case": "        with:\n          ref: ${{ GITHUB.SHA }}\n",
+		"the pinned reusable workflow commit in another repository": "        with:\n          repository: SijanC147/hextap-toolkit\n          ref: ${{ job.workflow_sha }}\n",
+		"a commit resolved by an earlier job":                       "        with:\n          ref: ${{ needs.validate.outputs.sha }}\n",
+	}
+	for name, with := range immutable {
+		t.Run("immutable "+name, func(t *testing.T) {
+			if findings := audit(t, strings.ReplaceAll(with, "\\n", "\n")); len(findings) != 0 {
+				t.Fatalf("an immutable checkout was refused: %v", findings)
+			}
+		})
+	}
+
+	// A ref: input is audited on any action, and a repository: without a
+	// ref: on any action whose name says it clones, so a fork of checkout
+	// does not lose the guarantee silently.
+	forks := map[string]string{
+		"a cached checkout fork on a branch":   "      - uses: nschloe/action-cached-lfs-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: main\n",
+		"a clone action without a ref":         "      - uses: sudosubin/git-clone-action@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          repository: other/project\n",
+		"a dispatch action targeting a branch": "      - uses: benc-uk/workflow-dispatch@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          workflow: release.yml\n          ref: main\n",
+	}
+	for name, step := range forks {
+		t.Run("mutable "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"release.yml": `name: Fork
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+` + strings.ReplaceAll(step, "\\n", "\n"),
+			})
+			findings := report.PinFindings()
+			if len(findings) != 1 || findings[0].Rule != RuleMutableSourceRef {
+				t.Fatalf("findings = %v, want one mutable-source-ref finding", findings)
+			}
+		})
+	}
+}
+
+// TestDirectoriesNamedLikeWorkflowsAreInactive guards the review finding that
+// a directory named templates.yml was reported as an unreadable workflow.
+// GitHub loads files; a directory has no contents to parse. A symbolic link is
+// still refused, because whether GitHub follows it is not established here.
+func TestDirectoriesNamedLikeWorkflowsAreInactive(t *testing.T) {
+	directory := writeWorkflows(t, map[string]string{DefaultCallerFile: hextapCallerWorkflow})
+	if err := os.Mkdir(filepath.Join(directory, "templates.yml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(DefaultCallerFile, filepath.Join(directory, "link.yml")); err != nil {
+		t.Skipf("symbolic links unavailable: %v", err)
+	}
+	report, err := Analyze(directory)
+	if err != nil {
+		t.Fatalf("analyse: %v", err)
+	}
+	templates := findWorkflow(t, report, "templates.yml")
+	if templates.Active || templates.InactiveReason == "" {
+		t.Fatalf("directory = %#v, want inactive with a reason", templates)
+	}
+	link := findWorkflow(t, report, "link.yml")
+	if !link.Active || link.TagTrigger != TagTriggerUnknown {
+		t.Fatalf("symbolic link = %#v, want active and unreadable", link)
+	}
+	var files []string
+	for _, finding := range report.TagExclusivityFindings(Policy{}) {
+		files = append(files, finding.File)
+	}
+	if len(files) != 1 || files[0] != "link.yml" {
+		t.Fatalf("flagged = %v, want only the symbolic link", files)
 	}
 }

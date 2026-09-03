@@ -59,6 +59,7 @@ const (
 	RuleFloatingRuntimeVersion = "floating-runtime-version"
 	RuleUnauditedLocalAction   = "unaudited-local-action"
 	RuleUnpinnedContainer      = "unpinned-container-image"
+	RuleMutableSourceRef       = "mutable-source-ref"
 )
 
 // Finding is one refusal. Detail names the exact construct and, where the
@@ -99,8 +100,14 @@ type Workflow struct {
 	// TriggerReason explains the classification in the terms of the file.
 	TriggerReason string
 	// HextapCaller reports whether every job in this file calls the Hextap
-	// reusable release workflow.
+	// reusable release workflow by its exact external reference, pinned to a
+	// full commit SHA. This is the only form an adopter may use.
 	HextapCaller bool
+	// SelfCaller reports whether every job in this file calls the reusable
+	// release workflow through the relative self-call the toolkit's own
+	// release uses. A directory cannot show which repository it belongs to,
+	// so this form earns the exemption only under Policy.SelfRelease.
+	SelfCaller bool
 	// ReleaseCapable reports whether the file can reach a release. It is true
 	// unless the workflow is proven unable to: the GITHUB_TOKEN scopes that
 	// reach a release are explicitly withheld, no job passes secrets on, and
@@ -113,12 +120,41 @@ type Workflow struct {
 
 	document *node
 	watches  []string
+	// chained records that the classification came from a workflow_run
+	// trigger resolved against a tag responder rather than from the file's
+	// own events.
+	chained bool
 }
 
 // Report is the result of analysing one workflow directory.
 type Report struct {
 	Directory string
 	Workflows []Workflow
+}
+
+// Policy states what the caller of the analysis knows that the files cannot
+// tell it. Every field defaults to the strict reading.
+type Policy struct {
+	// CallerFile selects the Hextap caller by base name. Empty selects
+	// DefaultCallerFile.
+	CallerFile string
+	// SelfRelease states that the analysed repository is the toolkit itself,
+	// the only repository whose caller may use the relative self-call
+	// ./.github/workflows/release-go.yml. A directory cannot show which
+	// repository it belongs to, so whoever calls the analysis must state it
+	// from evidence of their own: the reusable release workflow can take it
+	// from github.repository once it calls this package (SB23-831), and an
+	// adopter-side check leaves it false, under which an adopter-authored
+	// release-go.yml at that path earns nothing.
+	SelfRelease bool
+	// DefaultBranchDirectory is the workflow directory of the repository's
+	// default branch. GitHub runs a workflow_run workflow from the default
+	// branch's definition, and only when the file exists there, so a chained
+	// publisher can live on the default branch and nowhere in the tagged
+	// tree, and the tagged copy of one can differ from what actually runs.
+	// Preflight requires this field; pass the analysed directory itself when
+	// the tagged tree is the default branch.
+	DefaultBranchDirectory string
 }
 
 // Analyze reads and classifies every file in the given workflow directory.
@@ -143,6 +179,15 @@ func analyze(
 			report.Workflows = append(report.Workflows, Workflow{
 				File:           name,
 				InactiveReason: "GitHub loads only .yml and .yaml files, so this file never runs",
+			})
+			continue
+		}
+		if entry.IsDir() {
+			// GitHub loads workflow files, and a directory has no contents to
+			// parse whatever it is named.
+			report.Workflows = append(report.Workflows, Workflow{
+				File:           name,
+				InactiveReason: "GitHub loads only files, so a directory never runs whatever its name",
 			})
 			continue
 		}
@@ -187,7 +232,7 @@ func analyze(
 		workflow.Events = analysis.events
 		workflow.TagPatterns = analysis.patterns
 		workflow.watches = analysis.watches
-		workflow.HextapCaller = isHextapCaller(document)
+		workflow.HextapCaller, workflow.SelfCaller = callerForms(document)
 		workflow.ReleaseCapable = workflow.TagTrigger.RespondsToTagPush() || !provablyUnableToRelease(document)
 		report.Workflows = append(report.Workflows, workflow)
 	}
@@ -195,7 +240,7 @@ func analyze(
 	sort.Slice(report.Workflows, func(first, second int) bool {
 		return report.Workflows[first].File < report.Workflows[second].File
 	})
-	resolveWorkflowRunChains(report)
+	resolveWorkflowRunChains(report, nil)
 	return report, nil
 }
 
@@ -239,32 +284,45 @@ func (workflow Workflow) triggerNames() []string {
 // resolveWorkflowRunChains upgrades every workflow_run trigger that chains from
 // a workflow which itself responds to a tag push. It runs to a fixed point so
 // that a chain of chained workflows is resolved rather than only its first
-// link. Classifications only ever escalate, so the loop terminates.
-func resolveWorkflowRunChains(report *Report) {
+// link. Classifications only ever escalate, so the loop terminates. external
+// supplies tag responders from another tree: the default branch's chained
+// workflows fire off the runs the tagged tree's workflows produce.
+func resolveWorkflowRunChains(report *Report, external []Workflow) {
 	for changed := true; changed; {
 		changed = false
 		responders := make(map[string]bool)
-		for _, workflow := range report.Workflows {
-			if !workflow.Active || !workflow.TagTrigger.RespondsToTagPush() {
-				continue
-			}
-			for _, name := range workflow.triggerNames() {
-				responders[name] = true
+		for _, tree := range [][]Workflow{report.Workflows, external} {
+			for _, workflow := range tree {
+				if !workflow.Active || !workflow.TagTrigger.RespondsToTagPush() {
+					continue
+				}
+				for _, name := range workflow.triggerNames() {
+					responders[name] = true
+				}
 			}
 		}
 		for index := range report.Workflows {
 			workflow := &report.Workflows[index]
-			if !workflow.Active || len(workflow.watches) == 0 || workflow.TagTrigger.RespondsToTagPush() {
+			if !workflow.Active || len(workflow.watches) == 0 || workflow.chained {
 				continue
 			}
 			for _, watched := range workflow.watches {
 				if !responders[watched] {
 					continue
 				}
-				workflow.TagTrigger = TagTriggerAny
-				workflow.TriggerReason = fmt.Sprintf(
-					"workflow_run chains from %q, which itself starts on a tag push", watched)
+				reason := fmt.Sprintf("workflow_run chains from %q, which itself starts on a tag push", watched)
+				// A workflow that already responds through its own events
+				// keeps that classification; the chain is recorded alongside
+				// it, because on the default branch the chain is the only
+				// route by which the file runs at all.
+				if workflow.TagTrigger.RespondsToTagPush() {
+					workflow.TriggerReason += "; " + reason
+				} else {
+					workflow.TagTrigger = TagTriggerAny
+					workflow.TriggerReason = reason
+				}
 				workflow.ReleaseCapable = true
+				workflow.chained = true
 				changed = true
 				break
 			}
@@ -272,46 +330,44 @@ func resolveWorkflowRunChains(report *Report) {
 	}
 }
 
-// isHextapCaller reports whether the document is nothing but a call into the
-// Hextap reusable release workflow. This is what earns the caller exemption:
-// the file name alone never does, so a hostile file named hextap-release.yml is
-// refused like any other competing workflow.
+// callerForms reports whether the document is nothing but a call into the
+// Hextap reusable release workflow, and in which form. This is what earns the
+// caller exemption: the file name alone never does, so a hostile file named
+// hextap-release.yml is refused like any other competing workflow.
 //
-// Every job must be such a call, not merely one of them. The exemption is
-// granted to the whole file, so a caller carrying the genuine release job plus a
-// second job that uploads an asset of its own would otherwise be waved through
-// while recreating the exact race this package exists to remove.
-func isHextapCaller(document *node) bool {
+// Every job must be such a call, not merely one of them, and every job must
+// use the same form. The exemption is granted to the whole file, so a caller
+// carrying the genuine release job plus a second job that uploads an asset of
+// its own would otherwise be waved through while recreating the exact race
+// this package exists to remove.
+func callerForms(document *node) (external, relative bool) {
 	jobs := document.child("jobs")
 	if jobs == nil || jobs.kind != nodeMapping || len(jobs.keys) == 0 {
-		return false
+		return false, false
 	}
+	external, relative = true, true
 	for _, key := range jobs.keys {
 		job := jobs.values[key]
 		if job == nil || job.kind != nodeMapping {
-			return false
+			return false, false
 		}
 		uses := job.child("uses")
 		if uses == nil || uses.kind != nodeScalar || uses.style == scalarBlock {
-			return false
+			return false, false
 		}
-		if !referencesHextapReleaseWorkflow(uses.value) {
-			return false
-		}
+		reference := strings.TrimSpace(uses.value)
+		external = external && isExternalHextapReference(reference)
+		relative = relative && reference == hextapRelativeReusableWorkflow
 	}
-	return true
+	return external, relative
 }
 
-// referencesHextapReleaseWorkflow reports whether a uses: value is the Hextap
-// reusable release workflow itself. The external form is compared exactly and
-// must carry a full commit SHA: a suffix match would accept any repository that
-// happens to publish a file at the same path, which would hand the tag-trigger
-// exemption to attacker-controlled workflow code.
-func referencesHextapReleaseWorkflow(reference string) bool {
-	reference = strings.TrimSpace(reference)
-	if reference == hextapRelativeReusableWorkflow {
-		return true
-	}
+// isExternalHextapReference reports whether a uses: value is the Hextap
+// reusable release workflow by its exact external reference. It is compared
+// exactly and must carry a full commit SHA: a suffix match would accept any
+// repository that happens to publish a file at the same path, which would hand
+// the tag-trigger exemption to attacker-controlled workflow code.
+func isExternalHextapReference(reference string) bool {
 	at := strings.LastIndex(reference, "@")
 	if at < 0 {
 		return false
@@ -578,15 +634,20 @@ func isIdentifierByte(character byte) bool {
 
 // isVerifiedCaller reports whether a workflow earns the caller exemption: it
 // sits at the caller path, every job of it calls the Hextap reusable release
-// workflow, and its trigger is readable and starts on a tag push. The last
-// condition is what makes the caller the owner of the pushed tag. A pinned
-// caller that starts only from a branch push or a manual dispatch calls the
-// right workflow but owns no tag, and a preflight that certified such a source
-// tree would certify one in which nothing recognised responds to the release
-// tag at all.
-func isVerifiedCaller(workflow Workflow, callerFile string) bool {
-	return workflow.Active && workflow.File == callerFile && workflow.HextapCaller &&
-		(workflow.TagTrigger == TagTriggerFiltered || workflow.TagTrigger == TagTriggerAny)
+// workflow in a form the policy accepts, and its trigger is readable and
+// starts on a tag push. The last condition is what makes the caller the owner
+// of the pushed tag. A pinned caller that starts only from a branch push or a
+// manual dispatch calls the right workflow but owns no tag, and a preflight
+// that certified such a source tree would certify one in which nothing
+// recognised responds to the release tag at all.
+func isVerifiedCaller(workflow Workflow, policy Policy) bool {
+	if !workflow.Active || workflow.File != resolveCallerFile(policy.CallerFile) {
+		return false
+	}
+	if !workflow.HextapCaller && !(policy.SelfRelease && workflow.SelfCaller) {
+		return false
+	}
+	return workflow.TagTrigger == TagTriggerFiltered || workflow.TagTrigger == TagTriggerAny
 }
 
 // TagExclusivityFindings reports every active workflow, other than the verified
@@ -594,17 +655,17 @@ func isVerifiedCaller(workflow Workflow, callerFile string) bool {
 // reader could not understand is reported too: it has not been shown to be
 // safe, and treating silence as safety is the defect this replaces.
 //
-// callerFile selects the caller by base name; an empty value selects
-// DefaultCallerFile.
-func (report *Report) TagExclusivityFindings(callerFile string) []Finding {
-	callerFile = resolveCallerFile(callerFile)
+// The policy names the caller file and states whether the relative self-call
+// form is acceptable.
+func (report *Report) TagExclusivityFindings(policy Policy) []Finding {
+	callerFile := resolveCallerFile(policy.CallerFile)
 
 	var findings []Finding
 	for _, workflow := range report.Workflows {
 		if !workflow.Active || workflow.TagTrigger == TagTriggerNone {
 			continue
 		}
-		if isVerifiedCaller(workflow, callerFile) {
+		if isVerifiedCaller(workflow, policy) {
 			continue
 		}
 		if workflow.TagTrigger == TagTriggerUnknown {
@@ -618,7 +679,12 @@ func (report *Report) TagExclusivityFindings(callerFile string) []Finding {
 		}
 
 		detail := fmt.Sprintf("an active workflow other than %s starts on a tag push: %s", callerFile, workflow.TriggerReason)
-		if workflow.File == callerFile {
+		switch {
+		case workflow.File == callerFile && workflow.SelfCaller:
+			detail = fmt.Sprintf(
+				"%s calls the release workflow only through the relative self-call %s, which is the toolkit's own form and earns no exemption in an adopter repository: %s",
+				workflow.File, hextapRelativeReusableWorkflow, workflow.TriggerReason)
+		case workflow.File == callerFile:
 			detail = fmt.Sprintf(
 				"%s sits at the Hextap caller path but no job of it calls %s, so it earns no exemption: %s",
 				workflow.File, hextapReusableWorkflow, workflow.TriggerReason)
@@ -650,22 +716,19 @@ func (report *Report) PinFindings() []Finding {
 	return findings
 }
 
-// PreflightFindings is the complete refusal set for a tagged source tree: tag
-// exclusivity, the presence of a verified caller that owns the tag, and the
-// pin audit.
-func (report *Report) PreflightFindings(callerFile string) []Finding {
-	callerFile = resolveCallerFile(callerFile)
-
-	findings := report.TagExclusivityFindings(callerFile)
-	if detail, verified := report.callerVerification(callerFile); !verified {
-		findings = append(findings, Finding{
-			File:   callerFile,
-			Rule:   RuleMissingHextapCaller,
-			Detail: detail,
-			Remedy: "restore the Hextap caller workflow generated by onboarding, including its push tag trigger, before publishing from this source",
-		})
+// PreflightFindings is the complete refusal set for a source tree that is
+// also the repository's default branch: tag exclusivity, the presence of a
+// verified caller that owns the tag, and the pin audit. When the tagged tree
+// and the default branch differ, use Preflight, which reads both; a policy
+// naming a different default-branch directory is refused here rather than
+// ignored, for the same reason Preflight refuses an unset one.
+func (report *Report) PreflightFindings(policy Policy) ([]Finding, error) {
+	if policy.DefaultBranchDirectory != "" &&
+		filepath.Clean(policy.DefaultBranchDirectory) != filepath.Clean(report.Directory) {
+		return nil, fmt.Errorf("preflight policy names the default-branch workflow directory %q, which is not the analysed directory %q; use Preflight to read both",
+			policy.DefaultBranchDirectory, report.Directory)
 	}
-	return append(findings, report.PinFindings()...)
+	return preflight(report, report, policy), nil
 }
 
 // Preflight is the check the reusable release workflow runs against a tagged
@@ -676,26 +739,181 @@ func (report *Report) PreflightFindings(callerFile string) []Finding {
 // workflow has already been dispatched. What it removes is Hextap's own
 // contribution to the race: Hextap will not publish an immutable release into a
 // repository where something else also claims the tag.
-func Preflight(directory, callerFile string) ([]Finding, error) {
-	report, err := Analyze(directory)
+//
+// The policy must name the default branch's workflow directory, because a
+// workflow_run workflow runs from the default branch's definition rather than
+// the tagged one. Leaving it unset is refused rather than read as "the same
+// tree": a preflight that silently looked at one tree would certify exactly
+// the surface it never inspected.
+func Preflight(directory string, policy Policy) ([]Finding, error) {
+	if policy.DefaultBranchDirectory == "" {
+		return nil, fmt.Errorf("preflight policy names no default-branch workflow directory; pass %q itself when the tagged tree is the default branch", directory)
+	}
+	tagged, err := Analyze(directory)
 	if err != nil {
 		return nil, err
 	}
-	return report.PreflightFindings(callerFile), nil
+	defaultBranch := tagged
+	if filepath.Clean(policy.DefaultBranchDirectory) != filepath.Clean(directory) {
+		defaultBranch, err = Analyze(policy.DefaultBranchDirectory)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return preflight(tagged, defaultBranch, policy), nil
+}
+
+// preflight combines the tagged tree, which GitHub reads for push and create
+// events, with the default-branch tree, which it reads for workflow_run.
+func preflight(tagged, defaultBranch *Report, policy Policy) []Finding {
+	callerFile := resolveCallerFile(policy.CallerFile)
+
+	findings := tagged.TagExclusivityFindings(policy)
+	if detail, verified := tagged.callerVerification(policy); !verified {
+		findings = append(findings, Finding{
+			File:   callerFile,
+			Rule:   RuleMissingHextapCaller,
+			Detail: detail,
+			Remedy: "restore the Hextap caller workflow generated by onboarding, including its push tag trigger, before publishing from this source",
+		})
+	}
+	findings = append(findings, tagged.PinFindings()...)
+	if defaultBranch != tagged {
+		findings = append(findings, defaultBranchFindings(tagged, defaultBranch, findings)...)
+	}
+	return findings
+}
+
+// defaultBranchFindings reports what the default branch contributes to the
+// tag's workflow surface. It first resolves workflow_run chains on the
+// default-branch report against the tag responders of both trees, which
+// mutates that report, then reports every chained workflow there, together
+// with the pin audit of it and of every local reusable workflow it reaches,
+// and every file there the reader could not understand. A push or create
+// workflow that exists only on the default branch is not reported, because
+// GitHub reads those from the tagged commit.
+//
+// A refusal the tagged tree already raised for the same file and rule is not
+// raised again; a pin finding is repeated only when its detail differs, so a
+// default-branch copy that is worse than the tagged one is still reported.
+func defaultBranchFindings(tagged, defaultBranch *Report, raised []Finding) []Finding {
+	resolveWorkflowRunChains(defaultBranch, tagged.Workflows)
+
+	key := func(finding Finding) [3]string {
+		switch finding.Rule {
+		case RuleCompetingTagTrigger, RuleUnreadableWorkflow:
+			return [3]string{finding.File, finding.Rule, ""}
+		default:
+			return [3]string{finding.File, finding.Rule, finding.Detail}
+		}
+	}
+	seen := make(map[[3]string]bool)
+	for _, finding := range raised {
+		seen[key(finding)] = true
+	}
+	var findings []Finding
+	add := func(finding Finding) {
+		if seen[key(finding)] {
+			return
+		}
+		seen[key(finding)] = true
+		findings = append(findings, finding)
+	}
+
+	audited := make(map[string]bool)
+	var auditReachable func(name string)
+	auditReachable = func(name string) {
+		if audited[name] {
+			return
+		}
+		audited[name] = true
+		workflow := defaultBranch.workflow(name)
+		if workflow == nil || !workflow.Active || workflow.document == nil {
+			return
+		}
+		for _, finding := range defaultBranch.auditPins(name, workflow.document) {
+			add(finding)
+		}
+		for _, callee := range localReusableCallees(workflow.document) {
+			auditReachable(callee)
+		}
+	}
+
+	for _, workflow := range defaultBranch.Workflows {
+		if !workflow.Active {
+			continue
+		}
+		switch {
+		case workflow.TagTrigger == TagTriggerUnknown:
+			add(Finding{
+				File:   workflow.File,
+				Rule:   RuleUnreadableWorkflow,
+				Detail: fmt.Sprintf("on the default branch, the file could not be read closely enough to prove it never chains from the tag's workflows: %s", workflow.TriggerReason),
+				Remedy: "rewrite the named construct within the plain block YAML subset the analyser accepts, or rename the file to end in .disabled so GitHub stops loading it",
+			})
+		case workflow.chained:
+			add(Finding{
+				File:   workflow.File,
+				Rule:   RuleCompetingTagTrigger,
+				Detail: fmt.Sprintf("on the default branch, whose definition GitHub runs for workflow_run, %s", workflow.TriggerReason),
+				Remedy: "remove the workflow_run trigger from the default branch's copy, or rename it there to end in .disabled",
+			})
+			auditReachable(workflow.File)
+		}
+	}
+	return findings
+}
+
+// workflow returns the analysed file with the given base name, or nil.
+func (report *Report) workflow(name string) *Workflow {
+	for index := range report.Workflows {
+		if report.Workflows[index].File == name {
+			return &report.Workflows[index]
+		}
+	}
+	return nil
+}
+
+// localReusableCallees lists the sibling workflow files a document's jobs call
+// through the relative form.
+func localReusableCallees(document *node) []string {
+	jobs := document.child("jobs")
+	if jobs == nil || jobs.kind != nodeMapping {
+		return nil
+	}
+	var callees []string
+	for _, key := range jobs.keys {
+		job := jobs.values[key]
+		if job == nil || job.kind != nodeMapping {
+			continue
+		}
+		uses := job.child("uses")
+		if uses == nil || uses.kind != nodeScalar || uses.style == scalarBlock {
+			continue
+		}
+		if name, local := reusableWorkflowName(strings.TrimSpace(uses.value)); local {
+			callees = append(callees, name)
+		}
+	}
+	return callees
 }
 
 // callerVerification reports whether the source tree has a verified caller
-// and, when it does not, states which of the three conditions failed so that
-// the adopter can fix the right one.
-func (report *Report) callerVerification(callerFile string) (string, bool) {
+// and, when it does not, states which condition failed so that the adopter
+// can fix the right one.
+func (report *Report) callerVerification(policy Policy) (string, bool) {
+	callerFile := resolveCallerFile(policy.CallerFile)
 	for _, workflow := range report.Workflows {
 		if !workflow.Active || workflow.File != callerFile {
 			continue
 		}
 		switch {
-		case isVerifiedCaller(workflow, callerFile):
+		case isVerifiedCaller(workflow, policy):
 			return "", true
-		case !workflow.HextapCaller:
+		case workflow.SelfCaller && !policy.SelfRelease:
+			return fmt.Sprintf("%s calls the release workflow only through the relative self-call %s, which is the toolkit's own form; an adopter's caller must use %s pinned to a full commit SHA",
+				callerFile, hextapRelativeReusableWorkflow, hextapReusableWorkflow), false
+		case !workflow.HextapCaller && !workflow.SelfCaller:
 			return fmt.Sprintf("%s does not call %s in every job, so it is not the recognised owner of the pushed tag",
 				callerFile, hextapReusableWorkflow), false
 		case workflow.TagTrigger == TagTriggerUnknown:
@@ -767,10 +985,114 @@ func (report *Report) auditPins(file string, document *node) []Finding {
 			if step.has("uses") {
 				findings = append(findings, report.auditActionReference(file, step.child("uses"), false)...)
 				findings = append(findings, auditRuntimeVersions(file, step.child("with"))...)
+				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"))...)
 			}
 		}
 	}
 	return findings
+}
+
+// fetchesSource reports whether a readable uses: value names an action that
+// clones a repository: actions/checkout, or any action whose name says
+// checkout or clone. The name test is a heuristic that over-reports, chosen
+// because forks of checkout keep its input names and an adopter switching to
+// one would otherwise lose the source-ref guarantee with no signal. Action
+// paths are compared case-insensitively, as GitHub resolves them.
+func fetchesSource(uses *node) bool {
+	if uses == nil || uses.kind != nodeScalar || uses.style == scalarBlock {
+		return false
+	}
+	reference := strings.TrimSpace(uses.value)
+	if at := strings.LastIndex(reference, "@"); at >= 0 {
+		reference = reference[:at]
+	}
+	if strings.EqualFold(reference, "actions/checkout") {
+		return true
+	}
+	name := strings.ToLower(reference[strings.LastIndex(reference, "/")+1:])
+	return strings.Contains(name, "checkout") || strings.Contains(name, "clone")
+}
+
+// immutableRefExpressions name a commit GitHub fixed before the job started:
+// the commit of the event that started the run, and the commit of the reusable
+// workflow the caller pinned. Contexts are matched case-insensitively, as
+// GitHub evaluates them.
+var immutableRefExpressions = []string{"github.sha", "job.workflow_sha"}
+
+// auditSourceRef requires a step that selects source of its own to select an
+// immutable commit. A ref: input on any action must be immutable: a branch or
+// a tag resolves to whatever it points at when the job runs, so rerunning the
+// same release tag can build different source while every action stays
+// pinned. On an action that clones a repository, a repository: with no ref:
+// checks out that repository's default branch and is refused too; with
+// neither input such a step checks out the commit of the event that started
+// the run, which for a tag push is the tagged commit.
+//
+// Inputs are matched the way the runner exposes them, case-insensitively, so
+// Ref: is ref:. Two spellings of one input in the same block are refused: the
+// analysis cannot say which the runner would use, and reading the pinned one
+// would certify the other.
+func auditSourceRef(file string, uses, with *node) []Finding {
+	if with == nil || with.kind != nodeMapping {
+		// An unreadable with: block is reported by auditRuntimeVersions.
+		return nil
+	}
+	mutable := func(detail string) []Finding {
+		return []Finding{{
+			File:   file,
+			Rule:   RuleMutableSourceRef,
+			Detail: detail,
+			Remedy: "set ref: to a full 40-character commit SHA, to ${{ github.sha }}, to ${{ job.workflow_sha }}, or to the output of a job or step in this workflow",
+		}}
+	}
+	ref, refSpellings := inputByName(with, "ref")
+	_, repositorySpellings := inputByName(with, "repository")
+	if refSpellings > 1 || repositorySpellings > 1 {
+		return mutable("a step spells the same source input in more than one way, so the value the runner would use cannot be established")
+	}
+	if ref == nil {
+		if repositorySpellings == 1 && fetchesSource(uses) {
+			return mutable("a checkout step selects another repository without a ref:, so it checks out that repository's default branch at whatever commit it holds when the job runs")
+		}
+		return nil
+	}
+	if ref.kind != nodeScalar || ref.style == scalarBlock {
+		return mutable("a ref: input is not a readable literal")
+	}
+	text := strings.TrimSpace(ref.value)
+	if isHexadecimal(text, 40) || isImmutableRefExpression(text) || isStepOutputExpression(text) {
+		return nil
+	}
+	return mutable(fmt.Sprintf("the ref %q is not an immutable commit, so rerunning the same release tag can build different source", text))
+}
+
+// inputByName finds a with: input the way the runner does, ignoring case, and
+// reports how many keys in the block spell that input.
+func inputByName(with *node, name string) (*node, int) {
+	var found *node
+	spellings := 0
+	for _, key := range with.keys {
+		if strings.EqualFold(key, name) {
+			found = with.values[key]
+			spellings++
+		}
+	}
+	return found, spellings
+}
+
+// isImmutableRefExpression reports whether a value is exactly one expression
+// naming a commit GitHub fixed before the job started.
+func isImmutableRefExpression(text string) bool {
+	if !strings.HasPrefix(text, "${{") || !strings.HasSuffix(text, "}}") || strings.Count(text, "${{") != 1 {
+		return false
+	}
+	body := strings.TrimSpace(text[len("${{") : len(text)-len("}}")])
+	for _, expression := range immutableRefExpressions {
+		if strings.EqualFold(body, expression) {
+			return true
+		}
+	}
+	return false
 }
 
 func unreadableForAudit(file, detail string) Finding {
@@ -844,20 +1166,27 @@ func (report *Report) auditActionReference(file string, uses *node, reusable boo
 // also be release capable, because PinFindings audits only those files: a
 // callee this pass has read but skipped has not been audited by anyone.
 func (report *Report) auditedReusableWorkflow(reference string) bool {
+	name, local := reusableWorkflowName(reference)
+	if !local {
+		return false
+	}
+	workflow := report.workflow(name)
+	return workflow != nil && workflow.Active && workflow.document != nil && workflow.ReleaseCapable
+}
+
+// reusableWorkflowName returns the base name a relative uses: reference points
+// at when, and only when, it names a direct child of the workflow directory
+// with a workflow extension.
+func reusableWorkflowName(reference string) (string, bool) {
 	prefix := "./" + DefaultWorkflowDirectory + "/"
 	if !strings.HasPrefix(reference, prefix) {
-		return false
+		return "", false
 	}
 	name := reference[len(prefix):]
 	if name == "" || strings.Contains(name, "/") || !hasWorkflowExtension(name) {
-		return false
+		return "", false
 	}
-	for _, workflow := range report.Workflows {
-		if workflow.File == name {
-			return workflow.Active && workflow.document != nil && workflow.ReleaseCapable
-		}
-	}
-	return false
+	return name, true
 }
 
 // auditContainerImage requires a job or service container to name an immutable
