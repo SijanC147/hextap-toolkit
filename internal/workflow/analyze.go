@@ -120,6 +120,11 @@ type Workflow struct {
 
 	document *node
 	watches  []string
+	// ownTrigger and ownReason are the classification from the file's own
+	// events, before any workflow_run chain was resolved, so that a second
+	// resolution against another tree can start from them.
+	ownTrigger TagTrigger
+	ownReason  string
 	// chained records that the classification came from a workflow_run
 	// trigger resolved against a tag responder rather than from the file's
 	// own events.
@@ -155,6 +160,19 @@ type Policy struct {
 	// Preflight requires this field; pass the analysed directory itself when
 	// the tagged tree is the default branch.
 	DefaultBranchDirectory string
+	// TrustJobOutputs accepts a runtime version or a source ref that arrives
+	// as the output of a job or step in the same workflow, in the exact
+	// needs.<job>.outputs.<name> or steps.<id>.outputs.<name> shape. The
+	// audit cannot see what the producing step computed, and the shape alone
+	// proves nothing: a step can derive its output from a variable, an
+	// input, the network or the clock. The toolkit's own reusable release
+	// workflow derives the runtime version from the manifest it has just
+	// sealed and the source commit from the tag it has just verified against
+	// the default branch, and that code is under review in this repository,
+	// so the toolkit sets this for its own tree. Nothing else should. Under
+	// the default, an output-shaped value is refused like any other
+	// expression.
+	TrustJobOutputs bool
 }
 
 // Analyze reads and classifies every file in the given workflow directory.
@@ -196,6 +214,7 @@ func analyze(
 				File:          name,
 				Active:        true,
 				TagTrigger:    TagTriggerUnknown,
+				ownTrigger:    TagTriggerUnknown,
 				TriggerReason: "the workflow path is not a regular file, so its contents cannot be established",
 			})
 			continue
@@ -211,6 +230,7 @@ func analyze(
 		document, parseErr := parseWorkflowDocument(string(data))
 		if parseErr != nil {
 			workflow.TagTrigger = TagTriggerUnknown
+			workflow.ownTrigger = TagTriggerUnknown
 			workflow.TriggerReason = parseErr.Error()
 			report.Workflows = append(report.Workflows, workflow)
 			continue
@@ -219,6 +239,7 @@ func analyze(
 		name, readable := declaredName(document)
 		if !readable {
 			workflow.TagTrigger = TagTriggerUnknown
+			workflow.ownTrigger = TagTriggerUnknown
 			workflow.TriggerReason = "the workflow name is not a readable scalar, so a sibling workflow_run trigger cannot be matched against it"
 			report.Workflows = append(report.Workflows, workflow)
 			continue
@@ -229,6 +250,8 @@ func analyze(
 		workflow.Name = name
 		workflow.TagTrigger = analysis.trigger
 		workflow.TriggerReason = analysis.reason
+		workflow.ownTrigger = analysis.trigger
+		workflow.ownReason = analysis.reason
 		workflow.Events = analysis.events
 		workflow.TagPatterns = analysis.patterns
 		workflow.watches = analysis.watches
@@ -240,7 +263,7 @@ func analyze(
 	sort.Slice(report.Workflows, func(first, second int) bool {
 		return report.Workflows[first].File < report.Workflows[second].File
 	})
-	resolveWorkflowRunChains(report, nil)
+	resolveWorkflowRunChains(report, nil, true)
 	return report, nil
 }
 
@@ -284,21 +307,38 @@ func (workflow Workflow) triggerNames() []string {
 // resolveWorkflowRunChains upgrades every workflow_run trigger that chains from
 // a workflow which itself responds to a tag push. It runs to a fixed point so
 // that a chain of chained workflows is resolved rather than only its first
-// link. Classifications only ever escalate, so the loop terminates. external
-// supplies tag responders from another tree: the default branch's chained
-// workflows fire off the runs the tagged tree's workflows produce.
-func resolveWorkflowRunChains(report *Report, external []Workflow) {
+// link. Classifications only ever escalate, so the loop terminates.
+//
+// external supplies tag responders from another tree, through the events
+// those files declare themselves: the default branch's chained workflows fire
+// off the runs the tagged tree's workflows produce. selfSeeds says whether the
+// report's own push and create responders count too. They do for a single
+// tree; they do not for the default branch resolved beside a tagged tree,
+// because GitHub reads push and create from the tagged commit, so a tag
+// trigger a default-branch copy has gained since the tag produces no run and
+// cannot start anything. Chained workflows in the report always count, since
+// they run on the default branch by definition.
+func resolveWorkflowRunChains(report *Report, external []Workflow, selfSeeds bool) {
 	for changed := true; changed; {
 		changed = false
 		responders := make(map[string]bool)
-		for _, tree := range [][]Workflow{report.Workflows, external} {
-			for _, workflow := range tree {
-				if !workflow.Active || !workflow.TagTrigger.RespondsToTagPush() {
-					continue
-				}
-				for _, name := range workflow.triggerNames() {
-					responders[name] = true
-				}
+		for _, workflow := range external {
+			if !workflow.Active || !workflow.ownTrigger.RespondsToTagPush() {
+				continue
+			}
+			for _, name := range workflow.triggerNames() {
+				responders[name] = true
+			}
+		}
+		for _, workflow := range report.Workflows {
+			if !workflow.Active {
+				continue
+			}
+			if !workflow.chained && !(selfSeeds && workflow.TagTrigger.RespondsToTagPush()) {
+				continue
+			}
+			for _, name := range workflow.triggerNames() {
+				responders[name] = true
 			}
 		}
 		for index := range report.Workflows {
@@ -533,8 +573,8 @@ func expressions(text string) []string {
 var payloadChannels = []string{"event.inputs", "event.client_payload", "event.deployment.payload"}
 
 // expressionReadsCredentialChannel reports whether an expression body reads the
-// secrets context for anything but GITHUB_TOKEN, the inputs context, or a
-// payload channel under the github context. Each context is matched as a whole
+// secrets context for anything but GITHUB_TOKEN, the inputs, vars or env
+// contexts, or a payload channel under the github context. Each context is matched as a whole
 // identifier that is not itself a property, so needs.build.outputs.secrets is
 // not mistaken for one, while toJSON(secrets), secrets[name] and
 // github['event']['inputs'] count as reads because they reach the whole
@@ -554,7 +594,11 @@ func expressionReadsCredentialChannel(expression string) bool {
 		property := start > 0 && expression[start-1] == '.'
 		switch {
 		case property:
-		case strings.EqualFold(word, "inputs"):
+		case strings.EqualFold(word, "inputs"), strings.EqualFold(word, "vars"), strings.EqualFold(word, "env"):
+			// Repository, organisation and environment variables are
+			// externally mutable strings and can hold a token as readily as
+			// a dispatch input; the env context can carry one set by an
+			// earlier step from a source this analysis never sees.
 			return true
 		case strings.EqualFold(word, "secrets"):
 			if path := contextPath(remainder); !strings.EqualFold(path, "github_token") {
@@ -702,16 +746,16 @@ func (report *Report) TagExclusivityFindings(policy Policy) []Finding {
 // PinFindings audits action references, container images and runtime version
 // inputs in every release-capable workflow. Only what a workflow states in its
 // own source can be bounded, so a value that arrives through an expression is
-// refused, with one exception: the output of a job or step in the same file is
-// computed by the tagged source itself and cannot be changed without a new
-// commit. That exception is accepted, not proven pinned, and the audit says so.
-func (report *Report) PinFindings() []Finding {
+// refused, with one exception the policy has to switch on: under
+// Policy.TrustJobOutputs, the output of a job or step in the same file is
+// accepted, not proven pinned, and the audit says so.
+func (report *Report) PinFindings(policy Policy) []Finding {
 	var findings []Finding
 	for _, workflow := range report.Workflows {
 		if !workflow.Active || !workflow.ReleaseCapable || workflow.document == nil {
 			continue
 		}
-		findings = append(findings, report.auditPins(workflow.File, workflow.document)...)
+		findings = append(findings, report.auditPins(workflow, policy)...)
 	}
 	return findings
 }
@@ -777,27 +821,40 @@ func preflight(tagged, defaultBranch *Report, policy Policy) []Finding {
 			Remedy: "restore the Hextap caller workflow generated by onboarding, including its push tag trigger, before publishing from this source",
 		})
 	}
-	findings = append(findings, tagged.PinFindings()...)
+	findings = append(findings, tagged.PinFindings(policy)...)
 	if defaultBranch != tagged {
-		findings = append(findings, defaultBranchFindings(tagged, defaultBranch, findings)...)
+		findings = append(findings, defaultBranchFindings(tagged, defaultBranch, policy, findings)...)
 	}
 	return findings
 }
 
 // defaultBranchFindings reports what the default branch contributes to the
-// tag's workflow surface. It first resolves workflow_run chains on the
-// default-branch report against the tag responders of both trees, which
-// mutates that report, then reports every chained workflow there, together
-// with the pin audit of it and of every local reusable workflow it reaches,
-// and every file there the reader could not understand. A push or create
-// workflow that exists only on the default branch is not reported, because
-// GitHub reads those from the tagged commit.
+// tag's workflow surface. It first discards the chain resolution Analyze did
+// within the default-branch tree alone and resolves workflow_run chains again
+// from the tagged tree's own responders, which mutates that report: a push or
+// create trigger the default-branch copy of a file has gained since the tag
+// produces no run for the tag push, so it must not seed a chain. It then
+// reports every chained workflow there, together with the pin audit of it and
+// of every local reusable workflow it reaches, and every file there the
+// reader could not understand. A push or create workflow that exists only on
+// the default branch is not reported, because GitHub reads those from the
+// tagged commit.
 //
 // A refusal the tagged tree already raised for the same file and rule is not
 // raised again; a pin finding is repeated only when its detail differs, so a
 // default-branch copy that is worse than the tagged one is still reported.
-func defaultBranchFindings(tagged, defaultBranch *Report, raised []Finding) []Finding {
-	resolveWorkflowRunChains(defaultBranch, tagged.Workflows)
+func defaultBranchFindings(tagged, defaultBranch *Report, policy Policy, raised []Finding) []Finding {
+	for index := range defaultBranch.Workflows {
+		workflow := &defaultBranch.Workflows[index]
+		if !workflow.chained {
+			continue
+		}
+		workflow.chained = false
+		workflow.TagTrigger = workflow.ownTrigger
+		workflow.TriggerReason = workflow.ownReason
+		workflow.ReleaseCapable = workflow.ownTrigger.RespondsToTagPush() || !provablyUnableToRelease(workflow.document)
+	}
+	resolveWorkflowRunChains(defaultBranch, tagged.Workflows, false)
 
 	key := func(finding Finding) [3]string {
 		switch finding.Rule {
@@ -831,7 +888,7 @@ func defaultBranchFindings(tagged, defaultBranch *Report, raised []Finding) []Fi
 		if workflow == nil || !workflow.Active || workflow.document == nil {
 			return
 		}
-		for _, finding := range defaultBranch.auditPins(name, workflow.document) {
+		for _, finding := range defaultBranch.auditPins(*workflow, policy) {
 			add(finding)
 		}
 		for _, callee := range localReusableCallees(workflow.document) {
@@ -940,7 +997,8 @@ func resolveCallerFile(callerFile string) string {
 // else, such as a workflow_dispatch input or a with: value, is data, and
 // auditing it produced refusals against workflows that were fully pinned. A
 // job or step list the reader cannot represent is reported rather than skipped.
-func (report *Report) auditPins(file string, document *node) []Finding {
+func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
+	file, document, events := workflow.File, workflow.document, workflow.Events
 	jobs := document.child("jobs")
 	if jobs == nil || jobs.kind != nodeMapping {
 		return []Finding{unreadableForAudit(file, "the jobs: block is not a readable mapping, so nothing in it can be audited")}
@@ -955,7 +1013,8 @@ func (report *Report) auditPins(file string, document *node) []Finding {
 		}
 		if job.has("uses") {
 			findings = append(findings, report.auditActionReference(file, job.child("uses"), true)...)
-			findings = append(findings, auditRuntimeVersions(file, job.child("with"))...)
+			findings = append(findings, auditRuntimeVersions(file, job.child("with"), policy)...)
+			findings = append(findings, auditSourceRef(file, job.child("uses"), job.child("with"), events, true, policy)...)
 		}
 		if job.has("container") {
 			findings = append(findings, auditContainerImage(file, job.child("container"))...)
@@ -984,8 +1043,9 @@ func (report *Report) auditPins(file string, document *node) []Finding {
 			}
 			if step.has("uses") {
 				findings = append(findings, report.auditActionReference(file, step.child("uses"), false)...)
-				findings = append(findings, auditRuntimeVersions(file, step.child("with"))...)
-				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"))...)
+				findings = append(findings, auditRuntimeVersions(file, step.child("with"), policy)...)
+				findings = append(findings, auditRuntimeSetup(file, step.child("uses"), step.child("with"))...)
+				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"), events, false, policy)...)
 			}
 		}
 	}
@@ -1013,26 +1073,51 @@ func fetchesSource(uses *node) bool {
 	return strings.Contains(name, "checkout") || strings.Contains(name, "clone")
 }
 
-// immutableRefExpressions name a commit GitHub fixed before the job started:
-// the commit of the event that started the run, and the commit of the reusable
-// workflow the caller pinned. Contexts are matched case-insensitively, as
-// GitHub evaluates them.
-var immutableRefExpressions = []string{"github.sha", "job.workflow_sha"}
+// tagCommitEvents are the events under which github.sha and, outside a
+// reusable workflow, job.workflow_sha name the commit the tag points at. Under
+// workflow_run and schedule they name the default branch's current commit,
+// and under workflow_dispatch whatever ref was dispatched, all of which move
+// between runs. release is listed because GITHUB_SHA under it is the
+// release's tagged commit; whether a release-triggered workflow competes for
+// the tag is a separate question the trigger classification in triggers.go
+// answers, and which SB23-757 tracks.
+var tagCommitEvents = map[string]struct{}{
+	"create":  {},
+	"push":    {},
+	"release": {},
+}
 
-// auditSourceRef requires a step that selects source of its own to select an
-// immutable commit. A ref: input on any action must be immutable: a branch or
-// a tag resolves to whatever it points at when the job runs, so rerunning the
-// same release tag can build different source while every action stays
-// pinned. On an action that clones a repository, a repository: with no ref:
-// checks out that repository's default branch and is refused too; with
-// neither input such a step checks out the commit of the event that started
-// the run, which for a tag push is the tagged commit.
+// auditSourceRef requires a step or a reusable workflow call that selects
+// source of its own to select an immutable commit. A ref: input must be
+// immutable: a branch or a tag resolves to whatever it points at when the job
+// runs, so rerunning the same release tag can build different source while
+// every action stays pinned. On an action that clones a repository, and on
+// any reusable workflow call, a repository: with no ref: is refused too: the
+// former checks out that repository's default branch, and what the latter
+// does with the input cannot be established here. With neither input a
+// checkout step fetches the commit of the event that started the run, which
+// for a tag push is the tagged commit. Only the inputs named ref and
+// repository are read: a reusable workflow can take source selection under
+// any name, and the Hextap caller's own tag input is one, so refusing every
+// ref-shaped name would refuse the toolkit's own contract. What a callee does
+// with an input the audit cannot name is bounded by auditing the callee.
+//
+// An expression naming a commit is accepted only where it names the tagged
+// one. github.sha does so under a push, create or release event and nowhere
+// else, since under workflow_run it is the default branch's current commit
+// and under workflow_dispatch whatever was dispatched. job.workflow_sha does
+// so under the same events and inside a reusable workflow, where it is the
+// callee's commit that the caller pinned; a file that is both callable and
+// dispatchable runs under the dispatch too, so every declared event must be
+// one of those. github.event.workflow_run.head_sha is the upstream run's
+// commit and is accepted under workflow_run. An output of a job or step is
+// accepted only under Policy.TrustJobOutputs.
 //
 // Inputs are matched the way the runner exposes them, case-insensitively, so
 // Ref: is ref:. Two spellings of one input in the same block are refused: the
 // analysis cannot say which the runner would use, and reading the pinned one
 // would certify the other.
-func auditSourceRef(file string, uses, with *node) []Finding {
+func auditSourceRef(file string, uses, with *node, events []string, reusable bool, policy Policy) []Finding {
 	if with == nil || with.kind != nodeMapping {
 		// An unreadable with: block is reported by auditRuntimeVersions.
 		return nil
@@ -1042,17 +1127,17 @@ func auditSourceRef(file string, uses, with *node) []Finding {
 			File:   file,
 			Rule:   RuleMutableSourceRef,
 			Detail: detail,
-			Remedy: "set ref: to a full 40-character commit SHA, to ${{ github.sha }}, to ${{ job.workflow_sha }}, or to the output of a job or step in this workflow",
+			Remedy: "set ref: to a full 40-character commit SHA, or to an expression naming the tagged commit under this workflow's events",
 		}}
 	}
 	ref, refSpellings := inputByName(with, "ref")
 	_, repositorySpellings := inputByName(with, "repository")
 	if refSpellings > 1 || repositorySpellings > 1 {
-		return mutable("a step spells the same source input in more than one way, so the value the runner would use cannot be established")
+		return mutable("the same source input is spelled in more than one way, so the value the runner would use cannot be established")
 	}
 	if ref == nil {
-		if repositorySpellings == 1 && fetchesSource(uses) {
-			return mutable("a checkout step selects another repository without a ref:, so it checks out that repository's default branch at whatever commit it holds when the job runs")
+		if repositorySpellings == 1 && (reusable || fetchesSource(uses)) {
+			return mutable("a repository: is selected without a ref:, so the source fetched is whatever that repository's default branch holds when the job runs")
 		}
 		return nil
 	}
@@ -1060,10 +1145,79 @@ func auditSourceRef(file string, uses, with *node) []Finding {
 		return mutable("a ref: input is not a readable literal")
 	}
 	text := strings.TrimSpace(ref.value)
-	if isHexadecimal(text, 40) || isImmutableRefExpression(text) || isStepOutputExpression(text) {
+	switch {
+	case isHexadecimal(text, 40):
 		return nil
+	case isStepOutputExpression(text):
+		if policy.TrustJobOutputs {
+			return nil
+		}
+		return mutable(fmt.Sprintf("the ref %q is the output of an earlier job or step, which this audit cannot see; it is accepted only under a policy that trusts job outputs", text))
+	case isExpression(text, "github.sha"):
+		if allTagCommitEvents(events) {
+			return nil
+		}
+		return mutable(fmt.Sprintf("the ref %q names the tagged commit only under a push, create or release event, and this workflow declares %s", text, describeEvents(events)))
+	case isExpression(text, "job.workflow_sha"):
+		if allWorkflowShaEvents(events) {
+			return nil
+		}
+		return mutable(fmt.Sprintf("the ref %q names this workflow file's commit, which under %s is not the tagged one", text, describeEvents(events)))
+	case isExpression(text, "github.event.workflow_run.head_sha"):
+		if declaresEvent(events, "workflow_run") {
+			return nil
+		}
+		return mutable(fmt.Sprintf("the ref %q has no value outside a workflow_run workflow", text))
 	}
 	return mutable(fmt.Sprintf("the ref %q is not an immutable commit, so rerunning the same release tag can build different source", text))
+}
+
+// allTagCommitEvents reports whether every declared event is one under which
+// github.sha names the tagged commit. No readable events is not proof.
+func allTagCommitEvents(events []string) bool {
+	if len(events) == 0 {
+		return false
+	}
+	for _, event := range events {
+		if _, ok := tagCommitEvents[event]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// allWorkflowShaEvents reports whether every declared event is one under
+// which job.workflow_sha names a commit the tag fixes: a tag-commit event, or
+// workflow_call, where it is the callee's commit the caller pinned. A file
+// that is also dispatchable or scheduled runs under those events with a
+// moving commit, so one such event withdraws the proof.
+func allWorkflowShaEvents(events []string) bool {
+	if len(events) == 0 {
+		return false
+	}
+	for _, event := range events {
+		if _, ok := tagCommitEvents[event]; ok || event == "workflow_call" {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func declaresEvent(events []string, wanted string) bool {
+	for _, event := range events {
+		if event == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func describeEvents(events []string) string {
+	if len(events) == 0 {
+		return "no readable event"
+	}
+	return strings.Join(events, ", ")
 }
 
 // inputByName finds a with: input the way the runner does, ignoring case, and
@@ -1080,19 +1234,94 @@ func inputByName(with *node, name string) (*node, int) {
 	return found, spellings
 }
 
-// isImmutableRefExpression reports whether a value is exactly one expression
-// naming a commit GitHub fixed before the job started.
-func isImmutableRefExpression(text string) bool {
+// isExpression reports whether a value is exactly one expression with the
+// given body, compared case-insensitively as GitHub evaluates contexts.
+func isExpression(text, body string) bool {
 	if !strings.HasPrefix(text, "${{") || !strings.HasSuffix(text, "}}") || strings.Count(text, "${{") != 1 {
 		return false
 	}
-	body := strings.TrimSpace(text[len("${{") : len(text)-len("}}")])
-	for _, expression := range immutableRefExpressions {
-		if strings.EqualFold(body, expression) {
-			return true
+	return strings.EqualFold(strings.TrimSpace(text[len("${{"):len(text)-len("}}")]), body)
+}
+
+// auditRuntimeSetup requires a step that installs a runtime to say which one.
+// A setup action invoked with no version input falls back to whatever the
+// action defaults to or whatever the runner image already carries, and both
+// change as the image is updated, so the same tag builds against a different
+// toolchain later. An action is taken to install a runtime when its name says
+// setup, install or toolchain; that is a heuristic which over-reports, and a
+// refused step is fixed by stating the version.
+func auditRuntimeSetup(file string, uses, with *node) []Finding {
+	if !installsRuntime(uses) {
+		return nil
+	}
+	if with != nil && with.kind != nodeNull && with.kind != nodeMapping {
+		// An unreadable with: block is reported by auditRuntimeVersions.
+		return nil
+	}
+	if with != nil && with.kind == nodeMapping {
+		for _, key := range with.keys {
+			if isRuntimeSelector(key) || isRuntimeFileSelector(key) {
+				return nil
+			}
 		}
 	}
-	return false
+	return []Finding{{
+		File:   file,
+		Rule:   RuleFloatingRuntimeVersion,
+		Detail: fmt.Sprintf("the step invokes the runtime setup action %q without stating a version, so it installs whatever the action or the runner image defaults to when the job runs", strings.TrimSpace(uses.value)),
+		Remedy: "give the setup action an exact version input",
+	}}
+}
+
+// runtimeInstallers are actions that install a versioned toolchain without
+// saying so in their name, so the name heuristic alone would miss them.
+var runtimeInstallers = map[string]struct{}{
+	"abatilo/actions-poetry":        {},
+	"golangci/golangci-lint-action": {},
+	"goreleaser/goreleaser-action":  {},
+	"jdx/mise-action":               {},
+	"subosito/flutter-action":       {},
+}
+
+// runtimeAgnosticSetups are actions whose name says setup but which install
+// no versioned toolchain the workflow could state: Homebrew has no exact
+// version input at all, and the QEMU action registers an emulator image
+// rather than a runtime. Refusing them would be a refusal an adopter cannot
+// satisfy.
+var runtimeAgnosticSetups = map[string]struct{}{
+	"docker/setup-qemu-action":        {},
+	"homebrew/actions/setup-homebrew": {},
+}
+
+// installsRuntime reports whether a readable uses: value names an action that
+// installs a toolchain: one on the installer list, or one whose name says
+// setup, install or toolchain and is not on the runtime-agnostic list. Action
+// paths are compared case-insensitively, as GitHub resolves them.
+func installsRuntime(uses *node) bool {
+	if uses == nil || uses.kind != nodeScalar || uses.style == scalarBlock {
+		return false
+	}
+	reference := strings.ToLower(strings.TrimSpace(uses.value))
+	if at := strings.LastIndex(reference, "@"); at >= 0 {
+		reference = reference[:at]
+	}
+	if _, installer := runtimeInstallers[reference]; installer {
+		return true
+	}
+	if _, agnostic := runtimeAgnosticSetups[reference]; agnostic {
+		return false
+	}
+	name := reference[strings.LastIndex(reference, "/")+1:]
+	return strings.Contains(name, "setup") || strings.Contains(name, "install") || strings.Contains(name, "toolchain")
+}
+
+// isRuntimeFileSelector reports whether a with: input names a file in the
+// tagged source that carries the version: node-version-file, go-version-file
+// and the like, or the .NET global-json-file. Such a file is fixed by the tag;
+// its content is outside this directory-only audit and is not read here.
+func isRuntimeFileSelector(key string) bool {
+	normalised := strings.ReplaceAll(strings.ToLower(key), "_", "-")
+	return normalised == "version-file" || normalised == "global-json-file" || strings.HasSuffix(normalised, "-version-file")
 }
 
 func unreadableForAudit(file, detail string) Finding {
@@ -1238,7 +1467,7 @@ func auditContainerImage(file string, container *node) []Finding {
 // auditRuntimeVersions audits the runtime selectors among a job's or step's
 // with: inputs. A with: block the reader cannot represent is reported rather
 // than skipped, since the selectors inside it cannot be seen.
-func auditRuntimeVersions(file string, with *node) []Finding {
+func auditRuntimeVersions(file string, with *node, policy Policy) []Finding {
 	if with == nil || with.kind == nodeNull {
 		return nil
 	}
@@ -1262,14 +1491,14 @@ func auditRuntimeVersions(file string, with *node) []Finding {
 		}
 		text := strings.TrimSpace(value.value)
 		if strings.Contains(text, "${{") {
-			if isStepOutputExpression(text) {
+			if isStepOutputExpression(text) && policy.TrustJobOutputs {
 				continue
 			}
 			findings = append(findings, Finding{
 				File:   file,
 				Rule:   RuleFloatingRuntimeVersion,
 				Detail: fmt.Sprintf("the runtime input %q resolves through the expression %q, whose value is not fixed by the tagged workflow source", key, text),
-				Remedy: fmt.Sprintf("set %s to an exact version, or to the output of a job or step in this workflow", key),
+				Remedy: fmt.Sprintf("set %s to an exact version", key),
 			})
 			continue
 		}
@@ -1313,13 +1542,11 @@ func isRuntimeSelector(key string) bool {
 
 // isStepOutputExpression reports whether a value is exactly one expression
 // reading a job or step output: needs.<job>.outputs.<name> or
-// steps.<id>.outputs.<name>. Such a value is produced by a step whose own
-// inputs this audit already covers. What the step computes from them is not
-// visible here and is not claimed to be pinned; the shape is accepted because
-// the Hextap reusable workflow relies on it to carry the runtime version
-// sealed in the adopter manifest. Every other expression root, including vars,
-// inputs, env, github and matrix, would need the audit to evaluate
-// expressions to bound, and it evaluates none, so it is refused.
+// steps.<id>.outputs.<name>. What the producing step computes is not visible
+// here, so the shape is accepted only under Policy.TrustJobOutputs, which
+// says why. Every other expression root, including vars, inputs, env, github
+// and matrix, would need the audit to evaluate expressions to bound, and it
+// evaluates none, so it is refused under every policy.
 func isStepOutputExpression(text string) bool {
 	if !strings.HasPrefix(text, "${{") || !strings.HasSuffix(text, "}}") || strings.Count(text, "${{") != 1 {
 		return false
