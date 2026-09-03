@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // DefaultWorkflowDirectory is the repository-relative directory GitHub loads
@@ -496,9 +497,73 @@ func provablyUnableToRelease(document *node) bool {
 			if job.has("secrets") {
 				return false
 			}
+			// A self-hosted runner, a runner group, or a runner chosen by an
+			// expression can hold a credential in its own environment,
+			// filesystem or store, which no permissions block bounds. Only a
+			// GitHub-hosted image, ephemeral and named by a known label,
+			// leaves the workflow's own text as the sole source of credentials.
+			if !job.has("uses") && !hostedRunner(job.child("runs-on")) {
+				// A job that calls a reusable workflow has no runner of its
+				// own; the callee declares one and is judged on its own.
+				return false
+			}
 		}
 	}
 	return !readsCredentialChannel(document)
+}
+
+// hostedRunner reports whether a runs-on value names only GitHub-hosted
+// runner images, as a scalar or a sequence of them. A self-hosted label, a
+// runner group mapping, an expression, an absent or an unreadable value is
+// not proven hosted.
+func hostedRunner(runsOn *node) bool {
+	if runsOn == nil {
+		return false
+	}
+	switch runsOn.kind {
+	case nodeScalar:
+		return runsOn.style != scalarBlock && isHostedLabel(runsOn.value)
+	case nodeSequence:
+		if len(runsOn.items) == 0 {
+			return false
+		}
+		for _, item := range runsOn.items {
+			if item == nil || item.kind != nodeScalar || item.style == scalarBlock || !isHostedLabel(item.value) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// isHostedLabel reports whether a label names a GitHub-hosted image: an OS
+// family followed by latest or a version of digits and dots, optionally with
+// a size or architecture suffix after a hyphen (ubuntu-latest, windows-2025,
+// macos-15, ubuntu-22.04, ubuntu-latest-8-cores). Runner labels are
+// free-form and naming a self-hosted runner after its OS is the obvious
+// convention, so ubuntu-custom or macos-onprem is not proven hosted.
+func isHostedLabel(label string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(label))
+	if strings.Contains(lowered, "${{") || !isHostName(lowered) {
+		return false
+	}
+	for _, family := range []string{"ubuntu-", "windows-", "macos-"} {
+		if !strings.HasPrefix(lowered, family) {
+			continue
+		}
+		image := lowered[len(family):]
+		if index := strings.Index(image, "-"); index >= 0 {
+			image = image[:index]
+		}
+		if image == "latest" {
+			return true
+		}
+		if image != "" && strings.Trim(image, "0123456789.") == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // releaseScopes are the GITHUB_TOKEN scopes through which a workflow can reach
@@ -1350,25 +1415,61 @@ func auditRunStep(file string, run *node) []Finding {
 		return nil
 	}
 	var findings []Finding
-	for _, line := range strings.Split(run.value, "\n") {
+	// A block scalar is read line by line, and then once more with its lines
+	// joined by spaces. The reader keeps a block scalar verbatim, so a folded
+	// block (run: >) whose downloader and interpreter sit on consecutive
+	// source lines, or a literal block using a backslash continuation, runs
+	// as one command that no single line shows; the joined form does.
+	lines := strings.Split(run.value, "\n")
+	candidates := lines
+	if len(lines) > 1 {
+		joined := make([]string, 0, len(lines))
+		for _, line := range lines {
+			if trimmed := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), "\\")); trimmed != "" {
+				joined = append(joined, trimmed)
+			}
+		}
+		candidates = append(candidates, strings.Join(joined, " "))
+	}
+	reported := false
+	for _, line := range candidates {
+		if reported {
+			break
+		}
 		switch fetchesAndUses(line) {
 		case downloadExecuted:
+			reported = true
 			findings = append(findings, Finding{
 				File:   file,
 				Rule:   RuleUnpinnedRemoteScript,
-				Detail: fmt.Sprintf("a run step executes code it downloads while running: %q", strings.TrimSpace(line)),
+				Detail: fmt.Sprintf("a run step executes code it downloads while running: %q", excerpt(line)),
 				Remedy: "install the tool through a setup action pinned to a full commit SHA with an exact version, or commit the script to the tagged source",
 			})
 		case downloadCaptured:
+			reported = true
 			findings = append(findings, Finding{
 				File:   file,
 				Rule:   RuleUnpinnedRemoteInput,
-				Detail: fmt.Sprintf("a run step captures a value it downloads while running, so the build depends on what the network returns when the job runs: %q", strings.TrimSpace(line)),
+				Detail: fmt.Sprintf("a run step captures a value it downloads while running, so the build depends on what the network returns when the job runs: %q", excerpt(line)),
 				Remedy: "commit the value to the tagged source, or compute it from data the tag fixes",
 			})
 		}
 	}
 	return findings
+}
+
+// excerpt trims a line for a finding and shortens a joined block body so the
+// finding stays readable.
+func excerpt(line string) string {
+	line = strings.TrimSpace(line)
+	if len(line) <= 200 {
+		return line
+	}
+	cut := 200
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut] + "…"
 }
 
 // downloadUse classifies what one line of shell does with a download.
@@ -1614,6 +1715,19 @@ func auditRemoteContexts(file string, uses, with *node, policy Policy) []Finding
 			if name := strings.Index(text, "="); name > 0 && isIdentifier(text[:name]) {
 				text = strings.TrimSpace(text[name+1:])
 			}
+			if isBuildContextInput(action, key) && isImageContext(text) {
+				// A context backed by an image is resolved like a job
+				// container: a tag moves, a digest does not.
+				if digest := strings.LastIndex(text, "@sha256:"); digest < 0 || !isHexadecimal(text[digest+len("@sha256:"):], 64) {
+					findings = append(findings, Finding{
+						File:   file,
+						Rule:   RuleUnpinnedContainer,
+						Detail: fmt.Sprintf("the build context input %q names the image %q without a digest, so rebuilding the same tag can consume different content", key, text),
+						Remedy: "pin the image context to an immutable @sha256: digest",
+					})
+				}
+				continue
+			}
 			if isBuildContextInput(action, key) && strings.Contains(text, "${{") {
 				// A build context chosen by an expression can become a
 				// remote Git reference on a moving branch with no commit
@@ -1663,6 +1777,14 @@ var buildContextInputs = map[string][]string{
 	"docker/bake-action": {"source", "files"},
 }
 
+// isImageContext reports whether a build-context value names an image or an
+// OCI layout rather than a path or a Git reference, which BuildKit resolves
+// like a container image.
+func isImageContext(text string) bool {
+	lowered := strings.ToLower(text)
+	return strings.HasPrefix(lowered, "docker-image://") || strings.HasPrefix(lowered, "oci-layout://")
+}
+
 // isBuildContextInput reports whether a with: input names a build context:
 // BuildKit's context and its named build-contexts on any action, and the
 // listed inputs of the build actions that use other names.
@@ -1676,9 +1798,9 @@ func isBuildContextInput(action, key string) bool {
 
 // isRemoteGitReference reports whether a value names a Git repository: a URL
 // under any scheme (https, ssh, git, ftps, and the git+ forms of each), or an
-// SCP-like address of the form user@host:path or host:path with a dotted
-// host, together with a .git path or a #fragment. A URL with neither, such as
-// a package registry, is not a Git source.
+// SCP-like address of the form user@host:path (any host) or host:path (a
+// dotted host), together with a .git path or a #fragment. A URL with neither,
+// such as a package registry, is not a Git source.
 func isRemoteGitReference(text string) bool {
 	lowered := strings.ToLower(text)
 	if !strings.Contains(lowered, ".git") && !strings.Contains(lowered, "#") {
@@ -1688,15 +1810,25 @@ func isRemoteGitReference(text string) bool {
 		return true
 	}
 	address := lowered
+	withUser := false
 	if at := strings.Index(address, "@"); at > 0 && isIdentifier(address[:at]) {
 		address = address[at+1:]
+		withUser = true
 	}
 	colon := strings.Index(address, ":")
 	if colon <= 0 {
 		return false
 	}
-	host := address[:colon]
-	return strings.Contains(host, ".") && isHostName(host)
+	host, path := address[:colon], address[colon+1:]
+	// user@host:path is unambiguous even for a single-label host such as an
+	// internal gitserver, as long as the path looks like a repository; a bare
+	// host:path needs a dotted host as well, to be told apart from a
+	// key: value. A bracketed IPv6 host and a dotted user name are not
+	// recognised, and git is the near-universal SSH user anyway.
+	if !isHostName(host) || (!strings.Contains(path, "/") && !strings.HasSuffix(path, ".git")) {
+		return false
+	}
+	return withUser || strings.Contains(host, ".")
 }
 
 func isSchemeName(text string) bool {

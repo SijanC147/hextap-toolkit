@@ -1668,6 +1668,48 @@ jobs:
       - uses: actions/checkout@v5
       - run: echo "${{ matrix.token }}"
 `,
+		"a self-hosted runner": `name: Manual
+on:
+  workflow_dispatch:
+permissions: read-all
+jobs:
+  run:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"a runner group": `name: Manual
+on:
+  workflow_dispatch:
+permissions: read-all
+jobs:
+  run:
+    runs-on:
+      group: release-runners
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"a runner chosen by an expression": `name: Manual
+on:
+  workflow_dispatch:
+permissions: read-all
+jobs:
+  run:
+    runs-on: ${{ vars.RUNNER }}
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"a self-hosted runner named after its os": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-custom
+    steps:
+      - uses: actions/checkout@v5
+`,
 		"a literal app private key": `name: Manual
 on:
   workflow_dispatch:
@@ -1955,6 +1997,34 @@ jobs:
         with:
           token: ${{ github.token }}
           persist-credentials: false
+`,
+		"a list of hosted labels": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: [ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"a larger hosted runner and a versioned image": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  big:
+    runs-on: ubuntu-latest-8-cores
+    steps:
+      - uses: actions/checkout@v5
+  old:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+  call:
+    uses: SijanC147/example/.github/workflows/lint.yml@0123456789abcdef0123456789abcdef01234567
 `,
 		"cache keys are not credentials": `name: Manual
 on:
@@ -2852,25 +2922,31 @@ jobs:
 		return report.PinFindings(Policy{})
 	}
 	mutable := map[string]string{
-		"a branch fragment":                  "          context: https://github.com/acme/app.git#main\n",
-		"a tag fragment with a subdir":       "          context: https://github.com/acme/app.git#v1.2.3:docker\n",
-		"no fragment at all":                 "          context: git@github.com:acme/app.git\n",
-		"an ssh url on a branch":             "          context: ssh://git@github.com/acme/app.git#main\n",
-		"a fragment without .git":            "          context: https://github.com/acme/app#main\n",
-		"a named build context":              "          build-contexts: src=https://github.com/o/r.git#main\n",
-		"a block of named contexts":          "          build-contexts: |\n            src=https://github.com/o/r.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n            docs=https://github.com/o/d.git#main\n",
-		"a build argument carrying a branch": "          build-args: |\n            SRC=https://github.com/o/r.git#main\n",
-		"a git+https scheme":                 "          context: git+https://github.com/o/r.git#main\n",
-		"an scp address with another user":   "          context: deploy@github.com:o/r.git#main\n",
-		"an scp address with no user":        "          context: github.com:o/r.git\n",
-		"a context chosen by a variable":     "          context: ${{ vars.BUILD_CONTEXT }}\n",
-		"a named context chosen by an input": "          build-contexts: src=${{ inputs.source }}\n",
+		"a branch fragment":                     "          context: https://github.com/acme/app.git#main\n",
+		"a tag fragment with a subdir":          "          context: https://github.com/acme/app.git#v1.2.3:docker\n",
+		"no fragment at all":                    "          context: git@github.com:acme/app.git\n",
+		"an ssh url on a branch":                "          context: ssh://git@github.com/acme/app.git#main\n",
+		"a fragment without .git":               "          context: https://github.com/acme/app#main\n",
+		"a named build context":                 "          build-contexts: src=https://github.com/o/r.git#main\n",
+		"a block of named contexts":             "          build-contexts: |\n            src=https://github.com/o/r.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n            docs=https://github.com/o/d.git#main\n",
+		"a build argument carrying a branch":    "          build-args: |\n            SRC=https://github.com/o/r.git#main\n",
+		"a git+https scheme":                    "          context: git+https://github.com/o/r.git#main\n",
+		"an scp address with another user":      "          context: deploy@github.com:o/r.git#main\n",
+		"an scp address with no user":           "          context: github.com:o/r.git\n",
+		"an scp address on a single-label host": "          context: git@gitserver:acme/app.git#main\n",
+		"an image-backed context on a tag":      "          build-contexts: base=docker-image://alpine:latest\n",
+		"a context chosen by a variable":        "          context: ${{ vars.BUILD_CONTEXT }}\n",
+		"a named context chosen by an input":    "          build-contexts: src=${{ inputs.source }}\n",
 	}
 	for name, with := range mutable {
 		t.Run("mutable "+name, func(t *testing.T) {
 			findings := audit(t, with)
-			if len(findings) != 1 || findings[0].Rule != RuleMutableSourceRef {
-				t.Fatalf("findings = %v, want one mutable-source-ref finding", findings)
+			want := RuleMutableSourceRef
+			if strings.Contains(with, "docker-image://") {
+				want = RuleUnpinnedContainer
+			}
+			if len(findings) != 1 || findings[0].Rule != want {
+				t.Fatalf("findings = %v, want one %s finding", findings, want)
 			}
 		})
 	}
@@ -2880,7 +2956,9 @@ jobs:
 		"a commit fragment with a subdir":              "          context: https://github.com/acme/app.git#3d3c42e5aac5ba805825da76410c181273ba90b1:docker\n",
 		"a local context":                              "          context: .\n",
 		"a registry url that is not git":               "          registry-url: https://registry.npmjs.org\n",
+		"prose with an at sign and a fragment":         "          commit-message: \"chore@release: bump #42\"\n",
 		"a named context at a commit":                  "          build-contexts: src=https://github.com/o/r.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"an image-backed context at a digest":          "          build-contexts: base=docker-image://alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
 		"prose that mentions a repository":             "          body: |\n            Install guide at https://github.com/o/r.git#readme\n",
 	}
 	for name, with := range immutable {
@@ -3015,6 +3093,8 @@ jobs:
 		"command substitution":                              "sh -c \"$(curl -fsSL https://host/get.sh)\"",
 		"eval of a download":                                "eval \"$(curl -s https://host/env.sh)\"",
 		"a block body with the idiom":                       "|\n          set -euo pipefail\n          curl https://sh.rustup.rs -sSf | sh -s -- -y\n",
+		"a folded block split across lines":                 ">\n          curl -fsSL https://host/install.sh\n          | sh\n",
+		"a continuation split across lines":                 "|\n          curl -fsSL https://host/install.sh \\\\\n            | sh\n",
 		"powershell download and run":                       "iwr https://host/setup.ps1 | iex",
 		"the cmdlet spelled out":                            "Invoke-WebRequest https://host/setup.ps1 | Invoke-Expression",
 		"an interpreter behind a path":                      "curl -s https://host/x.sh | /bin/sh",
