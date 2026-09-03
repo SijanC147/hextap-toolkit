@@ -528,21 +528,164 @@ func grantsReleaseScope(permissions *node) bool {
 	return false
 }
 
-// readsCredentialChannel reports whether any expression in the document reads
-// a value that can carry a credential this analysis cannot see: the secrets
-// context for anything other than GITHUB_TOKEN, or one of the input channels
-// a caller or dispatcher fills. A single such read anywhere in the file makes
-// the workflow release capable. GITHUB_TOKEN is the one exception, because the
-// permissions block bounds it.
+// readsCredentialChannel reports whether the document holds or reads a
+// credential this analysis cannot see the scope of: a literal GitHub token
+// anywhere in its text, a literal value under a credential-named key, or an
+// expression reading the secrets context for anything other than
+// GITHUB_TOKEN or one of the input channels a caller or dispatcher fills. A
+// single one anywhere in the file makes the workflow release capable.
+// GITHUB_TOKEN is the one exception, because the permissions block bounds it.
 func readsCredentialChannel(document *node) bool {
-	return anyScalar(document, func(value string) bool {
+	if anyScalar(document, func(value string) bool {
+		if looksLikeGitHubToken(value) {
+			return true
+		}
 		for _, expression := range expressions(value) {
 			if expressionReadsCredentialChannel(expression) {
 				return true
 			}
 		}
 		return false
+	}) {
+		return true
+	}
+	return holdsLiteralCredential(document)
+}
+
+// gitHubTokenPrefixes are the prefixes GitHub issues its tokens with. A value
+// carrying one is a credential wherever it sits, and a workflow holding one
+// in its own text can publish with it whatever its permissions block says.
+var gitHubTokenPrefixes = []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"}
+
+// looksLikeGitHubToken reports whether a value carries a GitHub token: one of
+// the issued prefixes beginning a word and followed by a token-length run of
+// letters, digits and underscores. The shortest issued tokens carry 36
+// characters after the prefix, so twenty is a comfortable floor that still
+// leaves $HIGHS_MAX and a documentation path such as /gho_guide alone.
+func looksLikeGitHubToken(value string) bool {
+	const tokenBodyFloor = 20
+	lowered := strings.ToLower(value)
+	for _, prefix := range gitHubTokenPrefixes {
+		for start := strings.Index(lowered, prefix); start >= 0; {
+			if start == 0 || !isTokenBodyByte(lowered[start-1]) {
+				body := 0
+				for index := start + len(prefix); index < len(lowered) && isTokenBodyByte(lowered[index]); index++ {
+					body++
+				}
+				if body >= tokenBodyFloor {
+					return true
+				}
+			}
+			next := strings.Index(lowered[start+1:], prefix)
+			if next < 0 {
+				break
+			}
+			start += 1 + next
+		}
+	}
+	return false
+}
+
+func isTokenBodyByte(character byte) bool {
+	switch {
+	case character >= '0' && character <= '9':
+	case character >= 'a' && character <= 'z':
+	case character >= 'A' && character <= 'Z':
+	case character == '_':
+	default:
+		return false
+	}
+	return true
+}
+
+// credentialInputNames are the mapping keys, in env: and with: blocks alike,
+// under which a workflow supplies a credential: each name on its own and as
+// the suffix of a longer name, so token, github-token, private-key and
+// app-private-key all count. A literal value under one of them is a
+// credential this analysis cannot see the scope of; an expression under one
+// is judged by the channel it reads. Any name ending in -key counts as well
+// (ssh-key, deploy-key, service-account-key), while bare key is deliberately
+// left out because actions/cache takes a literal one; auth, bearer, passwd
+// and the aws_access_key_id spelling are left out too, each for sweeping in
+// a common non-credential input or for not occurring as a literal in
+// practice.
+var credentialInputNames = []string{
+	"access-key",
+	"api-key",
+	"credentials",
+	"credentials-json",
+	"password",
+	"pat",
+	"private-key",
+	"secret",
+	"token",
+}
+
+func isCredentialInputName(key string) bool {
+	normalised := normaliseInputName(key)
+	for _, name := range credentialInputNames {
+		if normalised == name || strings.HasSuffix(normalised, "-"+name) {
+			return true
+		}
+	}
+	return strings.HasSuffix(normalised, "-key")
+}
+
+// holdsLiteralCredential reports whether any mapping in the document gives a
+// credential-named key a literal, non-empty value with no expression in it.
+func holdsLiteralCredential(document *node) bool {
+	return anyMapping(document, func(mapping *node) bool {
+		for _, key := range mapping.keys {
+			if !isCredentialInputName(key) {
+				continue
+			}
+			value := mapping.values[key]
+			if value == nil || value.kind != nodeScalar {
+				continue
+			}
+			text := strings.TrimSpace(value.value)
+			if text == "" || strings.Contains(text, "${{") || isBooleanLiteral(text) {
+				// persist-credentials: false is a switch, not a credential.
+				continue
+			}
+			return true
+		}
+		return false
 	})
+}
+
+func isBooleanLiteral(text string) bool {
+	switch strings.ToLower(text) {
+	case "true", "false", "yes", "no", "on", "off":
+		return true
+	}
+	return false
+}
+
+// anyMapping reports whether any mapping node in the tree satisfies the
+// predicate, stopping at the first that does.
+func anyMapping(current *node, predicate func(*node) bool) bool {
+	if current == nil {
+		return false
+	}
+	switch current.kind {
+	case nodeMapping:
+		if predicate(current) {
+			return true
+		}
+		for _, key := range current.keys {
+			if anyMapping(current.values[key], predicate) {
+				return true
+			}
+		}
+	case nodeSequence:
+		for _, item := range current.items {
+			if anyMapping(item, predicate) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // anyScalar reports whether any scalar value in the tree satisfies the
@@ -1074,7 +1217,7 @@ func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 			findings = append(findings, report.auditActionReference(file, job.child("uses"), true)...)
 			findings = append(findings, auditRuntimeVersions(file, job.child("with"), policy)...)
 			findings = append(findings, auditSourceRef(file, job.child("uses"), job.child("with"), events, true, policy)...)
-			findings = append(findings, auditRemoteContexts(file, job.child("with"))...)
+			findings = append(findings, auditRemoteContexts(file, job.child("uses"), job.child("with"), policy)...)
 		}
 		if job.has("container") {
 			findings = append(findings, auditContainerImage(file, job.child("container"))...)
@@ -1105,7 +1248,7 @@ func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 				findings = append(findings, report.auditActionReference(file, step.child("uses"), false)...)
 				findings = append(findings, auditRuntimeVersions(file, step.child("with"), policy)...)
 				findings = append(findings, auditRuntimeSetup(file, step.child("uses"), step.child("with"), policy)...)
-				findings = append(findings, auditRemoteContexts(file, step.child("with"))...)
+				findings = append(findings, auditRemoteContexts(file, step.child("uses"), step.child("with"), policy)...)
 				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"), events, false, policy)...)
 			}
 		}
@@ -1149,9 +1292,16 @@ func fetchesSource(uses *node) bool {
 // that merely contains a URL is untouched, because the reference has to start
 // the line; the cost is that a non-Git URL with a #route at the start of a
 // value is refused too.
-func auditRemoteContexts(file string, with *node) []Finding {
+func auditRemoteContexts(file string, uses, with *node, policy Policy) []Finding {
 	if with == nil || with.kind != nodeMapping {
 		return nil
+	}
+	action := ""
+	if uses != nil && uses.kind == nodeScalar && uses.style != scalarBlock {
+		action = strings.ToLower(strings.TrimSpace(uses.value))
+		if at := strings.LastIndex(action, "@"); at >= 0 {
+			action = action[:at]
+		}
 	}
 	var findings []Finding
 	for _, key := range with.keys {
@@ -1163,6 +1313,22 @@ func auditRemoteContexts(file string, with *node) []Finding {
 			text := strings.TrimSpace(line)
 			if name := strings.Index(text, "="); name > 0 && isIdentifier(text[:name]) {
 				text = strings.TrimSpace(text[name+1:])
+			}
+			if isBuildContextInput(action, key) && strings.Contains(text, "${{") {
+				// A build context chosen by an expression can become a
+				// remote Git reference on a moving branch with no commit
+				// to the workflow, so it is refused unless it is a trusted
+				// job output.
+				if isStepOutputExpression(text) && policy.TrustJobOutputs {
+					continue
+				}
+				findings = append(findings, Finding{
+					File:   file,
+					Rule:   RuleMutableSourceRef,
+					Detail: fmt.Sprintf("the build context input %q resolves through the expression %q, so the source it builds from is decided outside the tagged workflow", key, text),
+					Remedy: "name the build context literally: a path in the checkout, or a remote Git reference at a full 40-character commit SHA",
+				})
+				continue
 			}
 			if !isRemoteGitReference(text) {
 				continue
@@ -1186,6 +1352,26 @@ func auditRemoteContexts(file string, with *node) []Finding {
 		}
 	}
 	return findings
+}
+
+// buildContextInputs lists, for the build actions that take source under a
+// name other than context, which inputs do: docker/bake-action's source
+// accepts the same https://host/repo.git#ref form as context does, and its
+// files can name remote definitions. Gated on the action so that a generic
+// source: input on another action is not swept in.
+var buildContextInputs = map[string][]string{
+	"docker/bake-action": {"source", "files"},
+}
+
+// isBuildContextInput reports whether a with: input names a build context:
+// BuildKit's context and its named build-contexts on any action, and the
+// listed inputs of the build actions that use other names.
+func isBuildContextInput(action, key string) bool {
+	normalised := normaliseInputName(key)
+	if normalised == "context" || strings.HasSuffix(normalised, "-context") || strings.HasSuffix(normalised, "-contexts") {
+		return true
+	}
+	return containsString(buildContextInputs[action], normalised)
 }
 
 // isRemoteGitReference reports whether a value names a Git repository: a URL
@@ -1279,8 +1465,10 @@ var tagCommitEvents = map[string]struct{}{
 // callee's commit that the caller pinned; a file that is both callable and
 // dispatchable runs under the dispatch too, so every declared event must be
 // one of those. github.event.workflow_run.head_sha is the upstream run's
-// commit and is accepted under workflow_run. An output of a job or step is
-// accepted only under Policy.TrustJobOutputs.
+// commit and is accepted only when workflow_run is the sole declared event,
+// since under any other event the field is absent and the checkout falls
+// back to that event's ref. An output of a job or step is accepted only under
+// Policy.TrustJobOutputs.
 //
 // Inputs are matched the way the runner exposes them, case-insensitively, so
 // Ref: is ref:. Two spellings of one input in the same block are refused: the
@@ -1333,10 +1521,10 @@ func auditSourceRef(file string, uses, with *node, events []string, reusable boo
 		}
 		return mutable(fmt.Sprintf("the ref %q names this workflow file's commit, which under %s is not the tagged one", text, describeEvents(events)))
 	case isExpression(text, "github.event.workflow_run.head_sha"):
-		if declaresEvent(events, "workflow_run") {
+		if len(events) == 1 && events[0] == "workflow_run" {
 			return nil
 		}
-		return mutable(fmt.Sprintf("the ref %q has no value outside a workflow_run workflow", text))
+		return mutable(fmt.Sprintf("the ref %q is the upstream run's commit only when workflow_run is the sole event, and this workflow declares %s", text, describeEvents(events)))
 	}
 	return mutable(fmt.Sprintf("the ref %q is not an immutable commit, so rerunning the same release tag can build different source", text))
 }

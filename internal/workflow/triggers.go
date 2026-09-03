@@ -248,6 +248,12 @@ func classifyPush(filters *node) (TagTrigger, []string, []string, string) {
 		if err != nil {
 			return TagTriggerUnknown, nil, nil, fmt.Sprintf("push tags filter is unreadable: %v", err)
 		}
+		switch {
+		case !hasPositivePattern(patterns):
+			return TagTriggerUnknown, nil, nil, fmt.Sprintf("line %d lists only negated tag patterns, which GitHub rejects", filters.line)
+		case excludesEveryTag(patterns):
+			return TagTriggerNone, nil, nil, ""
+		}
 		return TagTriggerFiltered, patterns, nil, fmt.Sprintf("push filters tags on %s", strings.Join(quoteAll(patterns), ", "))
 	}
 	if hasTagsIgnore {
@@ -264,6 +270,47 @@ func classifyPush(filters *node) (TagTrigger, []string, []string, string) {
 		return TagTriggerNone, nil, nil, ""
 	}
 	return TagTriggerAny, nil, nil, "push filters no refs, so every tag push starts it"
+}
+
+// hasPositivePattern reports whether a filter list carries at least one
+// entry that is not negated. GitHub requires one whenever a negated entry is
+// present, so a list without one describes no working trigger.
+func hasPositivePattern(patterns []string) bool {
+	for _, pattern := range patterns {
+		if !strings.HasPrefix(pattern, "!") {
+			return true
+		}
+	}
+	return false
+}
+
+// excludesEveryTag reports whether a tags list provably matches no tag. GitHub
+// evaluates the entries in order and the last matching entry decides, so a
+// positive entry is cancelled when a later entry negates it exactly or
+// negates everything; a list is exhaustive when every positive entry is
+// cancelled, with nothing after the cancellation re-including it. Only exact
+// text is compared: whether "!v*" also cancels "v[0-9]*" would need GitHub's
+// glob grammar, and getting that wrong under-reports, so such a list stays
+// filtered and a caller carrying it is still verified.
+func excludesEveryTag(patterns []string) bool {
+	if len(patterns) == 0 {
+		return false
+	}
+	for index, pattern := range patterns {
+		if strings.HasPrefix(pattern, "!") {
+			continue
+		}
+		cancelled := false
+		for _, later := range patterns[index+1:] {
+			if later == "!"+pattern || later == "!**" {
+				cancelled = true
+			}
+		}
+		if !cancelled {
+			return false
+		}
+	}
+	return true
 }
 
 // ignoresEveryTag reports whether a tags-ignore list provably excludes every

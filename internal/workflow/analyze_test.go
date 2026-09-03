@@ -1605,6 +1605,95 @@ jobs:
         env:
           GH_TOKEN: ${{ env.RELEASE_TOKEN }}
 `,
+		"a literal token in the workflow env": `name: Manual
+on:
+  workflow_dispatch:
+permissions: read-all
+env:
+  GH_TOKEN: github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"a literal value under a credential-named input": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: not-an-expression
+`,
+		"a literal app private key": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          private-key: not-an-expression
+`,
+		"a literal deploy key under a -key name": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ssh_key: not-an-expression
+`,
+		"a token glued to a hyphen": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo x-ghp_abcdefghijklmnopqrstuvwxyz0123456789
+`,
+		"a literal service account blob": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          credentials_json: '{"type":"service_account"}'
+`,
+		"a literal value under a credential-named env key": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_PAT: abc123
+    steps:
+      - uses: actions/checkout@v5
+`,
 		"token pasted into an issue body": `name: Triage
 on:
   issues:
@@ -1800,6 +1889,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+`,
+		"the bounded token under a credential-named input": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  LOG_LEVEL: debug
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ github.token }}
+          persist-credentials: false
+`,
+		"cache keys are not credentials": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: ~/.cache
+          key: build-v1
+          restore-keys: build-
+`,
+		"a word that merely contains a token prefix": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "$HIGHS_MAX" and see https://example.com/gho_guide
 `,
 		"structured event data is not a channel": `name: Review
 on:
@@ -2309,6 +2442,7 @@ jobs:
 		{"job.workflow_sha under a callee that is also scheduled", "  workflow_call:\n  schedule:\n    - cron: \"0 3 * * *\"\n", "${{ job.workflow_sha }}", 1},
 		{"the upstream run's commit under a chain from CI", "  workflow_run:\n    workflows: [CI]\n    types: [completed]\n", "${{ github.event.workflow_run.head_sha }}", 0},
 		{"the upstream run's commit outside workflow_run", "  workflow_dispatch:\n", "${{ github.event.workflow_run.head_sha }}", 1},
+		{"the upstream run's commit under a chain that also dispatches", "  workflow_run:\n    workflows: [CI]\n    types: [completed]\n  workflow_dispatch:\n", "${{ github.event.workflow_run.head_sha }}", 1},
 		{"github.sha under a push that also dispatches", "  push:\n    tags:\n      - \"v*\"\n  workflow_dispatch:\n", "${{ github.sha }}", 1},
 	}
 	for _, test := range eventBound {
@@ -2619,6 +2753,8 @@ jobs:
 		"a git+https scheme":                 "          context: git+https://github.com/o/r.git#main\n",
 		"an scp address with another user":   "          context: deploy@github.com:o/r.git#main\n",
 		"an scp address with no user":        "          context: github.com:o/r.git\n",
+		"a context chosen by a variable":     "          context: ${{ vars.BUILD_CONTEXT }}\n",
+		"a named context chosen by an input": "          build-contexts: src=${{ inputs.source }}\n",
 	}
 	for name, with := range mutable {
 		t.Run("mutable "+name, func(t *testing.T) {
@@ -2629,12 +2765,13 @@ jobs:
 		})
 	}
 	immutable := map[string]string{
-		"a commit fragment":                "          context: https://github.com/acme/app.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n",
-		"a commit fragment with a subdir":  "          context: https://github.com/acme/app.git#3d3c42e5aac5ba805825da76410c181273ba90b1:docker\n",
-		"a local context":                  "          context: .\n",
-		"a registry url that is not git":   "          registry-url: https://registry.npmjs.org\n",
-		"a named context at a commit":      "          build-contexts: src=https://github.com/o/r.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n",
-		"prose that mentions a repository": "          body: |\n            Install guide at https://github.com/o/r.git#readme\n",
+		"a source input on an action that is not bake": "          source: ${{ vars.SRC }}\n",
+		"a commit fragment":                            "          context: https://github.com/acme/app.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"a commit fragment with a subdir":              "          context: https://github.com/acme/app.git#3d3c42e5aac5ba805825da76410c181273ba90b1:docker\n",
+		"a local context":                              "          context: .\n",
+		"a registry url that is not git":               "          registry-url: https://registry.npmjs.org\n",
+		"a named context at a commit":                  "          build-contexts: src=https://github.com/o/r.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"prose that mentions a repository":             "          body: |\n            Install guide at https://github.com/o/r.git#readme\n",
 	}
 	for name, with := range immutable {
 		t.Run("accepted "+name, func(t *testing.T) {
@@ -2642,5 +2779,99 @@ jobs:
 				t.Fatalf("an immutable or non-git input was refused: %v", findings)
 			}
 		})
+	}
+}
+
+// TestTagListsThatMatchNoTag guards the review finding that tags: ['**', '!**']
+// was classified as a filtered tag trigger. GitHub evaluates the entries in
+// order and the last matching one decides, so a final !** excludes every tag;
+// a caller carrying it owns no tag, and a competitor carrying it cannot start.
+func TestTagListsThatMatchNoTag(t *testing.T) {
+	workflow := func(tags string) string {
+		return `name: Listed
+on:
+  push:
+    tags: ` + tags + `
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo listed
+`
+	}
+	tests := []struct {
+		name    string
+		tags    string
+		trigger TagTrigger
+	}{
+		{"everything then excluded", `["**", "!**"]`, TagTriggerNone},
+		{"a pattern then everything excluded", `["v*", "!**"]`, TagTriggerNone},
+		{"a pattern then that pattern excluded", `["v*", "!v*"]`, TagTriggerNone},
+		{"two patterns with one excluded", `["v*", "w*", "!v*"]`, TagTriggerFiltered},
+		{"a pattern excluded then re-included", `["v*", "!v*", "v*"]`, TagTriggerFiltered},
+		{"an exclusion that only glob semantics could evaluate", `["v[0-9]*", "!v*"]`, TagTriggerFiltered},
+		{"re-included after the exclusion", `["**", "!**", "v*"]`, TagTriggerFiltered},
+		{"only negated entries", `["!**"]`, TagTriggerUnknown},
+		{"a narrower exclusion", `["**", "!v0.*"]`, TagTriggerFiltered},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"listed.yml":      workflow(test.tags),
+			})
+			listed := findWorkflow(t, report, "listed.yml")
+			if listed.TagTrigger != test.trigger {
+				t.Fatalf("trigger = %v (%s), want %v", listed.TagTrigger, listed.TriggerReason, test.trigger)
+			}
+		})
+	}
+
+	// A caller whose tag list matches no tag owns no tag.
+	caller := strings.Replace(hextapCallerWorkflow, "    tags:\n      - \"v*\"", "    tags: [\"**\", \"!**\"]", 1)
+	if caller == hextapCallerWorkflow {
+		t.Fatal("fixture substitution failed")
+	}
+	report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: caller})
+	findings := preflightFindings(t, report, Policy{})
+	if len(findings) != 1 || findings[0].Rule != RuleMissingHextapCaller || !strings.Contains(findings[0].Detail, "never starts on a tag push") {
+		t.Fatalf("findings = %v, want the caller reported as owning no tag", findings)
+	}
+}
+
+// TestBakeSourceIsABuildContext covers docker/bake-action, whose source and
+// files inputs take the same remote references as context does on the build
+// action, gated on the action name so a generic source input elsewhere is
+// left alone.
+func TestBakeSourceIsABuildContext(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"release.yml": `name: Bake
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/bake-action@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          source: ${{ vars.SRC }}
+          files: ${{ vars.FILES }}
+      - uses: docker/bake-action@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          source: https://github.com/o/r.git#3d3c42e5aac5ba805825da76410c181273ba90b1
+          files: docker-bake.hcl
+`,
+	})
+	findings := report.PinFindings(Policy{})
+	if len(findings) != 2 {
+		t.Fatalf("findings = %v, want the two expression-valued bake inputs refused and the pinned form accepted", findings)
+	}
+	for _, finding := range findings {
+		if finding.Rule != RuleMutableSourceRef {
+			t.Fatalf("unexpected rule in %v", finding)
+		}
 	}
 }
