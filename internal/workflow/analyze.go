@@ -111,15 +111,26 @@ type Workflow struct {
 	// release uses. A directory cannot show which repository it belongs to,
 	// so this form earns the exemption only under Policy.SelfRelease.
 	SelfCaller bool
-	// ReleaseCapable reports whether the file can reach a release. It is true
-	// unless the workflow is proven unable to: the GITHUB_TOKEN scopes that
-	// reach a release are explicitly withheld, no job passes secrets on, and
-	// no expression reads a secret other than GITHUB_TOKEN. Absent permissions
-	// are not proof, because the effective default is a repository setting
-	// this analysis cannot see; a read-only token is not proof either, because
-	// a secret can hold a token the permissions block never bounds. Only these
-	// files are pin-audited.
+	// ReleaseCapable reports whether the file can reach a release with no
+	// fact stated beyond its own text. It is true unless the workflow is
+	// proven unable to: the GITHUB_TOKEN scopes that reach a release are
+	// explicitly withheld, no job passes secrets on, no job calls a reusable
+	// workflow outside this directory, no expression reads a secret other
+	// than GITHUB_TOKEN, and no job has a runner of its own, since a runner
+	// can hold a credential of its own and its label proves nothing about
+	// it. Absent permissions are not proof, because the effective default is
+	// a repository setting this analysis cannot see; a read-only token is
+	// not proof either, because a secret can hold a token the permissions
+	// block never bounds. Only these files are pin-audited; under
+	// Policy.HostedRunnersOnly the runner condition is dropped and
+	// hostedInert decides.
 	ReleaseCapable bool
+
+	// hostedInert reports that the workflow is proven unable to release
+	// once every runner is known to be GitHub-hosted: everything above holds
+	// except that its jobs may have runners of their own, none of which
+	// names the self-hosted label.
+	hostedInert bool
 
 	document *node
 	watches  []string
@@ -174,8 +185,49 @@ type Policy struct {
 	// the default branch, and that code is under review in this repository,
 	// so the toolkit sets this for its own tree. Nothing else should. Under
 	// the default, an output-shaped value is refused like any other
-	// expression.
+	// expression. It also accepts a checkout with no ref: inside a
+	// workflow_call callee, which takes the caller's event commit: the
+	// toolkit's validate job checks that commit out only as the vantage from
+	// which it resolves the tag and verifies it, and every later job pins to
+	// the commit it derives.
 	TrustJobOutputs bool
+	// HostedRunnersOnly states that every job in the repository runs on a
+	// GitHub-hosted runner: no self-hosted runner is registered for the
+	// repository, its organisation or its enterprise, and hosted runners are
+	// not disabled. A directory cannot show this, and a runner label cannot
+	// either: labels are free-form, a self-hosted runner can wear
+	// ubuntu-latest, and GitHub documents no routing guarantee between a
+	// hosted and a self-hosted runner sharing a label. Without this fact any
+	// job with a runner of its own may run on a host holding a credential no
+	// permissions block bounds, so only a workflow with no such job is
+	// exempt from the pin audit; with it, the exemption reaches every
+	// workflow that is otherwise proven unable to release. The repository
+	// runner list (GET /repos/{owner}/{repo}/actions/runners, and its
+	// organisation and enterprise counterparts) establishes the fact.
+	HostedRunnersOnly bool
+}
+
+// releaseCapable reports whether the workflow can reach a release under the
+// policy: ReleaseCapable as read from the text alone, except that a workflow
+// inert on hosted runners is exempt once the policy states runners are
+// hosted.
+func (workflow Workflow) releaseCapable(policy Policy) bool {
+	if !workflow.ReleaseCapable {
+		return false
+	}
+	return !(policy.HostedRunnersOnly && workflow.hostedInert)
+}
+
+// capability classifies a document: capable is ReleaseCapable and
+// hostedInert is the same judgement with every runner taken as hosted.
+func capability(document *node, respondsToTagPush bool) (capable, hostedInert bool) {
+	if respondsToTagPush || !provablyUnableToRelease(document) {
+		return true, false
+	}
+	if namesSelfHostedRunner(document) {
+		return true, false
+	}
+	return hasOwnRunnerJob(document), true
 }
 
 // Analyze reads and classifies every file in the given workflow directory.
@@ -259,7 +311,7 @@ func analyze(
 		workflow.TagPatterns = analysis.patterns
 		workflow.watches = analysis.watches
 		workflow.HextapCaller, workflow.SelfCaller = callerForms(document)
-		workflow.ReleaseCapable = workflow.TagTrigger.RespondsToTagPush() || !provablyUnableToRelease(document)
+		workflow.ReleaseCapable, workflow.hostedInert = capability(document, workflow.TagTrigger.RespondsToTagPush())
 		report.Workflows = append(report.Workflows, workflow)
 	}
 
@@ -365,6 +417,7 @@ func resolveWorkflowRunChains(report *Report, external []Workflow, selfSeeds boo
 					workflow.TriggerReason = reason
 				}
 				workflow.ReleaseCapable = true
+				workflow.hostedInert = false
 				workflow.chained = true
 				changed = true
 				break
@@ -397,7 +450,10 @@ func callerForms(document *node) (external, relative bool) {
 	external, relative = true, true
 	for _, key := range jobs.keys {
 		job := jobs.values[key]
-		if job == nil || job.kind != nodeMapping || job.has("if") || job.has("strategy") {
+		if job == nil || job.kind != nodeMapping {
+			return false, false
+		}
+		if _, _, found := unsupportedCallerKey(job); found {
 			return false, false
 		}
 		uses := job.child("uses")
@@ -468,9 +524,19 @@ func isASCII(text string) bool {
 // workflow, and reads neither the secrets context nor any of those input
 // channels is exempt from the pin audit. A workflow_call callee is never
 // exempt: it runs under whatever its caller grants, and this pass judges one
-// file at a time rather than composing grants across files. Everything else is
-// audited, which over-reports rather than certifying a mutable release path as
-// pinned.
+// file at a time rather than composing grants across files. For the same
+// reason a job that calls a reusable workflow outside this directory is never
+// exempt: the callee's jobs, runners and channel reads are not in this
+// report to be judged, so its mutable reference must be audited here. A job
+// that calls a local reusable workflow is judged through that callee, which
+// this pass reads and audits on its own; a local reference naming a file the
+// directory does not hold is read the same way, since GitHub fails the job
+// on the missing callee and nothing runs. Everything else is audited, which
+// over-reports rather than certifying a mutable release path as pinned.
+//
+// Runners are not considered here. Whether a job's runner can hold a
+// credential of its own is a fact about the repository's runner fleet, which
+// capability takes from Policy.HostedRunnersOnly.
 func provablyUnableToRelease(document *node) bool {
 	permissions := document.child("permissions")
 	if permissions == nil || grantsReleaseScope(permissions) {
@@ -497,91 +563,71 @@ func provablyUnableToRelease(document *node) bool {
 			if job.has("secrets") {
 				return false
 			}
-			// A self-hosted runner, a runner group, or a runner chosen by an
-			// expression can hold a credential in its own environment,
-			// filesystem or store, which no permissions block bounds. Only a
-			// GitHub-hosted image, ephemeral and named by a known label,
-			// leaves the workflow's own text as the sole source of credentials.
-			if !job.has("uses") && !hostedRunner(job.child("runs-on")) {
-				// A job that calls a reusable workflow has no runner of its
-				// own; the callee declares one and is judged on its own.
-				return false
+			if uses := job.child("uses"); uses != nil {
+				if uses.kind != nodeScalar || uses.style == scalarBlock {
+					return false
+				}
+				if _, local := reusableWorkflowName(strings.TrimSpace(uses.value)); !local {
+					return false
+				}
 			}
 		}
 	}
 	return !readsCredentialChannel(document)
 }
 
-// hostedRunner reports whether a runs-on value names only GitHub-hosted
-// runner images, as a scalar or a sequence of them. A self-hosted label, a
-// runner group mapping, an expression, an absent or an unreadable value is
-// not proven hosted.
-func hostedRunner(runsOn *node) bool {
-	if runsOn == nil {
+// hasOwnRunnerJob reports whether any job runs on a runner of its own rather
+// than calling a reusable workflow. Such a runner may be self-hosted and hold
+// a credential no permissions block bounds, so without Policy.HostedRunnersOnly
+// the job keeps the workflow release capable. A job is read as a call by its
+// uses: key alone: GitHub rejects a job that carries uses: beside steps: or
+// runs-on:, so that shape runs nowhere and the reading is safe.
+func hasOwnRunnerJob(document *node) bool {
+	jobs := document.child("jobs")
+	if jobs == nil || jobs.kind != nodeMapping {
 		return false
 	}
-	switch runsOn.kind {
-	case nodeScalar:
-		return runsOn.style != scalarBlock && isHostedLabel(runsOn.value)
-	case nodeSequence:
-		if len(runsOn.items) == 0 {
-			return false
+	for _, key := range jobs.keys {
+		job := jobs.values[key]
+		if job != nil && job.kind == nodeMapping && !job.has("uses") {
+			return true
 		}
-		for _, item := range runsOn.items {
-			if item == nil || item.kind != nodeScalar || item.style == scalarBlock || !isHostedLabel(item.value) {
-				return false
-			}
-		}
-		return true
 	}
 	return false
 }
 
-// hostedLabels are the labels GitHub assigns to its hosted runner images,
-// as of 2026-09, deprecated ones included while they still resolve. The list
-// needs revising as GitHub adds and retires images; a label missing from it
-// only widens the audit, never certifies. Runner labels are otherwise
-// free-form: a self-hosted runner can be named ubuntu-custom or
-// ubuntu-123-onprem, and a larger runner carries an organisation-chosen
-// name, so only an exact match on this list proves a job runs on an
-// ephemeral hosted image, and every other label is audited.
-var hostedLabels = map[string]struct{}{
-	"macos-12":            {},
-	"macos-12-large":      {},
-	"macos-13":            {},
-	"macos-13-large":      {},
-	"macos-13-xlarge":     {},
-	"macos-14":            {},
-	"macos-14-large":      {},
-	"macos-14-xlarge":     {},
-	"macos-15":            {},
-	"macos-15-intel":      {},
-	"macos-15-large":      {},
-	"macos-15-xlarge":     {},
-	"macos-latest":        {},
-	"macos-latest-large":  {},
-	"macos-latest-xlarge": {},
-	"macos-26":            {},
-	"ubuntu-20.04":        {},
-	"ubuntu-22.04":        {},
-	"ubuntu-22.04-arm":    {},
-	"ubuntu-24.04":        {},
-	"ubuntu-24.04-arm":    {},
-	"ubuntu-26.04":        {},
-	"ubuntu-latest":       {},
-	"ubuntu-latest-arm":   {},
-	"windows-11-arm":      {},
-	"windows-2019":        {},
-	"windows-2022":        {},
-	"windows-2025":        {},
-	"windows-latest":      {},
-}
-
-// isHostedLabel reports whether a label is one GitHub assigns to a hosted
-// image, compared exactly after case folding.
-func isHostedLabel(label string) bool {
-	_, hosted := hostedLabels[strings.ToLower(strings.TrimSpace(label))]
-	return hosted
+// namesSelfHostedRunner reports whether any job's runs-on carries the
+// self-hosted label GitHub applies to every self-hosted runner and to no
+// hosted one. Such a job contradicts Policy.HostedRunnersOnly, and the
+// contradiction is resolved by auditing the workflow.
+func namesSelfHostedRunner(document *node) bool {
+	jobs := document.child("jobs")
+	if jobs == nil || jobs.kind != nodeMapping {
+		return false
+	}
+	for _, key := range jobs.keys {
+		job := jobs.values[key]
+		if job == nil || job.kind != nodeMapping {
+			continue
+		}
+		runsOn := job.child("runs-on")
+		if runsOn == nil {
+			continue
+		}
+		switch runsOn.kind {
+		case nodeScalar:
+			if strings.EqualFold(strings.TrimSpace(runsOn.value), "self-hosted") {
+				return true
+			}
+		case nodeSequence:
+			for _, item := range runsOn.items {
+				if item != nil && item.kind == nodeScalar && strings.EqualFold(strings.TrimSpace(item.value), "self-hosted") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // releaseScopes are the GITHUB_TOKEN scopes through which a workflow can reach
@@ -1114,19 +1160,43 @@ func (report *Report) PinFindings(policy Policy) []Finding {
 // workflow_run chain runs from the default branch's definition, which is
 // audited from that branch's report when it is read separately.
 
+// defaultBranchOnlyEvents are the events under which GitHub reads a workflow
+// from the default branch and never from the tagged commit. push belongs
+// here only once the file's own trigger is known not to respond to a tag
+// push, which runsOnlyFromTheDefaultBranch checks first: a branch push runs
+// the pushed branch's copy, not the tagged one. create is absent because
+// the classifier never reads it as not responding, so a file declaring it
+// is kept in the audit at that first check. Every other event is left out,
+// which keeps the tagged copy in the audit: workflow_call resolves inside
+// the tagged commit through a local uses:, workflow_dispatch runs whichever
+// ref's copy is dispatched, a release event runs the tag's, and an event
+// this list does not name is not assumed to be safe.
+var defaultBranchOnlyEvents = map[string]struct{}{
+	"push":                {},
+	"repository_dispatch": {},
+	"schedule":            {},
+	"workflow_run":        {},
+}
+
 // runsOnlyFromTheDefaultBranch reports whether a tagged workflow's only route
 // to running is a workflow_run chain, so that GitHub would read the default
-// branch's copy rather than this one. A workflow that also declares
-// workflow_call is excluded: a local uses: reference resolves inside the
-// tagged commit, so the tagged copy of a callee runs for this tag whatever
-// chain trigger it carries besides.
+// branch's copy rather than this one, and no other event it declares can
+// execute the tagged copy.
 func runsOnlyFromTheDefaultBranch(workflow Workflow) bool {
-	return workflow.chained && !workflow.ownTrigger.RespondsToTagPush() && !declaresEvent(workflow.Events, "workflow_call")
+	if !workflow.chained || workflow.ownTrigger.RespondsToTagPush() || len(workflow.Events) == 0 {
+		return false
+	}
+	for _, event := range workflow.Events {
+		if _, ok := defaultBranchOnlyEvents[event]; !ok {
+			return false
+		}
+	}
+	return true
 }
 func (report *Report) pinFindings(policy Policy, includeChained bool) []Finding {
 	var findings []Finding
 	for _, workflow := range report.Workflows {
-		if !workflow.Active || !workflow.ReleaseCapable || workflow.document == nil {
+		if !workflow.Active || !workflow.releaseCapable(policy) || workflow.document == nil {
 			continue
 		}
 		if !includeChained && runsOnlyFromTheDefaultBranch(workflow) {
@@ -1229,7 +1299,7 @@ func defaultBranchFindings(tagged, defaultBranch *Report, policy Policy, raised 
 		workflow.chained = false
 		workflow.TagTrigger = workflow.ownTrigger
 		workflow.TriggerReason = workflow.ownReason
-		workflow.ReleaseCapable = workflow.ownTrigger.RespondsToTagPush() || !provablyUnableToRelease(workflow.document)
+		workflow.ReleaseCapable, workflow.hostedInert = capability(workflow.document, workflow.ownTrigger.RespondsToTagPush())
 	}
 	resolveWorkflowRunChains(defaultBranch, tagged.Workflows, false)
 
@@ -1352,13 +1422,17 @@ func (report *Report) callerVerification(policy Policy) (string, bool) {
 				return fmt.Sprintf("%s carries %d jobs, and every job of a caller is a release run against the same tag; the caller must carry exactly one",
 					callerFile, count), false
 			}
-			if job, key, found := guardedJob(workflow.document); found {
-				if key == "strategy" {
+			if job, key, found := unsupportedCallerJobKey(workflow.document); found {
+				switch key {
+				case "strategy":
 					return fmt.Sprintf("job %q of %s carries a strategy, so it would run the release once per matrix leg against the same tag",
 						job, callerFile), false
+				case "if":
+					return fmt.Sprintf("job %q of %s carries an if: condition, so it cannot be shown to run for the pushed tag, and a caller whose call is skipped owns nothing",
+						job, callerFile), false
 				}
-				return fmt.Sprintf("job %q of %s carries an if: condition, so it cannot be shown to run for the pushed tag, and a caller whose call is skipped owns nothing",
-					job, callerFile), false
+				return fmt.Sprintf("job %q of %s carries %s:, which GitHub does not accept on a job that calls a reusable workflow, so the file is rejected and no release job starts",
+					job, callerFile, key), false
 			}
 			return fmt.Sprintf("%s does not call %s in every job, so it is not the recognised owner of the pushed tag",
 				callerFile, hextapReusableWorkflow), false
@@ -1389,9 +1463,24 @@ func jobCount(document *node) int {
 	return len(jobs.keys)
 }
 
-// guardedJob names the first job carrying an if: condition or a strategy,
-// and which of the two, if any.
-func guardedJob(document *node) (job, key string, found bool) {
+// callerJobKeys are the keys GitHub accepts on a job that calls a reusable
+// workflow, less the two a caller may not carry: if, under which the call can
+// be skipped, and strategy, under which it runs once per matrix leg. Any key
+// outside the accepted set, such as runs-on, steps, env or timeout-minutes,
+// makes GitHub reject the whole file, so no release job starts.
+var callerJobKeys = map[string]struct{}{
+	"concurrency": {},
+	"name":        {},
+	"needs":       {},
+	"permissions": {},
+	"secrets":     {},
+	"uses":        {},
+	"with":        {},
+}
+
+// unsupportedCallerJobKey names the first job carrying a key a caller may not,
+// and the key.
+func unsupportedCallerJobKey(document *node) (job, key string, found bool) {
 	if document == nil {
 		return "", "", false
 	}
@@ -1404,10 +1493,25 @@ func guardedJob(document *node) (job, key string, found bool) {
 		if current == nil || current.kind != nodeMapping {
 			continue
 		}
-		for _, guard := range []string{"if", "strategy"} {
-			if current.has(guard) {
-				return name, guard, true
-			}
+		if _, key, found := unsupportedCallerKey(current); found {
+			return name, key, true
+		}
+	}
+	return "", "", false
+}
+
+// unsupportedCallerKey returns the first key of a job outside callerJobKeys.
+// if and strategy are reported first so the diagnostic names the sharper
+// reason.
+func unsupportedCallerKey(job *node) (string, string, bool) {
+	for _, guard := range []string{"if", "strategy"} {
+		if job.has(guard) {
+			return "", guard, true
+		}
+	}
+	for _, key := range job.keys {
+		if _, ok := callerJobKeys[key]; !ok {
+			return "", key, true
 		}
 	}
 	return "", "", false
@@ -1450,9 +1554,9 @@ func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 			continue
 		}
 		if job.has("uses") {
-			findings = append(findings, report.auditActionReference(file, job.child("uses"), true)...)
+			findings = append(findings, report.auditActionReference(file, job.child("uses"), true, policy)...)
 			findings = append(findings, auditRuntimeVersions(file, job.child("with"), policy)...)
-			findings = append(findings, auditSourceRef(file, job.child("uses"), job.child("with"), events, true, policy)...)
+			findings = append(findings, auditSourceRef(file, job.child("uses"), job.child("with"), events, true, workflow.hostedInert, policy)...)
 			findings = append(findings, auditRemoteContexts(file, job.child("uses"), job.child("with"), policy)...)
 		}
 		if job.has("container") {
@@ -1481,11 +1585,11 @@ func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 				continue
 			}
 			if step.has("uses") {
-				findings = append(findings, report.auditActionReference(file, step.child("uses"), false)...)
+				findings = append(findings, report.auditActionReference(file, step.child("uses"), false, policy)...)
 				findings = append(findings, auditRuntimeVersions(file, step.child("with"), policy)...)
 				findings = append(findings, auditRuntimeSetup(file, step.child("uses"), step.child("with"), policy)...)
 				findings = append(findings, auditRemoteContexts(file, step.child("uses"), step.child("with"), policy)...)
-				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"), events, false, policy)...)
+				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"), events, false, workflow.hostedInert, policy)...)
 				findings = append(findings, auditArtifactSelectors(file, step.child("uses"), step.child("with"), events, policy)...)
 			}
 			if step.has("run") {
@@ -2078,8 +2182,15 @@ var tagCommitEvents = map[string]struct{}{
 // Ref: is ref:. Two spellings of one input in the same block are refused: the
 // analysis cannot say which the runner would use, and reading the pinned one
 // would certify the other.
-func auditSourceRef(file string, uses, with *node, events []string, reusable bool, policy Policy) []Finding {
-	if with == nil || with.kind != nodeMapping {
+//
+// hostedInert marks a file that is audited only because its runner may be
+// self-hosted. Such a file cannot publish by its own text, so the source it
+// checks out by default is not a release path, and a missing ref: is not
+// refused there: a pull_request job's event commit is the only correct
+// choice, and the remedy of pinning it cannot be followed. A selection the
+// file spells out is still checked, since its remedy can be.
+func auditSourceRef(file string, uses, with *node, events []string, reusable, hostedInert bool, policy Policy) []Finding {
+	if with != nil && with.kind != nodeMapping {
 		// An unreadable with: block is reported by auditRuntimeVersions.
 		return nil
 	}
@@ -2091,6 +2202,11 @@ func auditSourceRef(file string, uses, with *node, events []string, reusable boo
 			Remedy: "set ref: to a full 40-character commit SHA, or to an expression naming the tagged commit under this workflow's events",
 		}}
 	}
+	// A step with no with: block at all selects source exactly as one with
+	// an empty block does.
+	if with == nil {
+		with = &node{kind: nodeMapping}
+	}
 	ref, refSpellings := inputByName(with, "ref")
 	_, repositorySpellings := inputByName(with, "repository")
 	if refSpellings > 1 || repositorySpellings > 1 {
@@ -2099,6 +2215,16 @@ func auditSourceRef(file string, uses, with *node, events []string, reusable boo
 	if ref == nil {
 		if repositorySpellings == 1 && (reusable || fetchesSource(uses)) {
 			return mutable("a repository: is selected without a ref:, so the source fetched is whatever that repository's default branch holds when the job runs")
+		}
+		// With no ref: the checkout takes the triggering event's commit,
+		// exactly as ref: ${{ github.sha }} would, so it is bound to the
+		// same events; omitting the input earns nothing the expression
+		// would not.
+		if fetchesSource(uses) && !hostedInert && !allTagCommitEvents(events) {
+			if policy.TrustJobOutputs && len(events) == 1 && events[0] == "workflow_call" {
+				return nil
+			}
+			return mutable(fmt.Sprintf("no ref: is set, so the checkout takes the triggering event's commit, which under %s is not the tagged one", describeEvents(events)))
 		}
 		return nil
 	}
@@ -2381,7 +2507,7 @@ func unreadableForAudit(file, detail string) Finding {
 // reference sits on a job, where it names a reusable workflow, rather than on
 // a step, where it names an action; only the former can point at a workflow
 // file this pass has read.
-func (report *Report) auditActionReference(file string, uses *node, reusable bool) []Finding {
+func (report *Report) auditActionReference(file string, uses *node, reusable bool, policy Policy) []Finding {
 	unpinned := func(detail, remedy string) []Finding {
 		return []Finding{{File: file, Rule: RuleUnpinnedAction, Detail: detail, Remedy: remedy}}
 	}
@@ -2394,7 +2520,7 @@ func (report *Report) auditActionReference(file string, uses *node, reusable boo
 	reference := strings.TrimSpace(uses.value)
 	switch {
 	case strings.HasPrefix(reference, "./"):
-		if reusable && report.auditedReusableWorkflow(reference) {
+		if reusable && report.auditedReusableWorkflow(reference, policy) {
 			return nil
 		}
 		return []Finding{{
@@ -2438,13 +2564,13 @@ func (report *Report) auditActionReference(file string, uses *node, reusable boo
 // anything; sharing the directory prefix earns it nothing. The callee must
 // also be release capable, because PinFindings audits only those files: a
 // callee this pass has read but skipped has not been audited by anyone.
-func (report *Report) auditedReusableWorkflow(reference string) bool {
+func (report *Report) auditedReusableWorkflow(reference string, policy Policy) bool {
 	name, local := reusableWorkflowName(reference)
 	if !local {
 		return false
 	}
 	workflow := report.workflow(name)
-	return workflow != nil && workflow.Active && workflow.document != nil && workflow.ReleaseCapable
+	return workflow != nil && workflow.Active && workflow.document != nil && workflow.releaseCapable(policy)
 }
 
 // reusableWorkflowName returns the base name a relative uses: reference points

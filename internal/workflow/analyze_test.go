@@ -692,7 +692,13 @@ jobs:
 				byFile[finding.File] = append(byFile[finding.File], finding)
 			}
 			callee := byFile["reusable.yml"]
-			if len(callee) != 1 || callee[0].Rule != RuleUnpinnedAction {
+			calleeRules := make(map[string]int)
+			for _, finding := range callee {
+				calleeRules[finding.Rule]++
+			}
+			// The callee's checkout carries no ref: either, which is its own
+			// finding under workflow_call.
+			if calleeRules[RuleUnpinnedAction] != 1 || calleeRules[RuleMutableSourceRef] != 1 || len(callee) != 2 {
 				t.Fatalf("callee findings = %v, want its unpinned action audited in every case", callee)
 			}
 			refused := byFile["release.yml"]
@@ -1301,9 +1307,12 @@ jobs:
 	if !findWorkflow(t, report, "manual.yml").ReleaseCapable {
 		t.Fatal("a workflow with no permissions block must not be certified as unable to reach a release")
 	}
-	findings := report.PinFindings(Policy{})
-	if len(findings) != 1 || findings[0].Rule != RuleUnpinnedAction {
-		t.Fatalf("findings = %v, want the unpinned action to be audited", findings)
+	audited := false
+	for _, finding := range report.PinFindings(Policy{}) {
+		audited = audited || finding.Rule == RuleUnpinnedAction
+	}
+	if !audited {
+		t.Fatal("the unpinned action was not audited")
 	}
 }
 
@@ -1380,11 +1389,17 @@ jobs:
 	})
 
 	lint := findWorkflow(t, report, "lint.yml")
-	if lint.ReleaseCapable {
-		t.Fatal("a read-only pull_request workflow must not be treated as release capable")
+	hosted := Policy{HostedRunnersOnly: true}
+	if lint.releaseCapable(hosted) {
+		t.Fatal("a read-only pull_request workflow on hosted runners must not be treated as release capable")
 	}
-	if findings := report.PinFindings(Policy{}); len(findings) != 0 {
+	if findings := report.PinFindings(hosted); len(findings) != 0 {
 		t.Fatalf("pin audit reached a workflow that cannot release: %v", findings)
+	}
+	// Without the runner fact the job's runner may be a self-hosted host
+	// holding a credential, so the same file is audited.
+	if !lint.ReleaseCapable || len(report.PinFindings(Policy{})) == 0 {
+		t.Fatal("a read-only workflow with a runner of its own must be audited until the runners are known to be hosted")
 	}
 }
 
@@ -1402,7 +1417,9 @@ func TestToolkitOwnWorkflowsSatisfyTheirOwnPolicy(t *testing.T) {
 			t.Errorf("%s was not readable: %s", workflow.File, workflow.TriggerReason)
 		}
 	}
-	if findings := preflightFindings(t, report, Policy{SelfRelease: true, TrustJobOutputs: true}); len(findings) != 0 {
+	// The repository has no self-hosted runner registered, which the runner
+	// list of the GitHub API shows and this directory cannot.
+	if findings := preflightFindings(t, report, Policy{SelfRelease: true, TrustJobOutputs: true, HostedRunnersOnly: true}); len(findings) != 0 {
 		t.Fatalf("the toolkit's own workflows fail the policy: %v", findings)
 	}
 
@@ -1464,6 +1481,23 @@ func TestAnalyzeWrapsDirectoryAndFileFailures(t *testing.T) {
 func TestCredentialChannelsMakeAReadOnlyWorkflowReleaseCapable(t *testing.T) {
 	const pinnedReusable = "SijanC147/example/.github/workflows/publish.yml@0123456789abcdef0123456789abcdef01234567"
 	capable := map[string]string{
+		"an external reusable workflow call beside hosted jobs": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  big:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+  old:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+  call:
+    uses: SijanC147/example/.github/workflows/lint.yml@0123456789abcdef0123456789abcdef01234567
+`,
 		"personal access token in a workflow env": `name: Manual
 on:
   workflow_dispatch:
@@ -1678,17 +1712,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 `,
-		"a runner group": `name: Manual
-on:
-  workflow_dispatch:
-permissions: read-all
-jobs:
-  run:
-    runs-on:
-      group: release-runners
-    steps:
-      - uses: actions/checkout@v5
-`,
 		"a runner chosen by an expression": `name: Manual
 on:
   workflow_dispatch:
@@ -1696,39 +1719,6 @@ permissions: read-all
 jobs:
   run:
     runs-on: ${{ vars.RUNNER }}
-    steps:
-      - uses: actions/checkout@v5
-`,
-		"a self-hosted runner named after its os": `name: Manual
-on:
-  workflow_dispatch:
-permissions:
-  contents: read
-jobs:
-  run:
-    runs-on: ubuntu-custom
-    steps:
-      - uses: actions/checkout@v5
-`,
-		"a self-hosted runner with a numeric-looking label": `name: Manual
-on:
-  workflow_dispatch:
-permissions:
-  contents: read
-jobs:
-  run:
-    runs-on: ubuntu-123-onprem
-    steps:
-      - uses: actions/checkout@v5
-`,
-		"an organisation-named larger runner": `name: Manual
-on:
-  workflow_dispatch:
-permissions:
-  contents: read
-jobs:
-  run:
-    runs-on: ubuntu-latest-8-cores
     steps:
       - uses: actions/checkout@v5
 `,
@@ -1948,9 +1938,14 @@ jobs:
 			if !findWorkflow(t, report, "manual.yml").ReleaseCapable {
 				t.Fatal("a workflow holding a credential beyond GITHUB_TOKEN must be release capable")
 			}
-			findings := report.PinFindings(Policy{})
-			if len(findings) != 1 || findings[0].Rule != RuleUnpinnedAction {
-				t.Fatalf("findings = %v, want the unpinned action to be audited", findings)
+			for _, policy := range []Policy{{}, {HostedRunnersOnly: true}} {
+				audited := false
+				for _, finding := range report.PinFindings(policy) {
+					audited = audited || finding.Rule == RuleUnpinnedAction
+				}
+				if !audited {
+					t.Fatalf("policy %+v: the unpinned action was not audited", policy)
+				}
 			}
 		})
 	}
@@ -2031,23 +2026,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 `,
-		"a larger hosted runner and a versioned image": `name: Manual
-on:
-  workflow_dispatch:
-permissions:
-  contents: read
-jobs:
-  big:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v5
-  old:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v5
-  call:
-    uses: SijanC147/example/.github/workflows/lint.yml@0123456789abcdef0123456789abcdef01234567
-`,
 		"cache keys are not credentials": `name: Manual
 on:
   workflow_dispatch:
@@ -2096,11 +2074,301 @@ jobs:
 				DefaultCallerFile: hextapCallerWorkflow,
 				"manual.yml":      content,
 			})
-			if findWorkflow(t, report, "manual.yml").ReleaseCapable {
-				t.Fatal("a workflow bounded to a read-only GITHUB_TOKEN with no other credential must not be release capable")
+			hosted := Policy{HostedRunnersOnly: true}
+			if findWorkflow(t, report, "manual.yml").releaseCapable(hosted) {
+				t.Fatal("a workflow bounded to a read-only GITHUB_TOKEN with no other credential must not be release capable on hosted runners")
 			}
-			if findings := report.PinFindings(Policy{}); len(findings) != 0 {
+			if findings := report.PinFindings(hosted); len(findings) != 0 {
 				t.Fatalf("pin audit reached a workflow that cannot release: %v", findings)
+			}
+			// With no runner fact stated, a job with a runner of its own
+			// keeps the file in the audit, and its unpinned action is found.
+			if len(report.PinFindings(Policy{})) == 0 {
+				t.Fatal("a read-only workflow with a runner of its own was exempted before the runners were known to be hosted")
+			}
+		})
+	}
+}
+
+// TestRunnerLabelsAreNotEvidenceOfHosting guards the review finding that an
+// exact hosted-image label was taken as proof of a hosted runner. Labels are
+// free-form and a self-hosted runner can wear ubuntu-latest, so only the
+// caller's statement that the repository has no self-hosted runner exempts a
+// read-only workflow, and a job that names the self-hosted label is audited
+// whatever the policy says.
+func TestRunnerLabelsAreNotEvidenceOfHosting(t *testing.T) {
+	workflow := func(runsOn string) string {
+		return `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ` + runsOn + `
+    steps:
+      - uses: actions/upload-artifact@v4
+`
+	}
+	unpinned := func(findings []Finding) bool {
+		for _, finding := range findings {
+			if finding.Rule == RuleUnpinnedAction {
+				return true
+			}
+		}
+		return false
+	}
+	hosted := Policy{HostedRunnersOnly: true}
+	for name, runsOn := range map[string]string{
+		"a hosted label":            "ubuntu-latest",
+		"a list of hosted labels":   "[ubuntu-24.04, ubuntu-22.04]",
+		"a runner group":            "\n      group: release-runners",
+		"an organisation label":     "org-large-8-cores",
+		"a label named after an os": "ubuntu-custom",
+		"a numeric-looking label":   "ubuntu-123-onprem",
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"manual.yml":      workflow(strings.ReplaceAll(runsOn, "\\n", "\n")),
+			})
+			if !unpinned(report.PinFindings(Policy{})) {
+				t.Fatalf("policy %+v: a read-only workflow on %s was exempted before the runners were known to be hosted", Policy{}, runsOn)
+			}
+			if findings := report.PinFindings(hosted); len(findings) != 0 {
+				t.Fatalf("policy %+v: findings = %v, want none once every runner is hosted", hosted, findings)
+			}
+		})
+	}
+	// A runner chosen by an expression reads a channel a credential can
+	// arrive through, which keeps the file audited on its own account.
+	for name, runsOn := range map[string]string{
+		"the self-hosted label":            "self-hosted",
+		"the self-hosted label in a list":  "[self-hosted, ubuntu-latest]",
+		"the self-hosted label uppercased": "Self-Hosted",
+		"an expression":                    "${{ vars.RUNNER }}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"manual.yml":      workflow(runsOn),
+			})
+			for _, policy := range []Policy{{}, hosted} {
+				if !unpinned(report.PinFindings(policy)) {
+					t.Fatalf("policy %+v: a job naming %s was exempted", policy, runsOn)
+				}
+			}
+		})
+	}
+}
+
+// TestExternalReusableCallsKeepAWorkflowReleaseCapable guards the review
+// finding that a job calling a reusable workflow was exempted from the runner
+// check on the ground that the callee is judged on its own: an external
+// callee is not in the report to be judged, and its jobs run on whatever
+// runner it selects, so the call keeps the file release capable and its
+// mutable reference is audited. A local callee is read and audited by the
+// same pass, so the exemption stands for it.
+func TestExternalReusableCallsKeepAWorkflowReleaseCapable(t *testing.T) {
+	hosted := Policy{HostedRunnersOnly: true}
+	external := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"manual.yml": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    uses: evil/repo/.github/workflows/run.yml@main
+`,
+	})
+	if !findWorkflow(t, external, "manual.yml").releaseCapable(hosted) {
+		t.Fatal("a call to an external reusable workflow must keep the caller release capable")
+	}
+	findings := external.PinFindings(hosted)
+	if len(findings) != 1 || findings[0].Rule != RuleUnpinnedAction {
+		t.Fatalf("findings = %v, want the external reusable workflow's mutable reference refused", findings)
+	}
+
+	local := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"manual.yml": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    uses: ./.github/workflows/helper.yml
+`,
+		"helper.yml": `name: Helper
+on:
+  workflow_call:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+`,
+	})
+	if findWorkflow(t, local, "manual.yml").releaseCapable(hosted) {
+		t.Fatal("a call to a local reusable workflow is judged through the callee, which this pass audits itself")
+	}
+	if !findWorkflow(t, local, "helper.yml").releaseCapable(hosted) {
+		t.Fatal("a workflow_call callee is always audited")
+	}
+	findings = local.PinFindings(hosted)
+	if len(findings) != 1 || findings[0].File != "helper.yml" || findings[0].Rule != RuleUnpinnedAction {
+		t.Fatalf("findings = %v, want the local callee's unpinned action and nothing against the caller", findings)
+	}
+}
+
+// TestCallerJobCarriesOnlyReusableCallKeys guards the review finding that a
+// caller job combining the pinned uses: with runs-on: or steps: verified,
+// though GitHub rejects such a file and no release job starts.
+func TestCallerJobCarriesOnlyReusableCallKeys(t *testing.T) {
+	withJobKey := func(extra string) string {
+		return strings.Replace(hextapCallerWorkflow, "    with:\n", extra+"    with:\n", 1)
+	}
+	for name, extra := range map[string]string{
+		"runs-on":         "    runs-on: ubuntu-latest\n",
+		"steps":           "    steps:\n      - run: echo hello\n",
+		"env":             "    env:\n      MODE: full\n",
+		"timeout-minutes": "    timeout-minutes: 30\n",
+		"container":       "    container: alpine\n",
+	} {
+		t.Run("rejected "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: withJobKey(extra)})
+			findings := preflightFindings(t, report, Policy{})
+			missing := 0
+			for _, finding := range findings {
+				if finding.Rule == RuleMissingHextapCaller {
+					missing++
+					if !strings.Contains(finding.Detail, strings.SplitN(strings.TrimSpace(extra), ":", 2)[0]+":") {
+						t.Fatalf("finding = %v, want it to name the rejected key", finding)
+					}
+				}
+			}
+			if missing != 1 {
+				t.Fatalf("findings = %v, want exactly one missing-hextap-caller finding", findings)
+			}
+		})
+	}
+	for name, extra := range map[string]string{
+		"a name":        "    name: Publish\n",
+		"a concurrency": "    concurrency: release\n",
+		"permissions":   "    permissions:\n      contents: write\n",
+	} {
+		t.Run("accepted "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: withJobKey(extra)})
+			if findings := preflightFindings(t, report, Policy{}); len(findings) != 0 {
+				t.Fatalf("findings = %v, want a caller carrying %s verified", findings, name)
+			}
+		})
+	}
+}
+
+// TestReadOnlyWorkflowsKeepTheirEventCheckout guards the false refusal the
+// adversarial pass found once ref-less checkouts were bound to the event: a
+// read-only CI workflow is audited under the bare policy only because its
+// runner may be self-hosted, and a pull_request job's event commit is the
+// only correct checkout there, so a missing ref: is not refused in such a
+// file while its actions still are. A selection it spells out is still
+// checked.
+func TestReadOnlyWorkflowsKeepTheirEventCheckout(t *testing.T) {
+	workflow := func(with string) string {
+		return `name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+` + with + `      - uses: actions/upload-artifact@v4
+`
+	}
+	rules := func(findings []Finding) map[string]int {
+		counted := make(map[string]int)
+		for _, finding := range findings {
+			counted[finding.Rule]++
+		}
+		return counted
+	}
+	eventCheckout := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"ci.yml":          workflow(""),
+	})
+	if got := rules(eventCheckout.PinFindings(Policy{})); got[RuleUnpinnedAction] != 1 || got[RuleMutableSourceRef] != 0 {
+		t.Fatalf("rules = %v, want the unpinned action audited and the event checkout left alone", got)
+	}
+	if findings := eventCheckout.PinFindings(Policy{HostedRunnersOnly: true}); len(findings) != 0 {
+		t.Fatalf("findings = %v, want none once the runners are known to be hosted", findings)
+	}
+	spelledOut := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"ci.yml":          workflow("        with:\n          ref: main\n"),
+	})
+	if got := rules(spelledOut.PinFindings(Policy{})); got[RuleMutableSourceRef] != 1 {
+		t.Fatalf("rules = %v, want a branch the file selects itself refused", got)
+	}
+}
+
+// TestOmittedCheckoutRefIsBoundToTheEvent guards the review finding that a
+// checkout with no ref: passed unexamined while ref: ${{ github.sha }} was
+// bound to the event: the two select the same commit, so omitting the input
+// must earn nothing the expression would not.
+func TestOmittedCheckoutRefIsBoundToTheEvent(t *testing.T) {
+	workflow := func(on, uses string) string {
+		return `name: Publish
+on:
+` + on + `permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ` + uses + `
+`
+	}
+	const checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+	const setup = "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
+	cases := []struct {
+		name   string
+		on     string
+		uses   string
+		policy Policy
+		want   int
+	}{
+		{"a chained publisher", "  workflow_run:\n    workflows: [Hextap release]\n    types: [completed]\n", checkout, Policy{}, 1},
+		{"a dispatchable tag workflow", "  push:\n    tags:\n      - \"v*\"\n  workflow_dispatch:\n", checkout, Policy{}, 1},
+		{"a tag push", "  push:\n    tags:\n      - \"v*\"\n", checkout, Policy{}, 0},
+		{"a release event", "  release:\n    types: [published]\n", checkout, Policy{}, 0},
+		{"a callee", "  workflow_call:\n", checkout, Policy{}, 1},
+		{"a callee under the toolkit policy", "  workflow_call:\n", checkout, Policy{TrustJobOutputs: true}, 0},
+		{"a callee that also dispatches under the toolkit policy", "  workflow_call:\n  workflow_dispatch:\n", checkout, Policy{TrustJobOutputs: true}, 1},
+		{"an action that fetches no source", "  workflow_dispatch:\n", setup, Policy{}, 0},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"publish.yml":     workflow(strings.ReplaceAll(test.on, "\\n", "\n"), test.uses),
+			})
+			mutable := 0
+			for _, finding := range report.PinFindings(test.policy) {
+				if finding.Rule == RuleMutableSourceRef {
+					mutable++
+				}
+			}
+			if mutable != test.want {
+				t.Fatalf("mutable-source-ref findings = %d, want %d: %v", mutable, test.want, report.PinFindings(test.policy))
 			}
 		})
 	}
@@ -2136,6 +2404,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: 0123456789abcdef0123456789abcdef01234567
           uses: ${{ inputs.uses }}
           version-uses: mutable
       - run: echo done
@@ -2542,8 +2811,8 @@ jobs:
 	if err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
-	if len(once) != 2 {
-		t.Fatalf("findings = %v, want one competing finding and one unpinned action, not duplicates", once)
+	if len(once) != 3 {
+		t.Fatalf("findings = %v, want one competing finding, one unpinned action and one unbound checkout, not duplicates", once)
 	}
 
 	// The single-tree method refuses a policy naming another tree rather than
@@ -2574,6 +2843,37 @@ jobs:
 	}
 	if len(onlyTagged) != 0 {
 		t.Fatalf("a workflow_run copy present only in the tagged tree was reported: %v", onlyTagged)
+	}
+
+	// A chained copy that is also dispatchable can be run against the tag
+	// from the tagged tree, so the tagged copy stays in the audit even when
+	// the default branch is read separately and lacks it; one that is only
+	// scheduled besides its chain runs from the default branch alone.
+	dispatchable := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"chained.yml":     strings.Replace(chained, "on:\n  workflow_run:", "on:\n  workflow_dispatch:\n  workflow_run:", 1),
+	})
+	dispatched, err := Preflight(dispatchable, Policy{DefaultBranchDirectory: cleanBranch})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	dispatchedRules := make(map[string]int)
+	for _, finding := range dispatched {
+		dispatchedRules[finding.Rule]++
+	}
+	if dispatchedRules[RuleUnpinnedAction] != 1 {
+		t.Fatalf("findings = %v, want the dispatchable tagged copy pin-audited", dispatched)
+	}
+	scheduled := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"chained.yml":     strings.Replace(chained, "on:\n  workflow_run:", "on:\n  schedule:\n    - cron: \"0 3 * * *\"\n  workflow_run:", 1),
+	})
+	quietSchedule, err := Preflight(scheduled, Policy{DefaultBranchDirectory: cleanBranch})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	if len(quietSchedule) != 0 {
+		t.Fatalf("a scheduled chained copy present only in the tagged tree was reported: %v", quietSchedule)
 	}
 
 	// A workflow_call callee runs from the tagged commit whatever chain
