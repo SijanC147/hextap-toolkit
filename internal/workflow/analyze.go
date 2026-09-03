@@ -409,10 +409,34 @@ func callerForms(document *node) (external, relative bool) {
 // the tag-trigger exemption to attacker-controlled workflow code.
 func isExternalHextapReference(reference string) bool {
 	at := strings.LastIndex(reference, "@")
-	if at < 0 {
+	if at < 0 || !isHexadecimal(reference[at+1:], 40) {
 		return false
 	}
-	return reference[:at] == hextapReusableWorkflow && isHexadecimal(reference[at+1:], 40)
+	// GitHub resolves an owner and a repository name case-insensitively; a
+	// path inside the repository is a Git path and is exact.
+	path := reference[:at]
+	split := strings.Index(path, "/.github/")
+	if split < 0 {
+		return false
+	}
+	expectedSplit := strings.Index(hextapReusableWorkflow, "/.github/")
+	// GitHub owner and repository names are ASCII, and EqualFold is Unicode
+	// simple folding, under which a long s or a Kelvin sign would fold onto
+	// an ASCII letter; such a name resolves to no repository at all.
+	if !isASCII(path[:split]) {
+		return false
+	}
+	return strings.EqualFold(path[:split], hextapReusableWorkflow[:expectedSplit]) &&
+		path[split:] == hextapReusableWorkflow[expectedSplit:]
+}
+
+func isASCII(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // provablyUnableToRelease reports whether the document demonstrably cannot
@@ -572,6 +596,35 @@ func expressions(text string) []string {
 // event field is structured data GitHub itself produced.
 var payloadChannels = []string{"event.inputs", "event.client_payload", "event.deployment.payload"}
 
+// structuredEventLeaves are the final path segments under github.event that
+// carry an identifier, a number, a commit or an enumerated state GitHub itself
+// produced. Every other field of the event, such as an issue body, a comment,
+// a title or a name, is text the triggering party wrote and can hold a token
+// as readily as a dispatch input, so a read of it is a credential channel.
+// github.head_ref is the same kind of text, chosen by whoever opened the pull
+// request, and counts too.
+var structuredEventLeaves = map[string]struct{}{
+	"action":      {},
+	"after":       {},
+	"before":      {},
+	"conclusion":  {},
+	"created":     {},
+	"deleted":     {},
+	"draft":       {},
+	"forced":      {},
+	"head_sha":    {},
+	"id":          {},
+	"merged":      {},
+	"node_id":     {},
+	"number":      {},
+	"run_attempt": {},
+	"run_id":      {},
+	"run_number":  {},
+	"sha":         {},
+	"status":      {},
+	"workflow_id": {},
+}
+
 // expressionReadsCredentialChannel reports whether an expression body reads the
 // secrets context for anything but GITHUB_TOKEN, the inputs, vars or env
 // contexts, or a payload channel under the github context. Each context is matched as a whole
@@ -611,10 +664,16 @@ func expressionReadsCredentialChannel(expression string) bool {
 					return true
 				}
 			}
-			if path == "event" || path == "" {
+			if path == "event" || path == "" || path == "head_ref" {
 				// The whole event, or the whole context, reaches every
 				// payload channel at once.
 				return true
+			}
+			if strings.HasPrefix(path, "event.") {
+				leaf := path[strings.LastIndex(path, ".")+1:]
+				if _, structured := structuredEventLeaves[leaf]; !structured {
+					return true
+				}
 			}
 		}
 		start = end
@@ -1015,6 +1074,7 @@ func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 			findings = append(findings, report.auditActionReference(file, job.child("uses"), true)...)
 			findings = append(findings, auditRuntimeVersions(file, job.child("with"), policy)...)
 			findings = append(findings, auditSourceRef(file, job.child("uses"), job.child("with"), events, true, policy)...)
+			findings = append(findings, auditRemoteContexts(file, job.child("with"))...)
 		}
 		if job.has("container") {
 			findings = append(findings, auditContainerImage(file, job.child("container"))...)
@@ -1044,7 +1104,8 @@ func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 			if step.has("uses") {
 				findings = append(findings, report.auditActionReference(file, step.child("uses"), false)...)
 				findings = append(findings, auditRuntimeVersions(file, step.child("with"), policy)...)
-				findings = append(findings, auditRuntimeSetup(file, step.child("uses"), step.child("with"))...)
+				findings = append(findings, auditRuntimeSetup(file, step.child("uses"), step.child("with"), policy)...)
+				findings = append(findings, auditRemoteContexts(file, step.child("with"))...)
 				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"), events, false, policy)...)
 			}
 		}
@@ -1071,6 +1132,114 @@ func fetchesSource(uses *node) bool {
 	}
 	name := strings.ToLower(reference[strings.LastIndex(reference, "/")+1:])
 	return strings.Contains(name, "checkout") || strings.Contains(name, "clone")
+}
+
+// auditRemoteContexts requires every with: input that names a remote Git
+// repository, under whatever input name and in whatever position within the
+// value, to name it at an immutable commit. BuildKit's build context accepts
+// https://host/repo.git#ref and resolves the ref when the job runs; with no
+// fragment it takes the default branch; and its named contexts and build
+// arguments carry the same references as newline-separated name=value pairs,
+// usually in a block scalar. Either way the same release tag can build
+// different contents while the action itself stays pinned. Each line of a
+// value is examined on its own, with a leading name= stripped; a line counts
+// as a remote Git reference when it starts with a URL scheme or an SCP-like
+// host address and carries a .git path or a #fragment; the fragment must be a
+// full 40-character commit SHA, optionally followed by a :subdirectory. Prose
+// that merely contains a URL is untouched, because the reference has to start
+// the line; the cost is that a non-Git URL with a #route at the start of a
+// value is refused too.
+func auditRemoteContexts(file string, with *node) []Finding {
+	if with == nil || with.kind != nodeMapping {
+		return nil
+	}
+	var findings []Finding
+	for _, key := range with.keys {
+		value := with.values[key]
+		if value == nil || value.kind != nodeScalar {
+			continue
+		}
+		for _, line := range strings.Split(value.value, "\n") {
+			text := strings.TrimSpace(line)
+			if name := strings.Index(text, "="); name > 0 && isIdentifier(text[:name]) {
+				text = strings.TrimSpace(text[name+1:])
+			}
+			if !isRemoteGitReference(text) {
+				continue
+			}
+			fragment := ""
+			if hash := strings.Index(text, "#"); hash >= 0 {
+				fragment = text[hash+1:]
+				if colon := strings.Index(fragment, ":"); colon >= 0 {
+					fragment = fragment[:colon]
+				}
+			}
+			if isHexadecimal(fragment, 40) {
+				continue
+			}
+			findings = append(findings, Finding{
+				File:   file,
+				Rule:   RuleMutableSourceRef,
+				Detail: fmt.Sprintf("the input %q names the remote Git source %q without an immutable commit, so the source it fetches is resolved when the job runs", key, text),
+				Remedy: "append #<full 40-character commit SHA> to the remote Git reference",
+			})
+		}
+	}
+	return findings
+}
+
+// isRemoteGitReference reports whether a value names a Git repository: a URL
+// under any scheme (https, ssh, git, ftps, and the git+ forms of each), or an
+// SCP-like address of the form user@host:path or host:path with a dotted
+// host, together with a .git path or a #fragment. A URL with neither, such as
+// a package registry, is not a Git source.
+func isRemoteGitReference(text string) bool {
+	lowered := strings.ToLower(text)
+	if !strings.Contains(lowered, ".git") && !strings.Contains(lowered, "#") {
+		return false
+	}
+	if scheme := strings.Index(lowered, "://"); scheme > 0 && isSchemeName(lowered[:scheme]) {
+		return true
+	}
+	address := lowered
+	if at := strings.Index(address, "@"); at > 0 && isIdentifier(address[:at]) {
+		address = address[at+1:]
+	}
+	colon := strings.Index(address, ":")
+	if colon <= 0 {
+		return false
+	}
+	host := address[:colon]
+	return strings.Contains(host, ".") && isHostName(host)
+}
+
+func isSchemeName(text string) bool {
+	if text == "" || text[0] < 'a' || text[0] > 'z' {
+		return false
+	}
+	for index := 0; index < len(text); index++ {
+		switch character := text[index]; {
+		case character >= 'a' && character <= 'z':
+		case character >= '0' && character <= '9':
+		case character == '+' || character == '-' || character == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isHostName(text string) bool {
+	for index := 0; index < len(text); index++ {
+		switch character := text[index]; {
+		case character >= 'a' && character <= 'z':
+		case character >= '0' && character <= '9':
+		case character == '-' || character == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // tagCommitEvents are the events under which github.sha and, outside a
@@ -1243,14 +1412,58 @@ func isExpression(text, body string) bool {
 	return strings.EqualFold(strings.TrimSpace(text[len("${{"):len(text)-len("}}")]), body)
 }
 
-// auditRuntimeSetup requires a step that installs a runtime to say which one.
-// A setup action invoked with no version input falls back to whatever the
-// action defaults to or whatever the runner image already carries, and both
-// change as the image is updated, so the same tag builds against a different
-// toolchain later. An action is taken to install a runtime when its name says
-// setup, install or toolchain; that is a heuristic which over-reports, and a
-// refused step is fixed by stating the version.
-func auditRuntimeSetup(file string, uses, with *node) []Finding {
+// setupSelectors lists, for the setup actions the audit knows, the input
+// names through which each one takes its version. A selector the action does
+// not read is a warning at run time and a fallback to the mutable default, so
+// for a known action only its own selectors count; actions/setup-node with
+// go-version: 1.22.0 states nothing about Node. Names are normalised the way
+// isRuntimeSelector normalises them.
+var setupSelectors = map[string][]string{
+	"abatilo/actions-poetry":                 {"poetry-version"},
+	"actions-rs/toolchain":                   {"toolchain"},
+	"actions-rust-lang/setup-rust-toolchain": {"toolchain"},
+	"actions/setup-dotnet":                   {"dotnet-version", "global-json-file"},
+	"actions/setup-go":                       {"go-version", "go-version-file"},
+	"actions/setup-java":                     {"java-version", "java-version-file"},
+	"actions/setup-node":                     {"node-version", "node-version-file"},
+	"actions/setup-python":                   {"python-version", "python-version-file"},
+	"astral-sh/setup-uv":                     {"version", "version-file"},
+	"azure/setup-helm":                       {"version"},
+	"azure/setup-kubectl":                    {"version"},
+	"dart-lang/setup-dart":                   {"sdk"},
+	"denoland/setup-deno":                    {"deno-version", "deno-version-file"},
+	"docker/setup-buildx-action":             {"version"},
+	"dtolnay/rust-toolchain":                 {"toolchain"},
+	"erlef/setup-beam":                       {"otp-version", "elixir-version", "gleam-version", "version-file"},
+	"golangci/golangci-lint-action":          {"version"},
+	"goreleaser/goreleaser-action":           {"version"},
+	"haskell-actions/setup":                  {"ghc-version", "cabal-version", "stack-version"},
+	"hashicorp/setup-terraform":              {"terraform-version"},
+	"jdx/mise-action":                        {"version"},
+	"julia-actions/setup-julia":              {"version"},
+	"mlugg/setup-zig":                        {"version"},
+	"opentofu/setup-opentofu":                {"tofu-version"},
+	"oven-sh/setup-bun":                      {"bun-version", "bun-version-file"},
+	"pnpm/action-setup":                      {"version", "package-json-file"},
+	"ruby/setup-ruby":                        {"ruby-version"},
+	"shivammathur/setup-php":                 {"php-version", "php-version-file"},
+	"sigstore/cosign-installer":              {"cosign-release"},
+	"subosito/flutter-action":                {"flutter-version", "flutter-version-file"},
+	"swift-actions/setup-swift":              {"swift-version"},
+}
+
+// auditRuntimeSetup requires a step that installs a runtime to say which one,
+// through an input the action reads. A setup action invoked with no version
+// input falls back to whatever the action defaults to or whatever the runner
+// image already carries, and both change as the image is updated, so the same
+// tag builds against a different toolchain later. For an action on the
+// setupSelectors list only its own inputs count, and their values are checked
+// like any runtime selector. For an action the list does not know, one taken
+// to install a runtime because its name says setup, install or toolchain, any
+// runtime selector or version file counts: which inputs it reads is in its own
+// action.yml, outside this directory-only audit. A refused step is fixed by
+// stating the version through the right input.
+func auditRuntimeSetup(file string, uses, with *node, policy Policy) []Finding {
 	if !installsRuntime(uses) {
 		return nil
 	}
@@ -1258,19 +1471,56 @@ func auditRuntimeSetup(file string, uses, with *node) []Finding {
 		// An unreadable with: block is reported by auditRuntimeVersions.
 		return nil
 	}
+	reference := strings.TrimSpace(uses.value)
+	action := strings.ToLower(reference)
+	if at := strings.LastIndex(action, "@"); at >= 0 {
+		action = action[:at]
+	}
+	selectors, known := setupSelectors[action]
+	var findings []Finding
+	stated := false
 	if with != nil && with.kind == nodeMapping {
 		for _, key := range with.keys {
-			if isRuntimeSelector(key) || isRuntimeFileSelector(key) {
-				return nil
+			normalised := normaliseInputName(key)
+			switch {
+			case known && containsString(selectors, normalised):
+				stated = true
+				if !isRuntimeSelector(key) && !isRuntimeFileSelector(key) {
+					// A selector isRuntimeSelector does not recognise by
+					// shape, such as cosign-release, is checked here.
+					findings = append(findings, auditRuntimeValue(file, key, with.values[key], policy)...)
+				}
+			case !known && (isRuntimeSelector(key) || isRuntimeFileSelector(key)):
+				stated = true
 			}
 		}
 	}
-	return []Finding{{
+	if stated {
+		return findings
+	}
+	remedy := "give the setup action an exact version input"
+	if known {
+		remedy = fmt.Sprintf("state the version through %s", strings.Join(quoteAll(selectors), " or "))
+	}
+	return append(findings, Finding{
 		File:   file,
 		Rule:   RuleFloatingRuntimeVersion,
-		Detail: fmt.Sprintf("the step invokes the runtime setup action %q without stating a version, so it installs whatever the action or the runner image defaults to when the job runs", strings.TrimSpace(uses.value)),
-		Remedy: "give the setup action an exact version input",
-	}}
+		Detail: fmt.Sprintf("the step invokes the runtime setup action %q without stating a version through an input it reads, so it installs whatever the action or the runner image defaults to when the job runs", reference),
+		Remedy: remedy,
+	})
+}
+
+func normaliseInputName(key string) string {
+	return strings.ReplaceAll(strings.ToLower(key), "_", "-")
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // runtimeInstallers are actions that install a versioned toolchain without
@@ -1317,11 +1567,13 @@ func installsRuntime(uses *node) bool {
 
 // isRuntimeFileSelector reports whether a with: input names a file in the
 // tagged source that carries the version: node-version-file, go-version-file
-// and the like, or the .NET global-json-file. Such a file is fixed by the tag;
-// its content is outside this directory-only audit and is not read here.
+// and the like, the .NET global-json-file, or pnpm's package-json-file. Such
+// a file is fixed by the tag; its content is outside this directory-only
+// audit and is not read here.
 func isRuntimeFileSelector(key string) bool {
 	normalised := strings.ReplaceAll(strings.ToLower(key), "_", "-")
-	return normalised == "version-file" || normalised == "global-json-file" || strings.HasSuffix(normalised, "-version-file")
+	return normalised == "version-file" || normalised == "global-json-file" || normalised == "package-json-file" ||
+		strings.HasSuffix(normalised, "-version-file")
 }
 
 func unreadableForAudit(file, detail string) Finding {
@@ -1479,39 +1731,44 @@ func auditRuntimeVersions(file string, with *node, policy Policy) []Finding {
 		if !isRuntimeSelector(key) {
 			continue
 		}
-		value := with.values[key]
-		if value == nil || value.kind != nodeScalar || value.style == scalarBlock {
-			findings = append(findings, Finding{
-				File:   file,
-				Rule:   RuleFloatingRuntimeVersion,
-				Detail: fmt.Sprintf("the runtime input %q is not a readable literal", key),
-				Remedy: "give the runtime an exact version as a plain or quoted scalar",
-			})
-			continue
-		}
-		text := strings.TrimSpace(value.value)
-		if strings.Contains(text, "${{") {
-			if isStepOutputExpression(text) && policy.TrustJobOutputs {
-				continue
-			}
-			findings = append(findings, Finding{
-				File:   file,
-				Rule:   RuleFloatingRuntimeVersion,
-				Detail: fmt.Sprintf("the runtime input %q resolves through the expression %q, whose value is not fixed by the tagged workflow source", key, text),
-				Remedy: fmt.Sprintf("set %s to an exact version", key),
-			})
-			continue
-		}
-		if isFloatingVersion(text) {
-			findings = append(findings, Finding{
-				File:   file,
-				Rule:   RuleFloatingRuntimeVersion,
-				Detail: fmt.Sprintf("the runtime input %q is set to the floating value %q, so the same tag can build against different toolchains", key, text),
-				Remedy: fmt.Sprintf("set %s to an exact version", key),
-			})
-		}
+		findings = append(findings, auditRuntimeValue(file, key, with.values[key], policy)...)
 	}
 	return findings
+}
+
+// auditRuntimeValue checks one runtime selector's value: a readable literal
+// that is an exact version, or, under Policy.TrustJobOutputs, the output of a
+// job or step.
+func auditRuntimeValue(file, key string, value *node, policy Policy) []Finding {
+	if value == nil || value.kind != nodeScalar || value.style == scalarBlock {
+		return []Finding{{
+			File:   file,
+			Rule:   RuleFloatingRuntimeVersion,
+			Detail: fmt.Sprintf("the runtime input %q is not a readable literal", key),
+			Remedy: "give the runtime an exact version as a plain or quoted scalar",
+		}}
+	}
+	text := strings.TrimSpace(value.value)
+	if strings.Contains(text, "${{") {
+		if isStepOutputExpression(text) && policy.TrustJobOutputs {
+			return nil
+		}
+		return []Finding{{
+			File:   file,
+			Rule:   RuleFloatingRuntimeVersion,
+			Detail: fmt.Sprintf("the runtime input %q resolves through the expression %q, whose value is not fixed by the tagged workflow source", key, text),
+			Remedy: fmt.Sprintf("set %s to an exact version", key),
+		}}
+	}
+	if isFloatingVersion(text) {
+		return []Finding{{
+			File:   file,
+			Rule:   RuleFloatingRuntimeVersion,
+			Detail: fmt.Sprintf("the runtime input %q is set to the floating value %q, so the same tag can build against different toolchains", key, text),
+			Remedy: fmt.Sprintf("set %s to an exact version", key),
+		}}
+	}
+	return nil
 }
 
 // runtimeSelectors are the input names, beyond any *-version input, through
@@ -1598,25 +1855,76 @@ func isFloatingVersion(version string) bool {
 	return !isExactVersion(lowered)
 }
 
-// isExactVersion requires a complete major.minor.patch, optionally prefixed
-// with v and optionally carrying a prerelease or build suffix.
+// isExactVersion requires a complete major.minor.patch, or a four-component
+// version for the tools that number that way, optionally prefixed
+// with v and optionally carrying a prerelease and a build suffix in semver
+// form: dot-separated identifiers of letters, digits and hyphens, and nothing
+// after them. Everything past the core is validated rather than discarded,
+// because a range such as "20.0.0+meta || 22" would otherwise pass on its
+// first three numbers while its alternative floats.
 func isExactVersion(version string) bool {
 	version = strings.TrimPrefix(version, "v")
+	core := version
 	if index := strings.IndexAny(version, "-+"); index >= 0 {
-		version = version[:index]
+		core = version[:index]
+		suffix := version[index:]
+		if build := strings.Index(suffix, "+"); build >= 0 {
+			if !isSemverIdentifiers(suffix[build+1:]) {
+				return false
+			}
+			suffix = suffix[:build]
+		}
+		if suffix != "" && (suffix[0] != '-' || !isSemverIdentifiers(suffix[1:])) {
+			return false
+		}
 	}
-	parts := strings.Split(version, ".")
-	if len(parts) != 3 {
+	// Three components is semver; a fourth is accepted for the tools that
+	// version that way, Cabal among them.
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 && len(parts) != 4 {
 		return false
 	}
 	for _, part := range parts {
-		if part == "" {
+		if !isDigits(part) {
 			return false
 		}
-		for index := 0; index < len(part); index++ {
-			if part[index] < '0' || part[index] > '9' {
+	}
+	return true
+}
+
+// isSemverIdentifiers reports whether text is one or more dot-separated
+// identifiers made of letters, digits and hyphens, as a semver prerelease or
+// build suffix is.
+func isSemverIdentifiers(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, identifier := range strings.Split(text, ".") {
+		if identifier == "" {
+			return false
+		}
+		for index := 0; index < len(identifier); index++ {
+			character := identifier[index]
+			switch {
+			case character >= '0' && character <= '9':
+			case character >= 'a' && character <= 'z':
+			case character >= 'A' && character <= 'Z':
+			case character == '-':
+			default:
 				return false
 			}
+		}
+	}
+	return true
+}
+
+func isDigits(text string) bool {
+	if text == "" {
+		return false
+	}
+	for index := 0; index < len(text); index++ {
+		if text[index] < '0' || text[index] > '9' {
+			return false
 		}
 	}
 	return true

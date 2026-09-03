@@ -477,10 +477,12 @@ jobs:
 // a suffix match accepted any repository publishing a file at the same path.
 func TestCallerExemptionRequiresTheToolkitRepository(t *testing.T) {
 	tests := map[string]string{
-		"foreign repository at the same path":    "attacker/repo/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567",
-		"toolkit path without a commit SHA":      "SijanC147/hextap-toolkit/.github/workflows/release-go.yml@main",
-		"relative escape out of the checkout":    "./../evil/.github/workflows/release-go.yml",
-		"relative self-call outside the toolkit": "./.github/workflows/release-go.yml",
+		"foreign repository at the same path":     "attacker/repo/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567",
+		"toolkit path without a commit SHA":       "SijanC147/hextap-toolkit/.github/workflows/release-go.yml@main",
+		"relative escape out of the checkout":     "./../evil/.github/workflows/release-go.yml",
+		"relative self-call outside the toolkit":  "./.github/workflows/release-go.yml",
+		"toolkit path with the file path recased": "SijanC147/hextap-toolkit/.GitHub/Workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567",
+		"owner spelled with a long s":             "\u017fijanC147/hextap-toolkit/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567",
 	}
 	for name, reference := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -927,8 +929,9 @@ jobs:
 		content string
 		policy  Policy
 	}{
-		"adopter full SHA pin":       {hextapCallerWorkflow, Policy{}},
-		"toolkit relative self call": {selfCaller, Policy{SelfRelease: true}},
+		"adopter full SHA pin":                  {hextapCallerWorkflow, Policy{}},
+		"adopter pin with the owner lowercased": {strings.Replace(hextapCallerWorkflow, "SijanC147/hextap-toolkit/", "sijanc147/HEXTAP-TOOLKIT/", 1), Policy{}},
+		"toolkit relative self call":            {selfCaller, Policy{SelfRelease: true}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: test.content})
@@ -1101,11 +1104,21 @@ func TestPinAuditRejectsFloatingRuntimeSelectors(t *testing.T) {
 		{"go-version", "${{ env.GO_VERSION }}"},
 		{"bun-version", "v${{ needs.validate.outputs.runtime_version }}"},
 		{"bun-version", "${{ needs.validate.outputs.runtime_version || 'latest' }}"},
+		{"node-version", "20.0.0+meta || 22"},
+		{"node-version", "20.0.0 || 22"},
+		{"node-version", "1.2.3-rc 1"},
+		{"node-version", "1.2.3-"},
+		{"node-version", "1.2.3+"},
+		{"node-version", "1.2.3-rc..1"},
+		{"node-version", "1.2.3.4.5"},
 	}
 	exact := []struct{ key, value string }{
 		{"toolchain", "1.80.0"},
 		{"sdk", "3.4.0"},
 		{"terraform_version", "1.5.7"},
+		{"node-version", "1.2.3-rc.1+build.5"},
+		{"node-version", "v1.2.3+20260903"},
+		{"cabal-version", "3.12.1.0"},
 		// A file in the tagged source is fixed by the tag; its content is
 		// outside this directory-only audit and deliberately not read.
 		{"go-version-file", "go.mod"},
@@ -1118,6 +1131,9 @@ func TestPinAuditRejectsFloatingRuntimeSelectors(t *testing.T) {
 		{"bun-version", "${{ steps.manifest.outputs.runtime_version }}"},
 	}
 
+	// The action here installs nothing, so only the selector's value is under
+	// test; which inputs a setup action reads is TestRuntimeSetupMustStateAVersion's
+	// concern.
 	auditUnder := func(t *testing.T, key, value string, policy Policy) []Finding {
 		t.Helper()
 		report := analyzeWorkflows(t, map[string]string{
@@ -1131,7 +1147,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: acme/build-tool@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ` + key + `: "` + value + `"
 `,
@@ -1589,6 +1605,57 @@ jobs:
         env:
           GH_TOKEN: ${{ env.RELEASE_TOKEN }}
 `,
+		"token pasted into an issue body": `name: Triage
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh release upload "$TAG" dist/app.exe
+        env:
+          GH_TOKEN: ${{ github.event.issue.body }}
+`,
+		"token pasted into a comment": `name: Comment
+on:
+  issue_comment:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ github.event.comment.body }}"
+`,
+		"token in a pull request title": `name: Review
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ github.event.pull_request.title }}"
+`,
+		"token in a head branch name": `name: Review
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ github.head_ref }}"
+`,
 		"token arriving as a workflow_call input": `name: Callee
 on:
   workflow_call:
@@ -1745,6 +1812,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: echo "${{ github.event_name }} ${{ github.event.pull_request.number }} ${{ github.ref_name }}"
+      - run: echo "${{ github.event.pull_request.head.sha }} ${{ github.event.action }} ${{ github.event.workflow_run.conclusion }}"
 `,
 	}
 	for name, content := range inert {
@@ -2400,12 +2468,13 @@ jobs:
 		return report.PinFindings(Policy{})
 	}
 	floating := map[string]string{
-		"setup-node with no inputs":          "      - uses: actions/setup-node@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n",
-		"setup-bun with unrelated inputs":    "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n        with:\n          registry-url: https://registry.npmjs.org\n",
-		"a rust toolchain with no toolchain": "      - uses: dtolnay/rust-toolchain@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
-		"an installer with no version":       "      - uses: sigstore/cosign-installer@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
-		"a listed installer the name hides":  "      - uses: subosito/flutter-action@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
-		"goreleaser with no version":         "      - uses: goreleaser/goreleaser-action@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          args: release --clean\n",
+		"setup-node with no inputs":           "      - uses: actions/setup-node@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n",
+		"setup-bun with unrelated inputs":     "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n        with:\n          registry-url: https://registry.npmjs.org\n",
+		"a rust toolchain with no toolchain":  "      - uses: dtolnay/rust-toolchain@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"an installer with no version":        "      - uses: sigstore/cosign-installer@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"a listed installer the name hides":   "      - uses: subosito/flutter-action@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"a selector the action does not read": "      - uses: actions/setup-node@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n        with:\n          go-version: 1.22.0\n",
+		"goreleaser with no version":          "      - uses: goreleaser/goreleaser-action@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          args: release --clean\n",
 	}
 	for name, step := range floating {
 		t.Run(name, func(t *testing.T) {
@@ -2415,13 +2484,29 @@ jobs:
 			}
 		})
 	}
+	// A listed selector whose value floats is refused for its value, not for
+	// being absent.
+	t.Run("an installer with a floating release", func(t *testing.T) {
+		findings := audit(t, "      - uses: sigstore/cosign-installer@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          cosign-release: latest\n")
+		if len(findings) != 1 || findings[0].Rule != RuleFloatingRuntimeVersion || !strings.Contains(findings[0].Detail, "cosign-release") {
+			t.Fatalf("findings = %v, want the floating cosign-release value refused", findings)
+		}
+	})
+
 	stated := map[string]string{
-		"an exact version":                          "      - uses: actions/setup-node@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n        with:\n          node-version: 22.11.0\n",
-		"a version file in the source":              "      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n        with:\n          go-version-file: go.mod\n",
-		"a dotnet global.json":                      "      - uses: actions/setup-dotnet@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          global-json-file: global.json\n",
-		"an action that installs nothing":           "      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n        with:\n          name: dist\n          path: dist\n",
-		"a setup action with no toolchain to state": "      - uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869\n        with:\n          token: ${{ secrets.GITHUB_TOKEN }}\n",
-		"the QEMU registration":                     "      - uses: docker/setup-qemu-action@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"an exact version":                                             "      - uses: actions/setup-node@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n        with:\n          node-version: 22.11.0\n",
+		"a version file in the source":                                 "      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n        with:\n          go-version-file: go.mod\n",
+		"a dotnet global.json":                                         "      - uses: actions/setup-dotnet@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          global-json-file: global.json\n",
+		"an action that installs nothing":                              "      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n        with:\n          name: dist\n          path: dist\n",
+		"an installer with an exact release":                           "      - uses: sigstore/cosign-installer@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          cosign-release: v2.2.4\n",
+		"an unknown setup action with a runtime selector":              "      - uses: acme/setup-thing@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          thing-version: 1.2.3\n",
+		"a known action with its own selector beside an unrelated one": "      - uses: actions/setup-node@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n        with:\n          node-version: 22.11.0\n          go-version: 1.22.0\n",
+		"pnpm taking its version from package.json":                    "      - uses: pnpm/action-setup@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          package_json_file: package.json\n",
+		"php from a version file":                                      "      - uses: shivammathur/setup-php@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          php-version-file: .php-version\n",
+		"uv from a version file":                                       "      - uses: astral-sh/setup-uv@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          version-file: pyproject.toml\n",
+		"a four-component cabal version":                               "      - uses: haskell-actions/setup@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          cabal-version: 3.12.1.0\n",
+		"a setup action with no toolchain to state":                    "      - uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869\n        with:\n          token: ${{ secrets.GITHUB_TOKEN }}\n",
+		"the QEMU registration":                                        "      - uses: docker/setup-qemu-action@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
 	}
 	for name, step := range stated {
 		t.Run(name, func(t *testing.T) {
@@ -2495,5 +2580,67 @@ jobs:
 	}
 	if deploy != 1 {
 		t.Fatalf("findings = %v, want the chain from a tagged responder refused on the default branch", findings)
+	}
+}
+
+// TestRemoteGitContextsMustNameACommit guards the review finding that a build
+// action given a remote Git context such as https://host/repo.git#main was
+// reported as pinned: no ref: or repository: input was present, yet BuildKit
+// resolves the fragment when the job runs.
+func TestRemoteGitContextsMustNameACommit(t *testing.T) {
+	audit := func(t *testing.T, with string) []Finding {
+		t.Helper()
+		report := analyzeWorkflows(t, map[string]string{
+			DefaultCallerFile: hextapCallerWorkflow,
+			"release.yml": `name: Build
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+` + strings.ReplaceAll(with, "\\n", "\n"),
+		})
+		return report.PinFindings(Policy{})
+	}
+	mutable := map[string]string{
+		"a branch fragment":                  "          context: https://github.com/acme/app.git#main\n",
+		"a tag fragment with a subdir":       "          context: https://github.com/acme/app.git#v1.2.3:docker\n",
+		"no fragment at all":                 "          context: git@github.com:acme/app.git\n",
+		"an ssh url on a branch":             "          context: ssh://git@github.com/acme/app.git#main\n",
+		"a fragment without .git":            "          context: https://github.com/acme/app#main\n",
+		"a named build context":              "          build-contexts: src=https://github.com/o/r.git#main\n",
+		"a block of named contexts":          "          build-contexts: |\n            src=https://github.com/o/r.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n            docs=https://github.com/o/d.git#main\n",
+		"a build argument carrying a branch": "          build-args: |\n            SRC=https://github.com/o/r.git#main\n",
+		"a git+https scheme":                 "          context: git+https://github.com/o/r.git#main\n",
+		"an scp address with another user":   "          context: deploy@github.com:o/r.git#main\n",
+		"an scp address with no user":        "          context: github.com:o/r.git\n",
+	}
+	for name, with := range mutable {
+		t.Run("mutable "+name, func(t *testing.T) {
+			findings := audit(t, with)
+			if len(findings) != 1 || findings[0].Rule != RuleMutableSourceRef {
+				t.Fatalf("findings = %v, want one mutable-source-ref finding", findings)
+			}
+		})
+	}
+	immutable := map[string]string{
+		"a commit fragment":                "          context: https://github.com/acme/app.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"a commit fragment with a subdir":  "          context: https://github.com/acme/app.git#3d3c42e5aac5ba805825da76410c181273ba90b1:docker\n",
+		"a local context":                  "          context: .\n",
+		"a registry url that is not git":   "          registry-url: https://registry.npmjs.org\n",
+		"a named context at a commit":      "          build-contexts: src=https://github.com/o/r.git#3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+		"prose that mentions a repository": "          body: |\n            Install guide at https://github.com/o/r.git#readme\n",
+	}
+	for name, with := range immutable {
+		t.Run("accepted "+name, func(t *testing.T) {
+			if findings := audit(t, with); len(findings) != 0 {
+				t.Fatalf("an immutable or non-git input was refused: %v", findings)
+			}
+		})
 	}
 }
