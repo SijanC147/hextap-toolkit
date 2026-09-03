@@ -255,12 +255,36 @@ func classifyPush(filters *node) (TagTrigger, []string, []string, string) {
 		if err != nil {
 			return TagTriggerUnknown, nil, nil, fmt.Sprintf("push tags-ignore filter is unreadable: %v", err)
 		}
+		if ignoresEveryTag(patterns) {
+			return TagTriggerNone, nil, nil, ""
+		}
 		return TagTriggerAny, nil, nil, fmt.Sprintf("push ignores only the tags %s and runs on every other tag", strings.Join(quoteAll(patterns), ", "))
 	}
 	if hasBranches || hasBranchesIgnore {
 		return TagTriggerNone, nil, nil, ""
 	}
 	return TagTriggerAny, nil, nil, "push filters no refs, so every tag push starts it"
+}
+
+// ignoresEveryTag reports whether a tags-ignore list provably excludes every
+// tag, which is the one shape under which a push trigger carrying tags-ignore
+// cannot start from a tag. GitHub's filter grammar gives ** alone that
+// property: ** "matches zero or more of any character", whereas * "does not
+// match the / character" and so leaves a tag such as release/1.0 reachable. A
+// negated entry re-includes whatever it matches, so any entry starting with !
+// withdraws the proof. Every other tags-ignore list still lets some tag
+// through and stays tag-capable.
+func ignoresEveryTag(patterns []string) bool {
+	exhaustive := false
+	for _, pattern := range patterns {
+		if strings.HasPrefix(pattern, "!") {
+			return false
+		}
+		if pattern == "**" {
+			exhaustive = true
+		}
+	}
+	return exhaustive
 }
 
 // classifyWorkflowRun records which workflows a chained trigger watches. The

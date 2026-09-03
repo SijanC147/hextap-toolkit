@@ -616,10 +616,49 @@ jobs:
 	}
 }
 
+// TestPinAuditReportsLocalActionsAsUnaudited guards the review finding that a
+// local reference merely starting with the workflow directory was exempted. An
+// action stored below that directory is not a reusable workflow this pass has
+// read, and a step can never reference a reusable workflow at all. The callee
+// fixture carries an unpinned action on purpose: the one accepted case must
+// show the audit reaching the callee, not merely the caller being excused.
 func TestPinAuditReportsLocalActionsAsUnaudited(t *testing.T) {
-	report := analyzeWorkflows(t, map[string]string{
-		DefaultCallerFile: hextapCallerWorkflow,
-		"release.yml": `name: Local action
+	reusable := `name: Reusable
+on:
+  workflow_call:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`
+	tests := []struct {
+		name      string
+		position  string
+		reference string
+		want      int
+	}{
+		{"action beside the workflow directory", "step", "./.github/actions/build", 1},
+		{"action stored below the workflow directory", "job", "./.github/workflows/actions/package", 1},
+		{"workflow file that is not in the directory", "job", "./.github/workflows/missing.yml", 1},
+		{"workflow file referenced from a step", "step", "./.github/workflows/reusable.yml", 1},
+		{"workflow file this pass has read", "job", "./.github/workflows/reusable.yml", 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var caller string
+			if test.position == "job" {
+				caller = `name: Local
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    uses: ` + test.reference + `
+`
+			} else {
+				caller = `name: Local
 on:
   push:
     tags:
@@ -628,12 +667,79 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/build
+      - uses: ` + test.reference + `
+`
+			}
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"reusable.yml":    reusable,
+				"release.yml":     caller,
+			})
+			byFile := make(map[string][]Finding)
+			for _, finding := range report.PinFindings() {
+				byFile[finding.File] = append(byFile[finding.File], finding)
+			}
+			callee := byFile["reusable.yml"]
+			if len(callee) != 1 || callee[0].Rule != RuleUnpinnedAction {
+				t.Fatalf("callee findings = %v, want its unpinned action audited in every case", callee)
+			}
+			refused := byFile["release.yml"]
+			if len(refused) != test.want {
+				t.Fatalf("caller findings = %v, want %d", refused, test.want)
+			}
+			if test.want == 1 && refused[0].Rule != RuleUnauditedLocalAction {
+				t.Fatalf("finding = %#v, want unaudited-local-action against release.yml", refused[0])
+			}
+		})
+	}
+}
+
+// TestLocalCalleeExemptionRequiresAnAuditedCallee guards the hole an
+// independent review found in the fix above: a callee this pass had read but
+// skipped as unable to release excused its caller's reference while nobody
+// audited the callee. A workflow_call callee runs under whatever its caller
+// grants, so it is never proven unable, and its mutable inputs are reported.
+func TestLocalCalleeExemptionRequiresAnAuditedCallee(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"publish.yml": `name: Publish
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    uses: ./.github/workflows/helper.yml
+`,
+		"helper.yml": `name: Helper
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: evil:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: gh release upload "$TAG" dist/app.exe
 `,
 	})
-	findings := report.PinFindings()
-	if len(findings) != 1 || findings[0].Rule != RuleUnauditedLocalAction {
-		t.Fatalf("findings = %v, want one unaudited-local-action finding", findings)
+	if !findWorkflow(t, report, "helper.yml").ReleaseCapable {
+		t.Fatal("a workflow_call callee must never be proven unable to release")
+	}
+	rules := make(map[string]int)
+	for _, finding := range report.PinFindings() {
+		if finding.File != "helper.yml" {
+			t.Fatalf("finding against %s: %v", finding.File, finding)
+		}
+		rules[finding.Rule]++
+	}
+	if rules[RuleUnpinnedContainer] != 1 || rules[RuleUnpinnedAction] != 2 || rules[RuleFloatingRuntimeVersion] != 1 {
+		t.Fatalf("rules = %v, want the container, both actions and the runtime selector reported", rules)
 	}
 }
 
@@ -931,13 +1037,50 @@ jobs:
 	}
 }
 
+// TestPinAuditRejectsFloatingRuntimeSelectors covers the selector names and
+// value shapes that float. The expression cases guard the review finding that
+// a repository variable, which changes with no commit, was accepted as a
+// runtime version; only the output of a job or step in the same file is.
 func TestPinAuditRejectsFloatingRuntimeSelectors(t *testing.T) {
-	tests := []string{"latest", "lts/*", "1.x", "^1.3.0", "stable", ""}
-	for _, version := range tests {
-		t.Run("bun-version "+version, func(t *testing.T) {
-			report := analyzeWorkflows(t, map[string]string{
-				DefaultCallerFile: hextapCallerWorkflow,
-				"release.yml": `name: Floating
+	floating := []struct{ key, value string }{
+		{"bun-version", "latest"},
+		{"bun-version", "lts/*"},
+		{"bun-version", "1.x"},
+		{"bun-version", "^1.3.0"},
+		{"bun-version", "stable"},
+		{"bun-version", ""},
+		{"toolchain", "stable"},
+		{"toolchain", "nightly"},
+		{"toolchain", "1.80"},
+		{"sdk", "stable"},
+		{"terraform_version", "1.5"},
+		{"Node-Version", "22"},
+		{"bun-version", "${{ vars.BUN_VERSION }}"},
+		{"bun-version", "${{ inputs.bun }}"},
+		{"go-version", "${{ matrix.go }}"},
+		{"go-version", "${{ env.GO_VERSION }}"},
+		{"bun-version", "v${{ needs.validate.outputs.runtime_version }}"},
+		{"bun-version", "${{ needs.validate.outputs.runtime_version || 'latest' }}"},
+	}
+	exact := []struct{ key, value string }{
+		{"toolchain", "1.80.0"},
+		{"sdk", "3.4.0"},
+		{"terraform_version", "1.5.7"},
+		{"bun-version", "${{ needs.validate.outputs.runtime_version }}"},
+		{"bun-version", "${{ steps.manifest.outputs.runtime_version }}"},
+		// A file in the tagged source is fixed by the tag; its content is
+		// outside this directory-only audit and deliberately not read.
+		{"go-version-file", "go.mod"},
+		// channel names a Slack channel in several actions and a Flutter
+		// release channel in one; refusing it would refuse a notification step.
+		{"channel", "stable"},
+	}
+
+	audit := func(t *testing.T, key, value string) []Finding {
+		t.Helper()
+		report := analyzeWorkflows(t, map[string]string{
+			DefaultCallerFile: hextapCallerWorkflow,
+			"release.yml": `name: Floating
 on:
   push:
     tags:
@@ -948,12 +1091,27 @@ jobs:
     steps:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "` + version + `"
+          ` + key + `: "` + value + `"
 `,
-			})
-			findings := report.PinFindings()
+		})
+		return report.PinFindings()
+	}
+
+	for _, test := range floating {
+		t.Run("floating "+test.key+" "+test.value, func(t *testing.T) {
+			findings := audit(t, test.key, test.value)
 			if len(findings) != 1 || findings[0].Rule != RuleFloatingRuntimeVersion {
 				t.Fatalf("findings = %v, want one floating-runtime-version finding", findings)
+			}
+			if !strings.Contains(findings[0].Detail, test.key) {
+				t.Fatalf("finding must name the input %q, got %q", test.key, findings[0].Detail)
+			}
+		})
+	}
+	for _, test := range exact {
+		t.Run("accepted "+test.key+" "+test.value, func(t *testing.T) {
+			if findings := audit(t, test.key, test.value); len(findings) != 0 {
+				t.Fatalf("%s: %q produced findings: %v", test.key, test.value, findings)
 			}
 		})
 	}
@@ -982,6 +1140,15 @@ jobs:
     container: build-env:latest
     steps:
       - run: make release
+  variable:
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.BUILD_IMAGE }}
+    services:
+      cache:
+        image: ${{ vars.CACHE_IMAGE }}
+    steps:
+      - run: make release
   pinned:
     runs-on: ubuntu-latest
     container:
@@ -992,13 +1159,22 @@ jobs:
 	})
 
 	findings := report.PinFindings()
-	if len(findings) != 3 {
-		t.Fatalf("findings = %v, want one each for the job container, the service and the shorthand form", findings)
+	if len(findings) != 5 {
+		t.Fatalf("findings = %v, want one each for the job container, the service, the shorthand form and the two expression-valued images", findings)
 	}
 	for _, finding := range findings {
 		if finding.Rule != RuleUnpinnedContainer {
 			t.Fatalf("unexpected rule in %#v", finding)
 		}
+	}
+	var expressions int
+	for _, finding := range findings {
+		if strings.Contains(finding.Detail, "expression") {
+			expressions++
+		}
+	}
+	if expressions != 2 {
+		t.Fatalf("findings = %v, want the two expression-valued images refused as such", findings)
 	}
 }
 
@@ -1152,5 +1328,515 @@ func TestAnalyzeWrapsDirectoryAndFileFailures(t *testing.T) {
 		func(string) ([]byte, error) { return nil, sentinel },
 	); !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "read workflow") {
 		t.Fatalf("file failure = %v, want a wrapped read workflow error", err)
+	}
+}
+
+// TestCredentialChannelsMakeAReadOnlyWorkflowReleaseCapable guards the review
+// finding that an explicit read-only permissions block was taken as proof a
+// workflow could not reach a release. The block bounds only GITHUB_TOKEN; each
+// case below holds or can obtain another credential, whether through a secret,
+// a scope, or an input channel a caller fills, so each must be pin-audited.
+func TestCredentialChannelsMakeAReadOnlyWorkflowReleaseCapable(t *testing.T) {
+	const pinnedReusable = "SijanC147/example/.github/workflows/publish.yml@0123456789abcdef0123456789abcdef01234567"
+	capable := map[string]string{
+		"personal access token in a workflow env": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"secret read inside a run body": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          gh release upload "$TAG" dist/app.exe
+        env:
+          GH_TOKEN: ${{ SECRETS.release_pat }}
+`,
+		"every secret at once": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo '${{ toJSON(secrets) }}'
+`,
+		"secret by index": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo '${{ secrets[format('{0}_PAT', github.actor)] }}'
+`,
+		"secrets inherited by a called workflow": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    uses: ` + pinnedReusable + `
+    secrets: inherit
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"id-token exchangeable for external credentials": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"actions write can dispatch a releasing workflow": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"write-all shorthand": `name: Manual
+on:
+  workflow_dispatch:
+permissions: write-all
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"job escalating id-token beyond the workflow default": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"token arriving as a workflow_call input": `name: Callee
+on:
+  workflow_call:
+    inputs:
+      token:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh release upload "$TAG" dist/app.exe
+        env:
+          GH_TOKEN: ${{ inputs.token }}
+`,
+		"workflow_call callee that reads nothing": `name: Callee
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"token arriving as a dispatch input": `name: Manual
+on:
+  workflow_dispatch:
+    inputs:
+      token:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh release upload "$TAG" dist/app.exe
+        env:
+          GH_TOKEN: ${{ github.event.inputs.token }}
+`,
+		"dispatch input read through brackets": `name: Manual
+on:
+  workflow_dispatch:
+    inputs:
+      token:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh release upload "$TAG" dist/app.exe
+        env:
+          GH_TOKEN: ${{ github['event']["inputs"].token }}
+`,
+		"token in a repository_dispatch payload": `name: Dispatch
+on:
+  repository_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh release upload "$TAG" dist/app.exe
+        env:
+          GH_TOKEN: ${{ github.event.client_payload.token }}
+`,
+		"the whole event at once": `name: Dispatch
+on:
+  repository_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo '${{ toJSON(github.event) }}'
+`,
+	}
+	for name, content := range capable {
+		t.Run(name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"manual.yml":      content,
+			})
+			if !findWorkflow(t, report, "manual.yml").ReleaseCapable {
+				t.Fatal("a workflow holding a credential beyond GITHUB_TOKEN must be release capable")
+			}
+			findings := report.PinFindings()
+			if len(findings) != 1 || findings[0].Rule != RuleUnpinnedAction {
+				t.Fatalf("findings = %v, want the unpinned action to be audited", findings)
+			}
+		})
+	}
+
+	inert := map[string]string{
+		"only the bounded token": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ github.token }}"
+`,
+		"a property that happens to be named secrets": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ needs.build.outputs.secrets }}"
+`,
+		"read-all shorthand": `name: Manual
+on:
+  workflow_dispatch:
+permissions: read-all
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"structured event data is not a channel": `name: Review
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "${{ github.event_name }} ${{ github.event.pull_request.number }} ${{ github.ref_name }}"
+`,
+	}
+	for name, content := range inert {
+		t.Run(name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"manual.yml":      content,
+			})
+			if findWorkflow(t, report, "manual.yml").ReleaseCapable {
+				t.Fatal("a workflow bounded to a read-only GITHUB_TOKEN with no other credential must not be release capable")
+			}
+			if findings := report.PinFindings(); len(findings) != 0 {
+				t.Fatalf("pin audit reached a workflow that cannot release: %v", findings)
+			}
+		})
+	}
+}
+
+// TestPinAuditVisitsOnlyExecutablePositions guards the review finding that
+// every mapping key named uses was audited as an action reference, so a
+// workflow_dispatch input named uses was refused as unpinned. Only jobs and
+// steps run code; a list of jobs or steps the reader cannot represent is
+// reported rather than skipped.
+func TestPinAuditVisitsOnlyExecutablePositions(t *testing.T) {
+	report := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"release.yml": `name: Data keys
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      uses:
+        description: A data key that happens to share the name
+        required: false
+        type: string
+env:
+  uses: data
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        uses: [a, b]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          uses: ${{ inputs.uses }}
+          version-uses: mutable
+      - run: echo done
+        env:
+          uses: data
+`,
+	})
+	if findings := report.PinFindings(); len(findings) != 0 {
+		t.Fatalf("a fully pinned workflow was refused because a data key is named uses: %v", findings)
+	}
+
+	malformed := map[string]string{
+		"jobs is a sequence": `name: Malformed
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  - build
+`,
+		"a job is a scalar": `name: Malformed
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build: run everything
+`,
+		"steps is a mapping": `name: Malformed
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+`,
+		"a step is a scalar": `name: Malformed
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+`,
+		"with is a block scalar": `name: Malformed
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: |
+          node-version: latest
+`,
+	}
+	for name, content := range malformed {
+		t.Run(name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"release.yml":     content,
+			})
+			findings := report.PinFindings()
+			if len(findings) != 1 || findings[0].Rule != RuleUnreadableWorkflow {
+				t.Fatalf("findings = %v, want one unreadable-workflow finding", findings)
+			}
+		})
+	}
+}
+
+// TestVerifiedCallerMustOwnATagTrigger guards the review finding that a
+// correctly pinned caller which never starts on a tag push still satisfied the
+// preflight, certifying a source tree in which nothing recognised responds to
+// the release tag.
+func TestVerifiedCallerMustOwnATagTrigger(t *testing.T) {
+	caller := func(triggers string) string {
+		return `name: Hextap release
+on:
+` + triggers + `
+permissions:
+  contents: write
+jobs:
+  release:
+    uses: SijanC147/hextap-toolkit/.github/workflows/release-go.yml@0123456789abcdef0123456789abcdef01234567
+    with:
+      manifest_path: .hextap.json
+      tag: ${{ github.ref_name }}
+      mode: full
+`
+	}
+	tests := map[string]string{
+		"branch push only":     "  push:\n    branches:\n      - main\n",
+		"manual dispatch only": "  workflow_dispatch:\n",
+		"every tag ignored":    "  push:\n    branches:\n      - main\n    tags-ignore:\n      - \"**\"\n",
+	}
+	for name, triggers := range tests {
+		t.Run(name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: caller(triggers)})
+			if findings := report.TagExclusivityFindings(""); len(findings) != 0 {
+				t.Fatalf("nothing competes for the tag, yet exclusivity reported %v", findings)
+			}
+			findings := report.PreflightFindings("")
+			if len(findings) != 1 || findings[0].Rule != RuleMissingHextapCaller {
+				t.Fatalf("findings = %v, want one missing-hextap-caller finding", findings)
+			}
+			if !strings.Contains(findings[0].Detail, "never starts on a tag push") {
+				t.Fatalf("detail must say the caller owns no tag, got %q", findings[0].Detail)
+			}
+		})
+	}
+
+	t.Run("unreadable trigger", func(t *testing.T) {
+		report := analyzeWorkflows(t, map[string]string{
+			DefaultCallerFile: caller("  push:\n    tags:\n      - \"v*\"\n  puush:\n"),
+		})
+		exclusivity := report.TagExclusivityFindings("")
+		if len(exclusivity) != 1 || exclusivity[0].Rule != RuleUnreadableWorkflow {
+			t.Fatalf("exclusivity findings = %v, want the caller refused as unreadable rather than exempted", exclusivity)
+		}
+		preflight := report.PreflightFindings("")
+		if len(preflight) != 2 || preflight[1].Rule != RuleMissingHextapCaller {
+			t.Fatalf("preflight findings = %v, want the unreadable refusal plus a missing caller", preflight)
+		}
+		if !strings.Contains(preflight[1].Detail, "could not be read") {
+			t.Fatalf("detail must say the trigger was unreadable, got %q", preflight[1].Detail)
+		}
+	})
+}
+
+// TestTagsIgnoreCanExcludeEveryTag covers the one shape under which a push
+// trigger carrying tags-ignore provably never starts from a tag. GitHub's
+// filter grammar: ** matches zero or more of any character, * does not match
+// the / character, and a negated entry re-includes what it matches.
+func TestTagsIgnoreCanExcludeEveryTag(t *testing.T) {
+	workflow := func(ignore string) string {
+		return `name: Branch CI
+on:
+  push:
+    branches:
+      - "**"
+    tags-ignore: ` + ignore + `
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ci
+`
+	}
+	tests := []struct {
+		name    string
+		ignore  string
+		trigger TagTrigger
+	}{
+		{"double star excludes every tag", `["**"]`, TagTriggerNone},
+		{"double star among other entries", `["v*", "**"]`, TagTriggerNone},
+		{"single star leaves a tag containing a slash reachable", `["*"]`, TagTriggerAny},
+		{"a negated entry re-includes a tag", `["**", "!v*"]`, TagTriggerAny},
+		{"a pattern short of every tag", `["internal-*"]`, TagTriggerAny},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"ci.yml":          workflow(test.ignore),
+			})
+			ci := findWorkflow(t, report, "ci.yml")
+			if ci.TagTrigger != test.trigger {
+				t.Fatalf("trigger = %v (%s), want %v", ci.TagTrigger, ci.TriggerReason, test.trigger)
+			}
+			findings := report.TagExclusivityFindings("")
+			if want := map[bool]int{true: 1, false: 0}[test.trigger.RespondsToTagPush()]; len(findings) != want {
+				t.Fatalf("findings = %v, want %d", findings, want)
+			}
+		})
 	}
 }

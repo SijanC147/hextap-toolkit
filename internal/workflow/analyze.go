@@ -98,13 +98,17 @@ type Workflow struct {
 	Events []string
 	// TriggerReason explains the classification in the terms of the file.
 	TriggerReason string
-	// HextapCaller reports whether a job in this file calls the Hextap
+	// HextapCaller reports whether every job in this file calls the Hextap
 	// reusable release workflow.
 	HextapCaller bool
 	// ReleaseCapable reports whether the file can reach a release. It is true
-	// unless the workflow is proven unable to: absent permissions are not
-	// proof, because the effective default is a repository setting this
-	// analysis cannot see. Only these files are pin-audited.
+	// unless the workflow is proven unable to: the GITHUB_TOKEN scopes that
+	// reach a release are explicitly withheld, no job passes secrets on, and
+	// no expression reads a secret other than GITHUB_TOKEN. Absent permissions
+	// are not proof, because the effective default is a repository setting
+	// this analysis cannot see; a read-only token is not proof either, because
+	// a secret can hold a token the permissions block never bounds. Only these
+	// files are pin-audited.
 	ReleaseCapable bool
 
 	document *node
@@ -184,7 +188,7 @@ func analyze(
 		workflow.TagPatterns = analysis.patterns
 		workflow.watches = analysis.watches
 		workflow.HextapCaller = isHextapCaller(document)
-		workflow.ReleaseCapable = workflow.TagTrigger.RespondsToTagPush() || !provablyReadOnly(document)
+		workflow.ReleaseCapable = workflow.TagTrigger.RespondsToTagPush() || !provablyUnableToRelease(document)
 		report.Workflows = append(report.Workflows, workflow)
 	}
 
@@ -315,53 +319,274 @@ func referencesHextapReleaseWorkflow(reference string) bool {
 	return reference[:at] == hextapReusableWorkflow && isHexadecimal(reference[at+1:], 40)
 }
 
-// provablyReadOnly reports whether the document demonstrably cannot write to
-// repository contents.
+// provablyUnableToRelease reports whether the document demonstrably cannot
+// reach a release: nothing in it holds a credential that could create or
+// modify one.
 //
 // Absent permissions are not proof. The effective default for GITHUB_TOKEN is a
 // repository setting this directory-only analysis cannot see, and in a
 // repository still configured for read/write a workflow with no permissions
-// block can modify a release. Only an explicit restriction proves it; anything
-// else is pin-audited, which over-reports rather than certifying a mutable
-// release path as pinned.
-func provablyReadOnly(document *node) bool {
+// block can modify a release.
+//
+// An explicit permissions block is not proof on its own either, because it
+// bounds only GITHUB_TOKEN. A workflow whose token is read-only can still
+// publish with a personal access token held in a secret, can exchange an OIDC
+// id-token for credentials this analysis never sees, and can start a
+// release-capable sibling through actions: write. A token can also arrive as
+// plain data: a workflow_call or workflow_dispatch input, or a dispatch
+// payload, is a string the workflow cannot tell from a credential. Only a
+// workflow that grants none of those scopes, passes no secrets to a called
+// workflow, and reads neither the secrets context nor any of those input
+// channels is exempt from the pin audit. A workflow_call callee is never
+// exempt: it runs under whatever its caller grants, and this pass judges one
+// file at a time rather than composing grants across files. Everything else is
+// audited, which over-reports rather than certifying a mutable release path as
+// pinned.
+func provablyUnableToRelease(document *node) bool {
 	permissions := document.child("permissions")
-	if permissions == nil || !restrictsContentsWrite(permissions) {
+	if permissions == nil || grantsReleaseScope(permissions) {
 		return false
 	}
-	jobs := document.child("jobs")
-	if jobs == nil || jobs.kind != nodeMapping {
+	if events, _, err := triggerEvents(document.child("on")); err == nil {
+		for _, event := range events {
+			if event == "workflow_call" {
+				return false
+			}
+		}
+	}
+	if jobs := document.child("jobs"); jobs != nil && jobs.kind == nodeMapping {
+		for _, key := range jobs.keys {
+			job := jobs.values[key]
+			if job == nil || job.kind != nodeMapping {
+				continue
+			}
+			// A job may escalate beyond the workflow-level default, and a job
+			// that calls a reusable workflow may hand it secrets.
+			if jobPermissions := job.child("permissions"); jobPermissions != nil && grantsReleaseScope(jobPermissions) {
+				return false
+			}
+			if job.has("secrets") {
+				return false
+			}
+		}
+	}
+	return !readsCredentialChannel(document)
+}
+
+// releaseScopes are the GITHUB_TOKEN scopes through which a workflow can reach
+// a release: contents writes it directly, actions can dispatch a workflow that
+// does, and id-token can be exchanged for credentials outside this analysis.
+var releaseScopes = map[string]struct{}{
+	"actions":  {},
+	"contents": {},
+	"id-token": {},
+}
+
+// grantsReleaseScope reports whether an explicit permissions block leaves any
+// release-reaching scope open. A mapping that omits a scope grants it nothing,
+// which is a restriction; the read-all shorthand restricts every scope. A
+// value other than read or none is not assumed to be a restriction.
+func grantsReleaseScope(permissions *node) bool {
+	if permissions.kind == nodeScalar {
+		return permissions.style == scalarBlock || permissions.value != "read-all"
+	}
+	if permissions.kind != nodeMapping {
 		return true
 	}
-	for _, key := range jobs.keys {
-		job := jobs.values[key]
-		if job == nil || job.kind != nodeMapping {
+	for _, scope := range permissions.keys {
+		if _, reaches := releaseScopes[scope]; !reaches {
 			continue
 		}
-		// A job may escalate beyond the workflow-level default.
-		if jobPermissions := job.child("permissions"); jobPermissions != nil &&
-			!restrictsContentsWrite(jobPermissions) {
-			return false
+		grant := permissions.values[scope]
+		if grant == nil || grant.kind != nodeScalar || grant.style == scalarBlock {
+			return true
 		}
+		if grant.value != "read" && grant.value != "none" {
+			return true
+		}
+	}
+	return false
+}
+
+// readsCredentialChannel reports whether any expression in the document reads
+// a value that can carry a credential this analysis cannot see: the secrets
+// context for anything other than GITHUB_TOKEN, or one of the input channels
+// a caller or dispatcher fills. A single such read anywhere in the file makes
+// the workflow release capable. GITHUB_TOKEN is the one exception, because the
+// permissions block bounds it.
+func readsCredentialChannel(document *node) bool {
+	return anyScalar(document, func(value string) bool {
+		for _, expression := range expressions(value) {
+			if expressionReadsCredentialChannel(expression) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// anyScalar reports whether any scalar value in the tree satisfies the
+// predicate, stopping at the first that does.
+func anyScalar(current *node, predicate func(string) bool) bool {
+	if current == nil {
+		return false
+	}
+	switch current.kind {
+	case nodeScalar:
+		return predicate(current.value)
+	case nodeSequence:
+		for _, item := range current.items {
+			if anyScalar(item, predicate) {
+				return true
+			}
+		}
+	case nodeMapping:
+		for _, key := range current.keys {
+			if anyScalar(current.values[key], predicate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// expressions returns the body of every ${{ }} expression in a value. An
+// unterminated expression is returned as far as it goes: for a caller deciding
+// safety it is still an expression.
+func expressions(text string) []string {
+	var found []string
+	for {
+		start := strings.Index(text, "${{")
+		if start < 0 {
+			return found
+		}
+		rest := text[start+len("${{"):]
+		end := strings.Index(rest, "}}")
+		if end < 0 {
+			return append(found, rest)
+		}
+		found = append(found, rest[:end])
+		text = rest[end+len("}}"):]
+	}
+}
+
+// payloadChannels are the paths under the github context that carry values
+// the triggering party supplies as free-form data: dispatch inputs, a
+// repository_dispatch client payload, and a deployment payload. Every other
+// event field is structured data GitHub itself produced.
+var payloadChannels = []string{"event.inputs", "event.client_payload", "event.deployment.payload"}
+
+// expressionReadsCredentialChannel reports whether an expression body reads the
+// secrets context for anything but GITHUB_TOKEN, the inputs context, or a
+// payload channel under the github context. Each context is matched as a whole
+// identifier that is not itself a property, so needs.build.outputs.secrets is
+// not mistaken for one, while toJSON(secrets), secrets[name] and
+// github['event']['inputs'] count as reads because they reach the whole
+// channel at once.
+func expressionReadsCredentialChannel(expression string) bool {
+	for start := 0; start < len(expression); {
+		end := start
+		for end < len(expression) && isIdentifierByte(expression[end]) {
+			end++
+		}
+		if end == start {
+			start++
+			continue
+		}
+		word := expression[start:end]
+		remainder := expression[end:]
+		property := start > 0 && expression[start-1] == '.'
+		switch {
+		case property:
+		case strings.EqualFold(word, "inputs"):
+			return true
+		case strings.EqualFold(word, "secrets"):
+			if path := contextPath(remainder); !strings.EqualFold(path, "github_token") {
+				return true
+			}
+		case strings.EqualFold(word, "github"):
+			path := strings.ToLower(contextPath(remainder))
+			for _, channel := range payloadChannels {
+				if path == channel || strings.HasPrefix(path, channel+".") {
+					return true
+				}
+			}
+			if path == "event" || path == "" {
+				// The whole event, or the whole context, reaches every
+				// payload channel at once.
+				return true
+			}
+		}
+		start = end
+	}
+	return false
+}
+
+// contextPath reads the property chain that follows a context name, in either
+// dotted or bracketed form, and returns it dot-joined. It stops at the first
+// character that continues neither form, so github.event.inputs.token and
+// github['event']["inputs"].token both yield event.inputs.token.
+func contextPath(remainder string) string {
+	var segments []string
+	for remainder != "" {
+		switch {
+		case strings.HasPrefix(remainder, "."):
+			segment := identifierPrefix(remainder[1:])
+			if segment == "" {
+				return strings.Join(segments, ".")
+			}
+			segments = append(segments, segment)
+			remainder = remainder[1+len(segment):]
+		case strings.HasPrefix(remainder, "['") || strings.HasPrefix(remainder, "[\""):
+			quote := remainder[1]
+			closing := strings.IndexByte(remainder[2:], quote)
+			if closing < 0 || len(remainder) < 2+closing+2 || remainder[2+closing+1] != ']' {
+				return strings.Join(segments, ".")
+			}
+			segments = append(segments, remainder[2:2+closing])
+			remainder = remainder[2+closing+2:]
+		default:
+			return strings.Join(segments, ".")
+		}
+	}
+	return strings.Join(segments, ".")
+}
+
+func identifierPrefix(text string) string {
+	end := 0
+	for end < len(text) && isIdentifierByte(text[end]) {
+		end++
+	}
+	return text[:end]
+}
+
+func isIdentifier(text string) bool {
+	return text != "" && identifierPrefix(text) == text
+}
+
+func isIdentifierByte(character byte) bool {
+	switch {
+	case character >= '0' && character <= '9':
+	case character >= 'a' && character <= 'z':
+	case character >= 'A' && character <= 'Z':
+	case character == '_' || character == '-':
+	default:
+		return false
 	}
 	return true
 }
 
-// restrictsContentsWrite reports whether an explicit permissions block denies
-// write access to repository contents. A block that omits contents grants it
-// nothing, which is a restriction.
-func restrictsContentsWrite(permissions *node) bool {
-	if permissions.kind == nodeScalar {
-		return permissions.style != scalarBlock && permissions.value == "read-all"
-	}
-	if permissions.kind != nodeMapping {
-		return false
-	}
-	contents := permissions.child("contents")
-	if contents == nil {
-		return true
-	}
-	return contents.kind == nodeScalar && contents.style != scalarBlock && contents.value != "write"
+// isVerifiedCaller reports whether a workflow earns the caller exemption: it
+// sits at the caller path, every job of it calls the Hextap reusable release
+// workflow, and its trigger is readable and starts on a tag push. The last
+// condition is what makes the caller the owner of the pushed tag. A pinned
+// caller that starts only from a branch push or a manual dispatch calls the
+// right workflow but owns no tag, and a preflight that certified such a source
+// tree would certify one in which nothing recognised responds to the release
+// tag at all.
+func isVerifiedCaller(workflow Workflow, callerFile string) bool {
+	return workflow.Active && workflow.File == callerFile && workflow.HextapCaller &&
+		(workflow.TagTrigger == TagTriggerFiltered || workflow.TagTrigger == TagTriggerAny)
 }
 
 // TagExclusivityFindings reports every active workflow, other than the verified
@@ -379,7 +604,7 @@ func (report *Report) TagExclusivityFindings(callerFile string) []Finding {
 		if !workflow.Active || workflow.TagTrigger == TagTriggerNone {
 			continue
 		}
-		if workflow.File == callerFile && workflow.HextapCaller {
+		if isVerifiedCaller(workflow, callerFile) {
 			continue
 		}
 		if workflow.TagTrigger == TagTriggerUnknown {
@@ -408,33 +633,36 @@ func (report *Report) TagExclusivityFindings(callerFile string) []Finding {
 	return findings
 }
 
-// PinFindings audits action references and runtime version inputs in every
-// release-capable workflow. A reference resolved through an expression is
-// accepted because it cannot be judged statically; that is an honest limit of a
-// source-only audit, not a proof of pinning.
+// PinFindings audits action references, container images and runtime version
+// inputs in every release-capable workflow. Only what a workflow states in its
+// own source can be bounded, so a value that arrives through an expression is
+// refused, with one exception: the output of a job or step in the same file is
+// computed by the tagged source itself and cannot be changed without a new
+// commit. That exception is accepted, not proven pinned, and the audit says so.
 func (report *Report) PinFindings() []Finding {
 	var findings []Finding
 	for _, workflow := range report.Workflows {
 		if !workflow.Active || !workflow.ReleaseCapable || workflow.document == nil {
 			continue
 		}
-		findings = append(findings, auditPins(workflow.File, workflow.document)...)
+		findings = append(findings, report.auditPins(workflow.File, workflow.document)...)
 	}
 	return findings
 }
 
 // PreflightFindings is the complete refusal set for a tagged source tree: tag
-// exclusivity, the presence of a verified caller, and the pin audit.
+// exclusivity, the presence of a verified caller that owns the tag, and the
+// pin audit.
 func (report *Report) PreflightFindings(callerFile string) []Finding {
 	callerFile = resolveCallerFile(callerFile)
 
 	findings := report.TagExclusivityFindings(callerFile)
-	if !report.hasVerifiedCaller(callerFile) {
+	if detail, verified := report.callerVerification(callerFile); !verified {
 		findings = append(findings, Finding{
 			File:   callerFile,
 			Rule:   RuleMissingHextapCaller,
-			Detail: fmt.Sprintf("no active workflow named %s calls %s, so no workflow in this source tree is the recognised owner of the pushed tag", callerFile, hextapReusableWorkflow),
-			Remedy: "restore the Hextap caller workflow generated by onboarding before publishing from this source",
+			Detail: detail,
+			Remedy: "restore the Hextap caller workflow generated by onboarding, including its push tag trigger, before publishing from this source",
 		})
 	}
 	return append(findings, report.PinFindings()...)
@@ -456,13 +684,29 @@ func Preflight(directory, callerFile string) ([]Finding, error) {
 	return report.PreflightFindings(callerFile), nil
 }
 
-func (report *Report) hasVerifiedCaller(callerFile string) bool {
+// callerVerification reports whether the source tree has a verified caller
+// and, when it does not, states which of the three conditions failed so that
+// the adopter can fix the right one.
+func (report *Report) callerVerification(callerFile string) (string, bool) {
 	for _, workflow := range report.Workflows {
-		if workflow.Active && workflow.File == callerFile && workflow.HextapCaller {
-			return true
+		if !workflow.Active || workflow.File != callerFile {
+			continue
+		}
+		switch {
+		case isVerifiedCaller(workflow, callerFile):
+			return "", true
+		case !workflow.HextapCaller:
+			return fmt.Sprintf("%s does not call %s in every job, so it is not the recognised owner of the pushed tag",
+				callerFile, hextapReusableWorkflow), false
+		case workflow.TagTrigger == TagTriggerUnknown:
+			return fmt.Sprintf("%s calls %s but its trigger could not be read (%s), so it cannot be shown to own the pushed tag",
+				callerFile, hextapReusableWorkflow, workflow.TriggerReason), false
+		default:
+			return fmt.Sprintf("%s calls %s but never starts on a tag push (%s), so no recognised workflow owns the pushed tag",
+				callerFile, hextapReusableWorkflow, workflow.TriggerReason), false
 		}
 	}
-	return false
+	return fmt.Sprintf("no active workflow named %s exists, so no workflow in this source tree is the recognised owner of the pushed tag", callerFile), false
 }
 
 func resolveCallerFile(callerFile string) string {
@@ -472,49 +716,77 @@ func resolveCallerFile(callerFile string) string {
 	return filepath.Base(callerFile)
 }
 
-// auditPins walks every action reference and runtime version input in one
-// document. Walking the whole tree rather than only known step lists means a
-// reference introduced somewhere unexpected is still audited.
-func auditPins(file string, document *node) []Finding {
+// auditPins visits the executable positions of one document: every job's
+// reusable workflow reference, every step's action reference, and every job or
+// service container. Only those positions run code. A key named uses anywhere
+// else, such as a workflow_dispatch input or a with: value, is data, and
+// auditing it produced refusals against workflows that were fully pinned. A
+// job or step list the reader cannot represent is reported rather than skipped.
+func (report *Report) auditPins(file string, document *node) []Finding {
+	jobs := document.child("jobs")
+	if jobs == nil || jobs.kind != nodeMapping {
+		return []Finding{unreadableForAudit(file, "the jobs: block is not a readable mapping, so nothing in it can be audited")}
+	}
+
 	var findings []Finding
-	walkNodes(document, func(current *node) {
-		if current.kind != nodeMapping {
-			return
+	for _, name := range jobs.keys {
+		job := jobs.values[name]
+		if job == nil || job.kind != nodeMapping {
+			findings = append(findings, unreadableForAudit(file, fmt.Sprintf("job %q is not a readable mapping, so nothing in it can be audited", name)))
+			continue
 		}
-		if current.has("uses") {
-			findings = append(findings, auditActionReference(file, current.child("uses"))...)
-			findings = append(findings, auditRuntimeVersions(file, current.child("with"))...)
+		if job.has("uses") {
+			findings = append(findings, report.auditActionReference(file, job.child("uses"), true)...)
+			findings = append(findings, auditRuntimeVersions(file, job.child("with"))...)
 		}
-		if current.has("container") {
-			findings = append(findings, auditContainerImage(file, current.child("container"))...)
+		if job.has("container") {
+			findings = append(findings, auditContainerImage(file, job.child("container"))...)
 		}
-		if services := current.child("services"); services != nil && services.kind == nodeMapping {
-			for _, name := range services.keys {
-				findings = append(findings, auditContainerImage(file, services.values[name])...)
+		if services := job.child("services"); services != nil && services.kind != nodeNull {
+			if services.kind != nodeMapping {
+				findings = append(findings, unreadableForAudit(file, fmt.Sprintf("job %q declares services that are not a readable mapping, so they cannot be audited", name)))
+			} else {
+				for _, service := range services.keys {
+					findings = append(findings, auditContainerImage(file, services.values[service])...)
+				}
 			}
 		}
-	})
+		steps := job.child("steps")
+		if steps == nil || steps.kind == nodeNull {
+			continue
+		}
+		if steps.kind != nodeSequence {
+			findings = append(findings, unreadableForAudit(file, fmt.Sprintf("job %q declares steps that are not a readable sequence, so they cannot be audited", name)))
+			continue
+		}
+		for index, step := range steps.items {
+			if step == nil || step.kind != nodeMapping {
+				findings = append(findings, unreadableForAudit(file, fmt.Sprintf("step %d of job %q is not a readable mapping, so it cannot be audited", index+1, name)))
+				continue
+			}
+			if step.has("uses") {
+				findings = append(findings, report.auditActionReference(file, step.child("uses"), false)...)
+				findings = append(findings, auditRuntimeVersions(file, step.child("with"))...)
+			}
+		}
+	}
 	return findings
 }
 
-func walkNodes(current *node, visit func(*node)) {
-	if current == nil {
-		return
-	}
-	visit(current)
-	switch current.kind {
-	case nodeSequence:
-		for _, item := range current.items {
-			walkNodes(item, visit)
-		}
-	case nodeMapping:
-		for _, key := range current.keys {
-			walkNodes(current.values[key], visit)
-		}
+func unreadableForAudit(file, detail string) Finding {
+	return Finding{
+		File:   file,
+		Rule:   RuleUnreadableWorkflow,
+		Detail: detail,
+		Remedy: "rewrite the named construct within the plain block YAML subset the analyser accepts",
 	}
 }
 
-func auditActionReference(file string, uses *node) []Finding {
+// auditActionReference audits one uses: value. reusable reports whether the
+// reference sits on a job, where it names a reusable workflow, rather than on
+// a step, where it names an action; only the former can point at a workflow
+// file this pass has read.
+func (report *Report) auditActionReference(file string, uses *node, reusable bool) []Finding {
 	unpinned := func(detail, remedy string) []Finding {
 		return []Finding{{File: file, Rule: RuleUnpinnedAction, Detail: detail, Remedy: remedy}}
 	}
@@ -527,15 +799,13 @@ func auditActionReference(file string, uses *node) []Finding {
 	reference := strings.TrimSpace(uses.value)
 	switch {
 	case strings.HasPrefix(reference, "./"):
-		if strings.HasPrefix(reference, "./"+DefaultWorkflowDirectory+"/") {
-			// A reusable workflow in the analysed directory resolves inside the
-			// commit under review and is audited in its own right by this pass.
+		if reusable && report.auditedReusableWorkflow(reference) {
 			return nil
 		}
 		return []Finding{{
 			File:   file,
 			Rule:   RuleUnauditedLocalAction,
-			Detail: fmt.Sprintf("the local action %q resolves inside the reviewed commit, but the external references in its own definition live outside the workflow directory and are not audited here", reference),
+			Detail: fmt.Sprintf("the local reference %q is not a reusable workflow file in the analysed directory, so the external references in its own definition are not audited here", reference),
 			Remedy: "pin every external reference inside the local action definition to a full commit SHA, or inline the step so its dependencies are visible to this audit",
 		}}
 	case strings.Contains(reference, "${{"):
@@ -565,9 +835,40 @@ func auditActionReference(file string, uses *node) []Finding {
 	return nil
 }
 
+// auditedReusableWorkflow reports whether a local uses: reference names a
+// reusable workflow file that this same pass has read and does audit in its
+// own right. Only a direct child of the workflow directory qualifies. An action
+// stored below it, such as ./.github/workflows/actions/package, lives in a
+// directory this pass never descends into, and its action.yml can reference
+// anything; sharing the directory prefix earns it nothing. The callee must
+// also be release capable, because PinFindings audits only those files: a
+// callee this pass has read but skipped has not been audited by anyone.
+func (report *Report) auditedReusableWorkflow(reference string) bool {
+	prefix := "./" + DefaultWorkflowDirectory + "/"
+	if !strings.HasPrefix(reference, prefix) {
+		return false
+	}
+	name := reference[len(prefix):]
+	if name == "" || strings.Contains(name, "/") || !hasWorkflowExtension(name) {
+		return false
+	}
+	for _, workflow := range report.Workflows {
+		if workflow.File == name {
+			return workflow.Active && workflow.document != nil && workflow.ReleaseCapable
+		}
+	}
+	return false
+}
+
 // auditContainerImage requires a job or service container to name an immutable
 // image. A container is executed code exactly as an action is, so rebuilding the
-// same tag against a mutable image runs something different.
+// same tag against a mutable image runs something different. An image chosen by
+// an expression is refused whatever the expression's root. A repository
+// variable changes with no commit, and an image built and named by an earlier
+// job is exactly a runtime-resolved artifact; the step-output exception that
+// auditRuntimeVersions makes exists because the Hextap contract carries the
+// runtime version through a job output, and no part of that contract names an
+// image that way.
 func auditContainerImage(file string, container *node) []Finding {
 	if container == nil || container.kind == nodeNull {
 		return nil
@@ -586,7 +887,12 @@ func auditContainerImage(file string, container *node) []Finding {
 	}
 	reference := strings.TrimSpace(image.value)
 	if strings.Contains(reference, "${{") {
-		return nil
+		return []Finding{{
+			File:   file,
+			Rule:   RuleUnpinnedContainer,
+			Detail: fmt.Sprintf("the container image %q resolves through an expression, so the image the tagged build runs in is decided outside the tagged source", reference),
+			Remedy: "name the image literally, pinned to an immutable @sha256: digest",
+		}}
 	}
 	if digest := strings.LastIndex(reference, "@sha256:"); digest >= 0 &&
 		isHexadecimal(reference[digest+len("@sha256:"):], 64) {
@@ -600,13 +906,19 @@ func auditContainerImage(file string, container *node) []Finding {
 	}}
 }
 
+// auditRuntimeVersions audits the runtime selectors among a job's or step's
+// with: inputs. A with: block the reader cannot represent is reported rather
+// than skipped, since the selectors inside it cannot be seen.
 func auditRuntimeVersions(file string, with *node) []Finding {
-	if with == nil || with.kind != nodeMapping {
+	if with == nil || with.kind == nodeNull {
 		return nil
+	}
+	if with.kind != nodeMapping {
+		return []Finding{unreadableForAudit(file, "a with: block is not a readable mapping, so the runtime inputs in it cannot be audited")}
 	}
 	var findings []Finding
 	for _, key := range with.keys {
-		if key != "version" && !strings.HasSuffix(key, "-version") {
+		if !isRuntimeSelector(key) {
 			continue
 		}
 		value := with.values[key]
@@ -621,8 +933,15 @@ func auditRuntimeVersions(file string, with *node) []Finding {
 		}
 		text := strings.TrimSpace(value.value)
 		if strings.Contains(text, "${{") {
-			// Resolved by the workflow at run time from a value this audit
-			// cannot see. Reported as accepted rather than proven pinned.
+			if isStepOutputExpression(text) {
+				continue
+			}
+			findings = append(findings, Finding{
+				File:   file,
+				Rule:   RuleFloatingRuntimeVersion,
+				Detail: fmt.Sprintf("the runtime input %q resolves through the expression %q, whose value is not fixed by the tagged workflow source", key, text),
+				Remedy: fmt.Sprintf("set %s to an exact version, or to the output of a job or step in this workflow", key),
+			})
 			continue
 		}
 		if isFloatingVersion(text) {
@@ -637,11 +956,59 @@ func auditRuntimeVersions(file string, with *node) []Finding {
 	return findings
 }
 
+// runtimeSelectors are the input names, beyond any *-version input, through
+// which setup actions choose a toolchain: version for the many actions that
+// install one tool, toolchain for the Rust setup actions, sdk for Dart.
+var runtimeSelectors = map[string]struct{}{
+	"sdk":       {},
+	"toolchain": {},
+	"version":   {},
+}
+
+// isRuntimeSelector reports whether a with: input selects a runtime version.
+// Names are compared case-insensitively with underscores folded to hyphens, so
+// terraform_version and Node-Version are audited alongside node-version.
+//
+// Two names are deliberately outside the set. A *-version-file input names a
+// file in the tagged source whose content is fixed by the tag and outside this
+// directory-only audit. channel is ambiguous: it selects a Flutter release
+// channel in one action and a Slack channel in several others, and refusing a
+// release notification step would be a refusal the adopter cannot justify.
+func isRuntimeSelector(key string) bool {
+	normalised := strings.ReplaceAll(strings.ToLower(key), "_", "-")
+	if _, selector := runtimeSelectors[normalised]; selector {
+		return true
+	}
+	return strings.HasSuffix(normalised, "-version")
+}
+
+// isStepOutputExpression reports whether a value is exactly one expression
+// reading a job or step output: needs.<job>.outputs.<name> or
+// steps.<id>.outputs.<name>. Such a value is produced by a step whose own
+// inputs this audit already covers. What the step computes from them is not
+// visible here and is not claimed to be pinned; the shape is accepted because
+// the Hextap reusable workflow relies on it to carry the runtime version
+// sealed in the adopter manifest. Every other expression root, including vars,
+// inputs, env, github and matrix, would need the audit to evaluate
+// expressions to bound, and it evaluates none, so it is refused.
+func isStepOutputExpression(text string) bool {
+	if !strings.HasPrefix(text, "${{") || !strings.HasSuffix(text, "}}") || strings.Count(text, "${{") != 1 {
+		return false
+	}
+	body := strings.TrimSpace(text[len("${{") : len(text)-len("}}")])
+	parts := strings.Split(body, ".")
+	if len(parts) != 4 || (parts[0] != "needs" && parts[0] != "steps") || parts[2] != "outputs" {
+		return false
+	}
+	return isIdentifier(parts[1]) && isIdentifier(parts[3])
+}
+
 // floatingVersionAliases are the runtime selectors that resolve to whatever is
 // current at the moment the job runs.
 var floatingVersionAliases = map[string]struct{}{
 	"":        {},
 	"*":       {},
+	"beta":    {},
 	"canary":  {},
 	"current": {},
 	"dev":     {},
