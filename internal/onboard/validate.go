@@ -20,9 +20,24 @@ import (
 const (
 	smokeVersion = "1.2.3-rc.1"
 	smokeCommit  = "0123456789abcdef0123456789abcdef01234567"
+	// toolkitRepositoryName is the name of the repository that owns the reusable
+	// release workflow. Only that repository may call the workflow relatively.
+	// Only the name is matched here because Validate already rejects any owner
+	// other than supportedOwner, so the admitted identity is effectively
+	// SijanC147/hextap-toolkit. Genuine fork support would require changing
+	// supportedOwner, not this condition.
+	toolkitRepositoryName = "hextap-toolkit"
+	// reusableWorkflowPath is the same-repository reusable workflow a relative
+	// caller resolves to. It must exist in the project being validated.
+	reusableWorkflowPath = ".github/workflows/release-go.yml"
 )
 
-var workflowPinPattern = regexp.MustCompile(`(?m)^    uses: SijanC147/hextap-toolkit/\.github/workflows/release-go\.yml@([0-9a-f]{40}) # (v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$`)
+var (
+	workflowPinPattern = regexp.MustCompile(`(?m)^    uses: SijanC147/hextap-toolkit/\.github/workflows/release-go\.yml@([0-9a-f]{40}) # (v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$`)
+	// selfCallerPattern recognises the relative same-repository call shape. It
+	// only selects which contract applies; selfCallerBytes decides acceptance.
+	selfCallerPattern = regexp.MustCompile(`(?m)^    uses: \./\.github/workflows/release-go\.yml$`)
+)
 
 type decodedRulesetRule struct {
 	Type       string          `json:"type"`
@@ -85,7 +100,7 @@ func Validate(options ValidateOptions) (ValidateResult, error) {
 	if !exactFileMode(info, 0o644) {
 		return ValidateResult{}, errors.New("caller workflow mode must be 0644")
 	}
-	toolkitVersion, toolkitSHA, err := validateWorkflow(workflow)
+	toolkitVersion, toolkitSHA, err := validateWorkflow(root, repository, workflow)
 	if err != nil {
 		return ValidateResult{}, err
 	}
@@ -194,7 +209,19 @@ func readManagedArtifact(root, relative string) ([]byte, os.FileInfo, error) {
 	return data, info, nil
 }
 
-func validateWorkflow(data []byte) (version, commit string, err error) {
+// validateWorkflow accepts exactly two caller shapes. Every external adopter
+// must pin the reusable workflow at a full commit SHA, which is what binds a
+// reviewed caller to reviewed toolkit code. The toolkit itself instead calls
+// the workflow relatively, because the release tag it is building already is
+// the execution identity and there is nothing external to pin to. A relative
+// caller returns an empty toolkit version and SHA: it has no external pin.
+func validateWorkflow(root, repository string, data []byte) (version, commit string, err error) {
+	if selfCallerPattern.Match(data) {
+		if err := validateSelfCaller(root, repository, data); err != nil {
+			return "", "", err
+		}
+		return "", "", nil
+	}
 	matches := workflowPinPattern.FindSubmatch(data)
 	if len(matches) != 3 {
 		return "", "", errors.New("caller workflow lacks an exact stable toolkit version and full SHA pin")
@@ -207,6 +234,66 @@ func validateWorkflow(data []byte) (version, commit string, err error) {
 		return "", "", errors.New("caller workflow does not match the exact owned thin caller")
 	}
 	return version, commit, nil
+}
+
+// validateSelfCaller admits the relative same-repository caller for exactly one
+// identity: the repository that owns the reusable workflow. The exception is
+// deliberately unusable by an adopter wanting to escape the full-SHA pin, so it
+// requires all three of the toolkit repository name, the reusable workflow the
+// relative reference actually resolves to, and the exact owned self-caller
+// bytes. Owner is deliberately not rechecked here: Validate already restricts
+// the supported owner, so duplicating that condition would add nothing.
+func validateSelfCaller(root, repository string, data []byte) error {
+	_, name, err := parseRepository(repository)
+	if err != nil {
+		return err
+	}
+	if name != toolkitRepositoryName {
+		return fmt.Errorf("relative same-repository caller is permitted only in the %q repository that owns the reusable workflow; repository %q must pin an exact stable toolkit version and full SHA", toolkitRepositoryName, repository)
+	}
+	if _, info, err := readManagedArtifact(root, reusableWorkflowPath); err != nil {
+		return fmt.Errorf("relative caller requires the same-repository reusable workflow %s: %w", reusableWorkflowPath, err)
+	} else if !exactFileMode(info, 0o644) {
+		return fmt.Errorf("same-repository reusable workflow %s mode must be 0644", reusableWorkflowPath)
+	}
+	if !bytes.Equal(data, selfCallerBytes()) {
+		return errors.New("caller workflow does not match the exact owned same-repository self-caller")
+	}
+	return nil
+}
+
+// selfCallerBytes is the exact owned toolkit self-caller. Onboarding never
+// generates it — no adopter may have one — so it is a validation expectation
+// rather than a template in templates.go.
+func selfCallerBytes() []byte {
+	return []byte(`name: Hextap toolkit release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable release tag
+        required: true
+        type: string
+
+permissions:
+  attestations: write
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-go.yml
+    with:
+      manifest_path: .hextap.json
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}
+    secrets:
+      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+`)
 }
 
 func validateMainRuleset(data []byte) ([]string, error) {

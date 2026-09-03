@@ -141,6 +141,9 @@ func TestValidateRunsExactQuickAndFullGatesAndDetectsMutation(t *testing.T) {
 			statusCalls++
 			return Result{Stdout: " M feature.go\n"}, nil
 		}
+		if key == "git -C "+project+" ls-files -z --cached --others --exclude-standard" {
+			return fixtureListing("go.mod", ".hextap.json", "scripts/check-actionlint.sh", "scripts/hextap-build"), nil
+		}
 		if key == "gofmt -l ." {
 			return Result{}, nil
 		}
@@ -180,6 +183,9 @@ func TestValidateRunsExactQuickAndFullGatesAndDetectsMutation(t *testing.T) {
 		if commandKey(command) == "git -C "+project+" rev-parse --show-toplevel" {
 			return Result{Stdout: project + "\n"}, nil
 		}
+		if commandKey(command) == "git -C "+project+" ls-files -z --cached --others --exclude-standard" {
+			return fixtureListing("go.mod", ".hextap.json", "scripts/check-actionlint.sh", "scripts/hextap-build"), nil
+		}
 		if commandKey(command) == "git -C "+project+" status --porcelain=v1 --untracked-files=all" {
 			mutationCalls++
 			if mutationCalls == 1 {
@@ -213,6 +219,8 @@ func TestValidateDetectsByteMutationEvenWhenGitStatusShapeIsUnchanged(t *testing
 		switch key {
 		case "git -C " + project + " rev-parse --show-toplevel":
 			return Result{Stdout: project + "\n"}, nil
+		case "git -C " + project + " ls-files -z --cached --others --exclude-standard":
+			return fixtureListing("go.mod", ".hextap.json", "feature.go", "scripts/check-actionlint.sh"), nil
 		case "git -C " + project + " status --porcelain=v1 --untracked-files=all":
 			return Result{Stdout: "?? feature.go\n"}, nil
 		case "go vet ./...":
@@ -230,9 +238,23 @@ func TestValidateDetectsByteMutationEvenWhenGitStatusShapeIsUnchanged(t *testing
 	}
 }
 
+// fixtureListing renders the NUL-separated shape of `git ls-files -z` for a
+// scripted repository listing.
+func fixtureListing(relatives ...string) Result {
+	return Result{Stdout: strings.Join(relatives, "\x00") + "\x00"}
+}
+
 func createToolkitFixture(t *testing.T) string {
 	t.Helper()
 	project := t.TempDir()
+	writeToolkitFixture(t, project)
+	return project
+}
+
+// writeToolkitFixture populates an existing directory with the minimum a
+// project needs to be accepted as the toolkit itself.
+func writeToolkitFixture(t *testing.T, project string) {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte("module "+ToolkitModule+"\n\ngo 1.26\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +280,6 @@ func createToolkitFixture(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(project, ".hextap.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return project
 }
 
 func canonicalStatusRunner(t *testing.T, project string) *scriptedRunner {
