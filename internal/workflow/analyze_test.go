@@ -2269,6 +2269,195 @@ func TestCallerJobCarriesOnlyReusableCallKeys(t *testing.T) {
 	}
 }
 
+// TestSourceAliasesOnExternalReusableCallsAreAudited guards the review
+// finding that only inputs named ref and repository were audited on a
+// reusable workflow call: a pinned external callee handed source_ref: main
+// rebuilds the same tag from a moving branch while every reference stays
+// pinned.
+func TestSourceAliasesOnExternalReusableCallsAreAudited(t *testing.T) {
+	const pinned = "SijanC147/example/.github/workflows/build.yml@0123456789abcdef0123456789abcdef01234567"
+	workflow := func(uses, with string) string {
+		return `name: Publish
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  build:
+    uses: ` + uses + `
+    with:
+` + with
+	}
+	mutable := func(findings []Finding) int {
+		count := 0
+		for _, finding := range findings {
+			if finding.Rule == RuleMutableSourceRef {
+				count++
+			}
+		}
+		return count
+	}
+	for name, with := range map[string]string{
+		"a branch under an alias":        "      source_ref: main\n",
+		"a tag under an alias":           "      checkout-tag: v1.2.3\n",
+		"a camel-cased alias":            "      sourceRef: ${{ github.ref_name }}\n",
+		"an input named after a commit":  "      commit: ${{ inputs.commit }}\n",
+		"a job output without the trust": "      revision: ${{ needs.plan.outputs.sha }}\n",
+		"an all-capitals alias":          "      GIT_REF: main\n",
+		"a bare capitals alias":          "      SHA: main\n",
+		"a tag name":                     "      TAG_NAME: v1.0.0\n",
+	} {
+		t.Run("refused "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"publish.yml":     workflow(pinned, strings.ReplaceAll(with, "\\n", "\n")),
+			})
+			if got := mutable(report.PinFindings(Policy{})); got != 1 {
+				t.Fatalf("mutable-source-ref findings = %d, want 1: %v", got, report.PinFindings(Policy{}))
+			}
+		})
+	}
+	for name, with := range map[string]string{
+		"a full commit":                   "      source_ref: 0123456789abcdef0123456789abcdef01234567\n",
+		"the tagged commit":               "      source_sha: ${{ github.sha }}\n",
+		"an input that selects no source": "      artifact_name: ${{ github.ref_name }}\n",
+		"a word that merely contains one": "      shard: 3\n",
+		"a commit message":                "      commit_message: chore release\n",
+		"a checkout depth":                "      checkout_depth: 1\n",
+		"a source directory":              "      source_dir: ./src\n",
+		"a value that cannot be a ref":    "      source_ref: \"not a ref\"\n",
+	} {
+		t.Run("accepted "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"publish.yml":     workflow(pinned, strings.ReplaceAll(with, "\\n", "\n")),
+			})
+			if got := mutable(report.PinFindings(Policy{})); got != 0 {
+				t.Fatalf("mutable-source-ref findings = %d, want 0: %v", got, report.PinFindings(Policy{}))
+			}
+		})
+	}
+	// The Hextap reusable release workflow is the toolkit's own reviewed
+	// code and resolves the tag it is handed; the verified caller passes
+	// it an expression and stays clean.
+	caller := analyzeWorkflows(t, map[string]string{DefaultCallerFile: hextapCallerWorkflow})
+	if findings := preflightFindings(t, caller, Policy{}); len(findings) != 0 {
+		t.Fatalf("the verified caller's tag input was refused: %v", findings)
+	}
+	// A local callee audits its own checkout of the input, so the caller
+	// is not double-reported.
+	local := analyzeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"publish.yml":     workflow("./.github/workflows/build.yml", "      source_ref: main\n"),
+		"build.yml": `name: Build
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_ref }}
+`,
+	})
+	byFile := make(map[string]int)
+	for _, finding := range local.PinFindings(Policy{}) {
+		if finding.Rule == RuleMutableSourceRef {
+			byFile[finding.File]++
+		}
+	}
+	if byFile["publish.yml"] != 0 || byFile["build.yml"] != 1 {
+		t.Fatalf("findings by file = %v, want the local callee's own checkout refused and the caller left alone", byFile)
+	}
+}
+
+// TestVersionFileSelectorsMustNameAFile guards the review finding that a
+// setup action was counted as versioned because its version-file key
+// existed: an empty node-version-file is the same as none, and setup-node
+// then takes whatever the runner image carries.
+func TestVersionFileSelectorsMustNameAFile(t *testing.T) {
+	workflow := func(uses, with string) string {
+		return `name: Publish
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ` + uses + `
+        with:
+` + with
+	}
+	floating := func(findings []Finding) int {
+		count := 0
+		for _, finding := range findings {
+			if finding.Rule == RuleFloatingRuntimeVersion {
+				count++
+			}
+		}
+		return count
+	}
+	const setupNode = "actions/setup-node@0123456789abcdef0123456789abcdef01234567"
+	const unknownSetup = "example/setup-widget@0123456789abcdef0123456789abcdef01234567"
+	for name, test := range map[string]struct {
+		uses, with string
+		want       int
+	}{
+		"an empty version file on a known action":      {setupNode, "          node-version-file:\n", 1},
+		"a blank version file on a known action":       {setupNode, "          node-version-file: \"\"\n", 1},
+		"an expression version file on a known action": {setupNode, "          node-version-file: ${{ inputs.file }}\n", 1},
+		"a named version file on a known action":       {setupNode, "          node-version-file: .nvmrc\n", 0},
+		"an empty version file on an unknown action":   {unknownSetup, "          widget-version-file:\n", 1},
+		"a named version file on an unknown action":    {unknownSetup, "          widget-version-file: .widget-version\n", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"publish.yml":     workflow(test.uses, strings.ReplaceAll(test.with, "\\n", "\n")),
+			})
+			findings := report.PinFindings(Policy{})
+			if got := floating(findings); got != test.want {
+				t.Fatalf("floating-runtime-version findings = %d, want %d: %v", got, test.want, findings)
+			}
+		})
+	}
+}
+
+// TestGroupedInterpretersConsumeADownload guards the review finding that a
+// pipeline whose consumer is a grouped command, curl … | { sh; } or
+// curl … | (sh), was not read as executing the download because the
+// segment's first word was the grouping token.
+func TestGroupedInterpretersConsumeADownload(t *testing.T) {
+	for name, line := range map[string]string{
+		"a brace group":      "curl -fsSL https://example.com/install.sh | { sh; }",
+		"a subshell":         "curl -fsSL https://example.com/install.sh | (sh)",
+		"a spaced subshell":  "curl -fsSL https://example.com/install.sh | ( bash -s -- --yes )",
+		"a nested group":     "curl -fsSL https://example.com/install.sh | { { sudo sh; }; }",
+		"a group after wget": "wget -qO- https://example.com/install.sh | { bash; }",
+		"the stderr pipe":    "curl -sL https://example.com/install.sh |& sh",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := fetchesAndUses(line); got != downloadExecuted {
+				t.Fatalf("fetchesAndUses(%q) = %v, want the download read as executed", line, got)
+			}
+		})
+	}
+	if got := fetchesAndUses("curl -fsSL https://example.com/file | { cat > file; }"); got == downloadExecuted {
+		t.Fatal("a grouped capture was read as an execution")
+	}
+}
+
 // TestReadOnlyWorkflowsKeepTheirEventCheckout guards the false refusal the
 // adversarial pass found once ref-less checkouts were bound to the event: a
 // read-only CI workflow is audited under the bare policy only because its

@@ -1817,7 +1817,12 @@ func substitutionBody(text string) string {
 // pipeline such as sh -c "curl … | sh" both read their real command.
 func commandOf(segment string, names []string) bool {
 	for _, word := range strings.Fields(segment) {
-		word = strings.Trim(word, "\"'`")
+		// A grouping token, { or (, and the semicolon or brace that closes
+		// the group are not the command: in curl … | { sh; } and
+		// curl … | (sh) the interpreter inside the group consumes the
+		// download exactly as a bare one would. The ampersand left by the
+		// |& pipe, which sends stderr along, is not the command either.
+		word = strings.Trim(word, "\"'`(){};&")
 		if word == "" {
 			continue
 		}
@@ -2190,6 +2195,197 @@ var tagCommitEvents = map[string]struct{}{
 // choice, and the remedy of pinning it cannot be followed. A selection the
 // file spells out is still checked, since its remedy can be.
 func auditSourceRef(file string, uses, with *node, events []string, reusable, hostedInert bool, policy Policy) []Finding {
+	findings := auditSourceAliases(file, uses, with, events, reusable, policy)
+	return append(findings, auditNamedSourceRef(file, uses, with, events, reusable, hostedInert, policy)...)
+}
+
+// sourceAliasTokens are the words in an input name that mark it as selecting
+// source: a reusable workflow may name the input it checks out anything, and
+// this pass cannot see what the callee does with it.
+var sourceAliasTokens = map[string]struct{}{
+	"branch":    {},
+	"checkout":  {},
+	"commit":    {},
+	"commitish": {},
+	"ref":       {},
+	"refs":      {},
+	"rev":       {},
+	"revision":  {},
+	"sha":       {},
+	"source":    {},
+	"tag":       {},
+}
+
+// nonSourceTokens are the words that mark an input as carrying something
+// other than a source selector even beside a source word: a commit message,
+// a checkout depth, a source directory. Such an input has no commit to be
+// set to, so refusing it would name a remedy that cannot be followed.
+var nonSourceTokens = map[string]struct{}{
+	"author":    {},
+	"body":      {},
+	"count":     {},
+	"date":      {},
+	"depth":     {},
+	"dir":       {},
+	"directory": {},
+	"email":     {},
+	"file":      {},
+	"files":     {},
+	"folder":    {},
+	"format":    {},
+	"message":   {},
+	"msg":       {},
+	"num":       {},
+	"number":    {},
+	"path":      {},
+	"paths":     {},
+	"pattern":   {},
+	"prefix":    {},
+	"suffix":    {},
+	"template":  {},
+	"time":      {},
+	"title":     {},
+	"url":       {},
+}
+
+// isSourceAlias reports whether an input name carries a source-selecting
+// word and no word that marks it as something else, read as whole words
+// after splitting on hyphens, underscores and camel-case boundaries:
+// source_ref, sourceRef, SourceRef, GIT_REF, checkout-branch, tag. A
+// capital splits a word only after a lower-case letter or a digit, so a run
+// of capitals stays one word rather than shredding into letters.
+func isSourceAlias(key string) bool {
+	var words []string
+	var current strings.Builder
+	flush := func() {
+		if current.Len() > 0 {
+			words = append(words, current.String())
+			current.Reset()
+		}
+	}
+	var previous rune
+	for _, r := range key {
+		switch {
+		case r == '-' || r == '_' || r == '.' || r == ' ':
+			flush()
+		case r >= 'A' && r <= 'Z':
+			if (previous >= 'a' && previous <= 'z') || (previous >= '0' && previous <= '9') {
+				flush()
+			}
+			current.WriteRune(r - 'A' + 'a')
+		default:
+			current.WriteRune(r)
+		}
+		previous = r
+	}
+	flush()
+	source := false
+	for _, word := range words {
+		if _, ok := nonSourceTokens[word]; ok {
+			return false
+		}
+		if _, ok := sourceAliasTokens[word]; ok {
+			source = true
+		}
+	}
+	return source
+}
+
+// canBeRefName reports whether a literal could name a Git ref at all. A
+// value with whitespace, a character Git refuses in a ref name, or a leading
+// or trailing dot or slash is prose, a path or a number, and an input holding
+// one selects no source whatever its name says.
+func canBeRefName(text string) bool {
+	if text == "" || text == "@" || strings.ContainsAny(text, " \t\r\n~^:?*[\\") || strings.Contains(text, "..") || strings.Contains(text, "@{") {
+		return false
+	}
+	if strings.HasPrefix(text, "/") || strings.HasPrefix(text, ".") || strings.HasSuffix(text, "/") || strings.HasSuffix(text, ".") || strings.HasSuffix(text, ".lock") {
+		return false
+	}
+	return true
+}
+
+// auditSourceAliases requires every source-like input passed to a reusable
+// workflow outside this directory to select an immutable commit. The callee
+// is pinned, but what it checks out is whatever the caller hands it, and the
+// input can be named anything: a caller passing source_ref: main to a pinned
+// callee rebuilds the same tag from a moving branch while every reference
+// stays pinned. ref: and repository: are audited by auditNamedSourceRef. A
+// local callee is exempt, because this pass audits the callee's own checkout
+// of the input; the Hextap reusable release workflow is exempt because it is
+// the toolkit's own reviewed code, which resolves and verifies the tag it is
+// handed.
+func auditSourceAliases(file string, uses, with *node, events []string, reusable bool, policy Policy) []Finding {
+	if !reusable || with == nil || with.kind != nodeMapping || uses == nil || uses.kind != nodeScalar || uses.style == scalarBlock {
+		return nil
+	}
+	reference := strings.TrimSpace(uses.value)
+	if strings.HasPrefix(reference, "./") || isExternalHextapReference(reference) {
+		return nil
+	}
+	var findings []Finding
+	for _, key := range with.keys {
+		normalised := normaliseInputName(key)
+		if normalised == "ref" || normalised == "repository" || !isSourceAlias(key) {
+			continue
+		}
+		value := with.values[key]
+		if value != nil && value.kind == nodeScalar && value.style != scalarBlock && !strings.Contains(value.value, "${{") && !canBeRefName(strings.TrimSpace(value.value)) {
+			// A literal that could not be a ref name selects no source.
+			continue
+		}
+		if detail := mutableSourceDetail("source input "+key, value, events, policy); detail != "" {
+			findings = append(findings, Finding{
+				File:   file,
+				Rule:   RuleMutableSourceRef,
+				Detail: detail + "; what the reusable workflow does with the input is not visible here",
+				Remedy: fmt.Sprintf("set %s to a full 40-character commit SHA, or to an expression naming the tagged commit under this workflow's events", key),
+			})
+		}
+	}
+	return findings
+}
+
+// mutableSourceDetail classifies one source-selecting value and returns why
+// it is mutable, or the empty string when it names an immutable commit: a
+// full SHA, a trusted job output, or an event-bound expression whose event
+// set proves the commit. label names the input in the detail.
+func mutableSourceDetail(label string, value *node, events []string, policy Policy) string {
+	if value == nil || value.kind != nodeScalar || value.style == scalarBlock {
+		return fmt.Sprintf("the %s is not a readable literal", label)
+	}
+	text := strings.TrimSpace(value.value)
+	switch {
+	case isHexadecimal(text, 40):
+		return ""
+	case isStepOutputExpression(text):
+		if policy.TrustJobOutputs {
+			return ""
+		}
+		return fmt.Sprintf("the %s %q is the output of an earlier job or step, which this audit cannot see; it is accepted only under a policy that trusts job outputs", label, text)
+	case isExpression(text, "github.sha"):
+		if allTagCommitEvents(events) {
+			return ""
+		}
+		return fmt.Sprintf("the %s %q names the tagged commit only under a push, create or release event, and this workflow declares %s", label, text, describeEvents(events))
+	case isExpression(text, "job.workflow_sha"):
+		if allWorkflowShaEvents(events) {
+			return ""
+		}
+		return fmt.Sprintf("the %s %q names this workflow file's commit, which under %s is not the tagged one", label, text, describeEvents(events))
+	case isExpression(text, "github.event.workflow_run.head_sha"):
+		if len(events) == 1 && events[0] == "workflow_run" {
+			return ""
+		}
+		return fmt.Sprintf("the %s %q is the upstream run's commit only when workflow_run is the sole event, and this workflow declares %s", label, text, describeEvents(events))
+	}
+	return fmt.Sprintf("the %s %q is not an immutable commit, so rerunning the same release tag can build different source", label, text)
+}
+
+// auditNamedSourceRef audits the ref: and repository: inputs of a step or a
+// reusable workflow call, and the checkout a source-fetching step makes when
+// it names no ref: at all.
+func auditNamedSourceRef(file string, uses, with *node, events []string, reusable, hostedInert bool, policy Policy) []Finding {
 	if with != nil && with.kind != nodeMapping {
 		// An unreadable with: block is reported by auditRuntimeVersions.
 		return nil
@@ -2231,32 +2427,10 @@ func auditSourceRef(file string, uses, with *node, events []string, reusable, ho
 	if ref.kind != nodeScalar || ref.style == scalarBlock {
 		return mutable("a ref: input is not a readable literal")
 	}
-	text := strings.TrimSpace(ref.value)
-	switch {
-	case isHexadecimal(text, 40):
-		return nil
-	case isStepOutputExpression(text):
-		if policy.TrustJobOutputs {
-			return nil
-		}
-		return mutable(fmt.Sprintf("the ref %q is the output of an earlier job or step, which this audit cannot see; it is accepted only under a policy that trusts job outputs", text))
-	case isExpression(text, "github.sha"):
-		if allTagCommitEvents(events) {
-			return nil
-		}
-		return mutable(fmt.Sprintf("the ref %q names the tagged commit only under a push, create or release event, and this workflow declares %s", text, describeEvents(events)))
-	case isExpression(text, "job.workflow_sha"):
-		if allWorkflowShaEvents(events) {
-			return nil
-		}
-		return mutable(fmt.Sprintf("the ref %q names this workflow file's commit, which under %s is not the tagged one", text, describeEvents(events)))
-	case isExpression(text, "github.event.workflow_run.head_sha"):
-		if len(events) == 1 && events[0] == "workflow_run" {
-			return nil
-		}
-		return mutable(fmt.Sprintf("the ref %q is the upstream run's commit only when workflow_run is the sole event, and this workflow declares %s", text, describeEvents(events)))
+	if detail := mutableSourceDetail("ref", ref, events, policy); detail != "" {
+		return mutable(detail)
 	}
-	return mutable(fmt.Sprintf("the ref %q is not an immutable commit, so rerunning the same release tag can build different source", text))
+	return nil
 }
 
 // allTagCommitEvents reports whether every declared event is one under which
@@ -2403,12 +2577,18 @@ func auditRuntimeSetup(file string, uses, with *node, policy Policy) []Finding {
 			switch {
 			case known && containsString(selectors, normalised):
 				stated = true
-				if !isRuntimeSelector(key) && !isRuntimeFileSelector(key) {
+				switch {
+				case isRuntimeFileSelector(key):
+					findings = append(findings, auditRuntimeFileValue(file, key, with.values[key])...)
+				case !isRuntimeSelector(key):
 					// A selector isRuntimeSelector does not recognise by
 					// shape, such as cosign-release, is checked here.
 					findings = append(findings, auditRuntimeValue(file, key, with.values[key], policy)...)
 				}
-			case !known && (isRuntimeSelector(key) || isRuntimeFileSelector(key)):
+			case !known && isRuntimeFileSelector(key):
+				stated = true
+				findings = append(findings, auditRuntimeFileValue(file, key, with.values[key])...)
+			case !known && isRuntimeSelector(key):
 				stated = true
 			}
 		}
@@ -2492,6 +2672,34 @@ func isRuntimeFileSelector(key string) bool {
 	normalised := strings.ReplaceAll(strings.ToLower(key), "_", "-")
 	return normalised == "version-file" || normalised == "global-json-file" || normalised == "package-json-file" ||
 		strings.HasSuffix(normalised, "-version-file")
+}
+
+// auditRuntimeFileValue checks that a version-file selector names a file: a
+// readable literal path, non-empty and not an expression. The key's presence
+// alone states nothing, since a setup action given an empty path behaves as
+// if the selector were omitted and falls back to whatever the runner image
+// carries, and a path chosen by an expression cannot be established here.
+// The file itself is not read (SB23-841).
+func auditRuntimeFileValue(file, key string, value *node) []Finding {
+	floating := func(detail string) []Finding {
+		return []Finding{{
+			File:   file,
+			Rule:   RuleFloatingRuntimeVersion,
+			Detail: detail,
+			Remedy: fmt.Sprintf("set %s to the path of a version file in the tagged source", key),
+		}}
+	}
+	if value == nil || value.kind != nodeScalar || value.style == scalarBlock {
+		return floating(fmt.Sprintf("the version file input %q is not a readable literal path", key))
+	}
+	text := strings.TrimSpace(value.value)
+	if text == "" {
+		return floating(fmt.Sprintf("the version file input %q is empty, which the setup action treats as no selector at all, so it installs whatever the runner image defaults to", key))
+	}
+	if strings.Contains(text, "${{") {
+		return floating(fmt.Sprintf("the version file input %q resolves through the expression %q, so the file it names is not fixed by the tagged workflow source", key, text))
+	}
+	return nil
 }
 
 func unreadableForAudit(file, detail string) Finding {
