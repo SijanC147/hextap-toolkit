@@ -90,8 +90,9 @@ func snapshotProjectFiles(ctx context.Context, runner Runner, project string) (s
 		return "", err
 	}
 	hash := sha256.New()
+	linkedDirectories := make(map[string]bool)
 	for _, relative := range paths {
-		if err := hashProjectFile(hash, project, relative); err != nil {
+		if err := hashProjectFile(hash, project, relative, linkedDirectories); err != nil {
 			return "", fmt.Errorf("snapshot toolkit files: %w", err)
 		}
 	}
@@ -127,17 +128,34 @@ func snapshotPaths(ctx context.Context, runner Runner, project string) ([]string
 // missing rather than failing, so a deletion during validation is reported as
 // the working-tree mutation it is instead of an unrelated I/O error.
 //
+// A path beneath a symbolic link is recorded as missing too. When a tracked
+// directory has been replaced by a link, Git lists both the link and the index
+// entries beneath it, but it never reads through the link: `git status` reports
+// those entries as deleted. Reading through it here would hash content outside
+// the working tree that neither `git status --porcelain` nor CI's
+// `git diff --exit-code` can see, so a change to that content would fail
+// validation that Git itself would pass. The link is still listed on its own
+// and hashed by its target, so retargeting it remains a detected mutation.
+//
 // Directories Git reports as a single opaque entry are refused rather than
 // hashed. See opaqueDirectoryError.
-func hashProjectFile(hash io.Writer, project, relative string) error {
-	path := filepath.Join(project, filepath.FromSlash(relative))
+func hashProjectFile(hash io.Writer, project, relative string, linkedDirectories map[string]bool) error {
 	if strings.HasSuffix(relative, "/") {
 		return opaqueDirectoryError(relative)
 	}
+	beneathLink, err := hasSymlinkLeadingPath(project, relative, linkedDirectories)
+	if err != nil {
+		return err
+	}
+	if beneathLink {
+		recordMissing(hash, relative)
+		return nil
+	}
+	path := filepath.Join(project, filepath.FromSlash(relative))
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Fprintf(hash, "%d:%s:missing\n", len(relative), relative)
+			recordMissing(hash, relative)
 			return nil
 		}
 		return fmt.Errorf("inspect %q: %w", path, err)
@@ -168,6 +186,44 @@ func hashProjectFile(hash io.Writer, project, relative string) error {
 		fmt.Fprintf(hash, "%d:%s\n", len(target), target)
 	}
 	return nil
+}
+
+// recordMissing folds a listed path that has no file behind it into the
+// snapshot, so that the path's presence in Git's listing still counts while its
+// absence on disk is what gets hashed.
+func recordMissing(hash io.Writer, relative string) {
+	fmt.Fprintf(hash, "%d:%s:missing\n", len(relative), relative)
+}
+
+// hasSymlinkLeadingPath reports whether any directory component of relative is
+// a symbolic link, mirroring the check Git applies to index entries. The answer
+// is cached per directory in linkedDirectories, so a directory is inspected
+// once rather than once for every path beneath it. Inspection stops at the
+// first link found, because inspecting anything beneath it would itself read
+// through the link.
+func hasSymlinkLeadingPath(project, relative string, linkedDirectories map[string]bool) (bool, error) {
+	components := strings.Split(relative, "/")
+	for depth := 1; depth < len(components); depth++ {
+		directory := strings.Join(components[:depth], "/")
+		linked, known := linkedDirectories[directory]
+		if !known {
+			path := filepath.Join(project, filepath.FromSlash(directory))
+			info, err := os.Lstat(path)
+			switch {
+			case err == nil:
+				linked = info.Mode()&os.ModeSymlink != 0
+			case os.IsNotExist(err):
+				linked = false
+			default:
+				return false, fmt.Errorf("inspect %q: %w", path, err)
+			}
+			linkedDirectories[directory] = linked
+		}
+		if linked {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // opaqueDirectoryError refuses a checkout containing a directory Git reports as
