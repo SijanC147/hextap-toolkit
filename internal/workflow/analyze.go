@@ -537,33 +537,51 @@ func hostedRunner(runsOn *node) bool {
 	return false
 }
 
-// isHostedLabel reports whether a label names a GitHub-hosted image: an OS
-// family followed by latest or a version of digits and dots, optionally with
-// a size or architecture suffix after a hyphen (ubuntu-latest, windows-2025,
-// macos-15, ubuntu-22.04, ubuntu-latest-8-cores). Runner labels are
-// free-form and naming a self-hosted runner after its OS is the obvious
-// convention, so ubuntu-custom or macos-onprem is not proven hosted.
+// hostedLabels are the labels GitHub assigns to its hosted runner images,
+// as of 2026-09, deprecated ones included while they still resolve. The list
+// needs revising as GitHub adds and retires images; a label missing from it
+// only widens the audit, never certifies. Runner labels are otherwise
+// free-form: a self-hosted runner can be named ubuntu-custom or
+// ubuntu-123-onprem, and a larger runner carries an organisation-chosen
+// name, so only an exact match on this list proves a job runs on an
+// ephemeral hosted image, and every other label is audited.
+var hostedLabels = map[string]struct{}{
+	"macos-12":            {},
+	"macos-12-large":      {},
+	"macos-13":            {},
+	"macos-13-large":      {},
+	"macos-13-xlarge":     {},
+	"macos-14":            {},
+	"macos-14-large":      {},
+	"macos-14-xlarge":     {},
+	"macos-15":            {},
+	"macos-15-intel":      {},
+	"macos-15-large":      {},
+	"macos-15-xlarge":     {},
+	"macos-latest":        {},
+	"macos-latest-large":  {},
+	"macos-latest-xlarge": {},
+	"macos-26":            {},
+	"ubuntu-20.04":        {},
+	"ubuntu-22.04":        {},
+	"ubuntu-22.04-arm":    {},
+	"ubuntu-24.04":        {},
+	"ubuntu-24.04-arm":    {},
+	"ubuntu-26.04":        {},
+	"ubuntu-latest":       {},
+	"ubuntu-latest-arm":   {},
+	"windows-11-arm":      {},
+	"windows-2019":        {},
+	"windows-2022":        {},
+	"windows-2025":        {},
+	"windows-latest":      {},
+}
+
+// isHostedLabel reports whether a label is one GitHub assigns to a hosted
+// image, compared exactly after case folding.
 func isHostedLabel(label string) bool {
-	lowered := strings.ToLower(strings.TrimSpace(label))
-	if strings.Contains(lowered, "${{") || !isHostName(lowered) {
-		return false
-	}
-	for _, family := range []string{"ubuntu-", "windows-", "macos-"} {
-		if !strings.HasPrefix(lowered, family) {
-			continue
-		}
-		image := lowered[len(family):]
-		if index := strings.Index(image, "-"); index >= 0 {
-			image = image[:index]
-		}
-		if image == "latest" {
-			return true
-		}
-		if image != "" && strings.Trim(image, "0123456789.") == "" {
-			return true
-		}
-	}
-	return false
+	_, hosted := hostedLabels[strings.ToLower(strings.TrimSpace(label))]
+	return hosted
 }
 
 // releaseScopes are the GITHUB_TOKEN scopes through which a workflow can reach
@@ -977,7 +995,38 @@ func isVerifiedCaller(workflow Workflow, policy Policy) bool {
 	if !workflow.HextapCaller && !(policy.SelfRelease && workflow.SelfCaller) {
 		return false
 	}
-	return workflow.TagTrigger == TagTriggerFiltered || workflow.TagTrigger == TagTriggerAny
+	switch workflow.TagTrigger {
+	case TagTriggerAny:
+		return true
+	case TagTriggerFiltered:
+		return canMatchReleaseTag(workflow.TagPatterns)
+	}
+	return false
+}
+
+// canMatchReleaseTag reports whether a tag filter list has at least one
+// positive pattern that could match a Hextap release tag. Such a tag is
+// always v-prefixed, lowercase: the release contract refuses any other form
+// in internal/release/metadata.go before a release begins. Without
+// evaluating GitHub's glob grammar, which would risk under-reporting, the one
+// thing that can be read off a pattern is its first character: a pattern
+// beginning with any literal other than v can match no release tag, so a
+// caller filtering on docs-* or V* owns no release tag, and refs/tags/v*
+// matches nothing either because GitHub matches the tag name, not the full
+// ref; v*, \v*, **, ?* and [vV]* all may. A filter that passes here is not
+// thereby shown to match the tag being released; the run itself shows that
+// once the preflight executes inside it.
+func canMatchReleaseTag(patterns []string) bool {
+	for _, pattern := range patterns {
+		if pattern == "" || strings.HasPrefix(pattern, "!") {
+			continue
+		}
+		switch pattern[0] {
+		case 'v', '*', '?', '[', '\\':
+			return true
+		}
+	}
+	return false
 }
 
 // TagExclusivityFindings reports every active workflow, other than the verified
@@ -988,6 +1037,17 @@ func isVerifiedCaller(workflow Workflow, policy Policy) bool {
 // The policy names the caller file and states whether the relative self-call
 // form is acceptable.
 func (report *Report) TagExclusivityFindings(policy Policy) []Finding {
+	return report.tagExclusivityFindings(policy, true)
+}
+
+// tagExclusivityFindings is TagExclusivityFindings with a switch for the
+// workflows whose classification came only through a workflow_run chain.
+// GitHub runs a workflow_run workflow from the default branch's definition,
+// so when the default branch is read separately those findings come from
+// its report and the tagged copies, which may since have changed or gone,
+// are not reported twice; alone, a tree is its own default branch and its
+// chained workflows count.
+func (report *Report) tagExclusivityFindings(policy Policy, includeChained bool) []Finding {
 	callerFile := resolveCallerFile(policy.CallerFile)
 
 	var findings []Finding
@@ -996,6 +1056,16 @@ func (report *Report) TagExclusivityFindings(policy Policy) []Finding {
 			continue
 		}
 		if isVerifiedCaller(workflow, policy) {
+			continue
+		}
+		if !includeChained && runsOnlyFromTheDefaultBranch(workflow) {
+			continue
+		}
+		callsHextap := workflow.HextapCaller || (policy.SelfRelease && workflow.SelfCaller)
+		if workflow.File == callerFile && callsHextap && workflow.TagTrigger == TagTriggerFiltered {
+			// A genuine caller whose tag filter cannot match a release tag
+			// does not compete for one either; the preflight reports it as
+			// a missing owner, which is the finding that names the fix.
 			continue
 		}
 		if workflow.TagTrigger == TagTriggerUnknown {
@@ -1036,9 +1106,30 @@ func (report *Report) TagExclusivityFindings(policy Policy) []Finding {
 // Policy.TrustJobOutputs, the output of a job or step in the same file is
 // accepted, not proven pinned, and the audit says so.
 func (report *Report) PinFindings(policy Policy) []Finding {
+	return report.pinFindings(policy, true)
+}
+
+// pinFindings is PinFindings with the same chained-workflow switch as
+// tagExclusivityFindings: a tagged copy that runs only through a
+// workflow_run chain runs from the default branch's definition, which is
+// audited from that branch's report when it is read separately.
+
+// runsOnlyFromTheDefaultBranch reports whether a tagged workflow's only route
+// to running is a workflow_run chain, so that GitHub would read the default
+// branch's copy rather than this one. A workflow that also declares
+// workflow_call is excluded: a local uses: reference resolves inside the
+// tagged commit, so the tagged copy of a callee runs for this tag whatever
+// chain trigger it carries besides.
+func runsOnlyFromTheDefaultBranch(workflow Workflow) bool {
+	return workflow.chained && !workflow.ownTrigger.RespondsToTagPush() && !declaresEvent(workflow.Events, "workflow_call")
+}
+func (report *Report) pinFindings(policy Policy, includeChained bool) []Finding {
 	var findings []Finding
 	for _, workflow := range report.Workflows {
 		if !workflow.Active || !workflow.ReleaseCapable || workflow.document == nil {
+			continue
+		}
+		if !includeChained && runsOnlyFromTheDefaultBranch(workflow) {
 			continue
 		}
 		findings = append(findings, report.auditPins(workflow, policy)...)
@@ -1098,7 +1189,7 @@ func Preflight(directory string, policy Policy) ([]Finding, error) {
 func preflight(tagged, defaultBranch *Report, policy Policy) []Finding {
 	callerFile := resolveCallerFile(policy.CallerFile)
 
-	findings := tagged.TagExclusivityFindings(policy)
+	findings := tagged.tagExclusivityFindings(policy, defaultBranch == tagged)
 	if detail, verified := tagged.callerVerification(policy); !verified {
 		findings = append(findings, Finding{
 			File:   callerFile,
@@ -1107,7 +1198,7 @@ func preflight(tagged, defaultBranch *Report, policy Policy) []Finding {
 			Remedy: "restore the Hextap caller workflow generated by onboarding, including its push tag trigger, before publishing from this source",
 		})
 	}
-	findings = append(findings, tagged.PinFindings(policy)...)
+	findings = append(findings, tagged.pinFindings(policy, defaultBranch == tagged)...)
 	if defaultBranch != tagged {
 		findings = append(findings, defaultBranchFindings(tagged, defaultBranch, policy, findings)...)
 	}
@@ -1274,6 +1365,9 @@ func (report *Report) callerVerification(policy Policy) (string, bool) {
 		case workflow.TagTrigger == TagTriggerUnknown:
 			return fmt.Sprintf("%s calls %s but its trigger could not be read (%s), so it cannot be shown to own the pushed tag",
 				callerFile, hextapReusableWorkflow, workflow.TriggerReason), false
+		case workflow.TagTrigger == TagTriggerFiltered:
+			return fmt.Sprintf("%s calls %s but filters tags on %s, none of which can match a v-prefixed release tag (GitHub matches the tag name, so a refs/tags/ prefix matches nothing), so no recognised workflow owns the pushed tag",
+				callerFile, hextapReusableWorkflow, strings.Join(quoteAll(workflow.TagPatterns), ", ")), false
 		default:
 			return fmt.Sprintf("%s calls %s but never starts on a tag push (%s), so no recognised workflow owns the pushed tag",
 				callerFile, hextapReusableWorkflow, workflow.TriggerReason), false
@@ -1392,6 +1486,7 @@ func (report *Report) auditPins(workflow Workflow, policy Policy) []Finding {
 				findings = append(findings, auditRuntimeSetup(file, step.child("uses"), step.child("with"), policy)...)
 				findings = append(findings, auditRemoteContexts(file, step.child("uses"), step.child("with"), policy)...)
 				findings = append(findings, auditSourceRef(file, step.child("uses"), step.child("with"), events, false, policy)...)
+				findings = append(findings, auditArtifactSelectors(file, step.child("uses"), step.child("with"), events, policy)...)
 			}
 			if step.has("run") {
 				findings = append(findings, auditRunStep(file, step.child("run"))...)
@@ -1655,6 +1750,83 @@ func containsCommand(text string, names []string) bool {
 		}
 	}
 	return false
+}
+
+// artifactSelectors lists, for the actions that download workflow artifacts,
+// the inputs that select which run the artifacts come from. An artifact from
+// another run is release content chosen outside the tagged source.
+var artifactSelectors = map[string][]string{
+	"actions/download-artifact":        {"run-id", "artifact-ids"},
+	"dawidd6/action-download-artifact": {"run-id", "commit", "branch", "pr", "repo"},
+}
+
+// auditArtifactSelectors requires an artifact download that selects a run to
+// select it immutably: a literal run or artifact id, the current run
+// (github.run_id), the upstream run under workflow_run as the sole event
+// (github.event.workflow_run.id), a full commit SHA for a commit selector, or
+// a trusted job output. A branch selector, a variable, an input or any other
+// expression chooses artifacts by whatever the reference holds when the job
+// runs, so a rerun of the same tag can publish artifacts from a different
+// run while every action stays pinned.
+func auditArtifactSelectors(file string, uses, with *node, events []string, policy Policy) []Finding {
+	if uses == nil || uses.kind != nodeScalar || uses.style == scalarBlock || with == nil || with.kind != nodeMapping {
+		return nil
+	}
+	action := strings.ToLower(strings.TrimSpace(uses.value))
+	if at := strings.LastIndex(action, "@"); at >= 0 {
+		action = action[:at]
+	}
+	selectors, known := artifactSelectors[action]
+	if !known {
+		return nil
+	}
+	mutable := func(key, detail string) []Finding {
+		return []Finding{{
+			File:   file,
+			Rule:   RuleMutableSourceRef,
+			Detail: fmt.Sprintf("the artifact selector %q %s", key, detail),
+			Remedy: "select artifacts from the current run, from a literal run or artifact id, or from an output of a job or step in this workflow",
+		}}
+	}
+	var findings []Finding
+	for _, key := range with.keys {
+		normalised := normaliseInputName(key)
+		if !containsString(selectors, normalised) {
+			continue
+		}
+		value := with.values[key]
+		if value == nil || value.kind != nodeScalar || value.style == scalarBlock {
+			findings = append(findings, mutable(key, "is not a readable literal")...)
+			continue
+		}
+		text := strings.TrimSpace(value.value)
+		switch {
+		case normalised == "branch", normalised == "pr", normalised == "repo":
+			findings = append(findings, mutable(key, "selects a run by a branch, a pull request or another repository, which holds a different run whenever it moves")...)
+		case normalised == "commit" && isHexadecimal(text, 40):
+		case normalised != "commit" && isDigitList(text):
+		case isExpression(text, "github.run_id"):
+		case isExpression(text, "github.event.workflow_run.id") && len(events) == 1 && events[0] == "workflow_run":
+		case isStepOutputExpression(text) && policy.TrustJobOutputs:
+		default:
+			findings = append(findings, mutable(key, fmt.Sprintf("is %q, which is not an immutable run, artifact or commit identifier", text))...)
+		}
+	}
+	return findings
+}
+
+// isDigitList reports whether text is one or more comma-separated decimal
+// numbers, the shape of a literal run id or artifact id list.
+func isDigitList(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, part := range strings.Split(text, ",") {
+		if !isDigits(strings.TrimSpace(part)) {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchesSource reports whether a readable uses: value names an action that

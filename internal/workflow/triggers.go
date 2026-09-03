@@ -209,7 +209,13 @@ func classifyEvent(event string, filters *node) (TagTrigger, []string, []string,
 	case "create":
 		// GitHub fires create for a new branch or a new tag, and the event
 		// accepts no ref filters at all. Pushing a tag therefore always starts
-		// the workflow.
+		// the workflow. A create carrying a filter block is a configuration
+		// GitHub rejects, so it is unreadable rather than either answer: a
+		// competitor written that way still fails safe, and a caller written
+		// that way starts no release job and must not verify.
+		if !filters.isEmpty() {
+			return TagTriggerUnknown, nil, nil, fmt.Sprintf("line %d configures create with a filter block, which GitHub rejects", filters.line)
+		}
 		return TagTriggerAny, nil, nil, "create fires on every new tag and cannot be filtered"
 	case "workflow_run":
 		return classifyWorkflowRun(filters)

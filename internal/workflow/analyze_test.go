@@ -1710,6 +1710,28 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 `,
+		"a self-hosted runner with a numeric-looking label": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-123-onprem
+    steps:
+      - uses: actions/checkout@v5
+`,
+		"an organisation-named larger runner": `name: Manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest-8-cores
+    steps:
+      - uses: actions/checkout@v5
+`,
 		"a literal app private key": `name: Manual
 on:
   workflow_dispatch:
@@ -2016,7 +2038,7 @@ permissions:
   contents: read
 jobs:
   big:
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
   old:
@@ -2248,6 +2270,36 @@ jobs:
 		}
 		if !missing {
 			t.Fatalf("findings = %v, want the conditional job named as the reason no caller is verified", findings)
+		}
+	})
+
+	t.Run("caller filtering on a namespace that cannot hold a release tag", func(t *testing.T) {
+		docs := caller("  push:\n    tags:\n      - \"docs-*\"\n")
+		report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: docs})
+		findings := preflightFindings(t, report, Policy{})
+		if len(findings) != 1 || findings[0].Rule != RuleMissingHextapCaller || !strings.Contains(findings[0].Detail, "v-prefixed") {
+			t.Fatalf("findings = %v, want the caller refused for a filter that cannot match a release tag", findings)
+		}
+		// The last entry is a YAML double-quoted backslash, which reaches the
+		// reader as an escaped literal v.
+		for _, pattern := range []string{"v*", "**", "?*", "[vV]*", "v[0-9]+.[0-9]+.[0-9]+", "\\\\v*"} {
+			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: caller("  push:\n    tags:\n      - \"" + pattern + "\"\n")})
+			if findings := preflightFindings(t, report, Policy{}); len(findings) != 0 {
+				t.Fatalf("pattern %q: findings = %v, want the caller verified", pattern, findings)
+			}
+		}
+	})
+
+	t.Run("caller declaring create with a filter block", func(t *testing.T) {
+		report := analyzeWorkflows(t, map[string]string{
+			DefaultCallerFile: caller("  create:\n    branches:\n      - main\n"),
+		})
+		if findings := report.TagExclusivityFindings(Policy{}); len(findings) != 1 || findings[0].Rule != RuleUnreadableWorkflow {
+			t.Fatalf("findings = %v, want a create with a filter block refused as unreadable", findings)
+		}
+		findings := preflightFindings(t, report, Policy{})
+		if len(findings) != 2 || findings[1].Rule != RuleMissingHextapCaller {
+			t.Fatalf("findings = %v, want no verified caller", findings)
 		}
 	})
 
@@ -2505,6 +2557,71 @@ jobs:
 	}
 	if _, err := report.PreflightFindings(Policy{DefaultBranchDirectory: tagged}); err != nil {
 		t.Fatalf("a policy naming the analysed directory itself was refused: %v", err)
+	}
+
+	// A workflow_run copy that exists only in the tagged tree cannot run
+	// either: GitHub reads workflow_run workflows from the default branch, so
+	// when that branch is read separately the tagged copy is not reported,
+	// and neither is one the default branch has since deleted.
+	taggedOnlyChain := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"chained.yml":     chained,
+	})
+	cleanBranch := writeWorkflows(t, map[string]string{DefaultCallerFile: hextapCallerWorkflow})
+	onlyTagged, err := Preflight(taggedOnlyChain, Policy{DefaultBranchDirectory: cleanBranch})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	if len(onlyTagged) != 0 {
+		t.Fatalf("a workflow_run copy present only in the tagged tree was reported: %v", onlyTagged)
+	}
+
+	// A workflow_call callee runs from the tagged commit whatever chain
+	// trigger it also carries, so the tagged copy is audited even when the
+	// default branch is read separately and lacks it.
+	calleeWithChain := writeWorkflows(t, map[string]string{
+		DefaultCallerFile: hextapCallerWorkflow,
+		"release.yml": `name: Release
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  publish:
+    uses: ./.github/workflows/helper.yml
+`,
+		"helper.yml": `name: Helper
+on:
+  workflow_call:
+  workflow_run:
+    workflows:
+      - Release
+    types:
+      - completed
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: evil:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+`,
+	})
+	audited, err := Preflight(calleeWithChain, Policy{DefaultBranchDirectory: cleanBranch})
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	calleeRules := make(map[string]int)
+	for _, finding := range audited {
+		if finding.File == "helper.yml" {
+			calleeRules[finding.Rule]++
+		}
+	}
+	if calleeRules[RuleUnpinnedContainer] != 1 || calleeRules[RuleUnpinnedAction] != 1 || calleeRules[RuleMutableSourceRef] != 1 {
+		t.Fatalf("findings = %v, want the tagged callee audited despite its chain trigger", audited)
 	}
 
 	// A push workflow that exists only on the default branch does not run for
@@ -3153,6 +3270,93 @@ jobs:
 			findings := audit(t, run)
 			if len(findings) != 1 || findings[0].Rule != RuleUnpinnedRemoteInput {
 				t.Fatalf("findings = %v, want one unpinned-remote-input finding", findings)
+			}
+		})
+	}
+}
+
+// TestArtifactDownloadsSelectRunsImmutably guards the review finding that a
+// SHA-pinned actions/download-artifact with run-id: ${{ vars.BUILD_RUN }} was
+// reported as pinned, though changing the variable makes a rerun of the tag
+// publish artifacts from a different run.
+func TestArtifactDownloadsSelectRunsImmutably(t *testing.T) {
+	audit := func(t *testing.T, policy Policy, triggers, with string) []Finding {
+		t.Helper()
+		report := analyzeWorkflows(t, map[string]string{
+			DefaultCallerFile: hextapCallerWorkflow,
+			"release.yml": `name: Artifacts
+on:
+` + strings.ReplaceAll(triggers, "\\n", "\n") + `permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+` + strings.ReplaceAll(with, "\\n", "\n"),
+		})
+		return report.PinFindings(policy)
+	}
+	tags := "  push:\n    tags:\n      - \"v*\"\n"
+	mutable := map[string]string{
+		"a run chosen by a variable":              "          run-id: ${{ vars.BUILD_RUN }}\n",
+		"artifact ids chosen by an input":         "          artifact-ids: ${{ inputs.ids }}\n",
+		"a job output under the default policy":   "          artifact-ids: ${{ needs.build.outputs.artifact_id }}\n",
+		"an upstream run id outside workflow_run": "          run-id: ${{ github.event.workflow_run.id }}\n",
+	}
+	for name, with := range map[string]string{
+		"a pull request selector":   "          pr: 42\n",
+		"another repository's runs": "          repo: other/project\n",
+	} {
+		t.Run("mutable "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{
+				DefaultCallerFile: hextapCallerWorkflow,
+				"release.yml": `name: Artifacts
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dawidd6/action-download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+` + strings.ReplaceAll(with, "\\n", "\n"),
+			})
+			findings := report.PinFindings(Policy{})
+			if len(findings) != 1 || findings[0].Rule != RuleMutableSourceRef {
+				t.Fatalf("findings = %v, want one mutable-source-ref finding", findings)
+			}
+		})
+	}
+	for name, with := range mutable {
+		t.Run("mutable "+name, func(t *testing.T) {
+			findings := audit(t, Policy{}, tags, with)
+			if len(findings) != 1 || findings[0].Rule != RuleMutableSourceRef {
+				t.Fatalf("findings = %v, want one mutable-source-ref finding", findings)
+			}
+		})
+	}
+	immutable := map[string]struct {
+		policy   Policy
+		triggers string
+		with     string
+	}{
+		"the current run":                     {Policy{}, tags, "          name: dist\n"},
+		"a literal run id":                    {Policy{}, tags, "          run-id: 123456789\n"},
+		"literal artifact ids":                {Policy{}, tags, "          artifact-ids: 42,43\n"},
+		"the current run by id":               {Policy{}, tags, "          run-id: ${{ github.run_id }}\n"},
+		"a trusted job output":                {Policy{TrustJobOutputs: true}, tags, "          artifact-ids: ${{ needs.build.outputs.artifact_id }}\n"},
+		"the upstream run under workflow_run": {Policy{}, "  workflow_run:\n    workflows: [CI]\n    types: [completed]\n", "          run-id: ${{ github.event.workflow_run.id }}\n"},
+	}
+	for name, test := range immutable {
+		t.Run("immutable "+name, func(t *testing.T) {
+			if findings := audit(t, test.policy, test.triggers, test.with); len(findings) != 0 {
+				t.Fatalf("an immutable artifact selection was refused: %v", findings)
 			}
 		})
 	}
