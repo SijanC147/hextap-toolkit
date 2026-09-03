@@ -19,8 +19,10 @@ for every command and subcommand, including ordered execution stages, safety
 boundaries, failure/recovery behavior, JSON contracts, Homebrew rollback, agent
 skills, shell completion, and toolkit release operations.
 
-The durable initiative architecture, ownership boundaries, decisions, and
-live-gate roadmap are under [`docs/initiative`](docs/initiative/architecture.md).
+The durable initiative architecture, ownership boundaries, and decisions are
+under [`docs/initiative`](docs/initiative/architecture.md), alongside a
+[release and evidence ledger](docs/initiative/status.md). Current gate state and
+roadmap live in the Linear `hextap` project, not in this repository.
 
 ## Requirements and build
 

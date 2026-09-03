@@ -1,67 +1,643 @@
-# Initiative status and roadmap
+# Release and evidence ledger
 
-Snapshot: 2026-08-27 (Europe/Malta). Historical release evidence must still be
-checked live before mutation.
+This document records **identifiers, not conclusions**. A run ID, a commit SHA, a release ID and
+a ruleset ID either exist or they do not; a sentence describing how a project is going decays
+silently the moment the project moves. Every claim below is therefore anchored to something that
+can be fetched and checked, and any claim that cannot be anchored is written as unverified rather
+than as a soft yes.
 
-## Implemented in this branch
+## Division of authority
 
-| Area | Status | Evidence boundary |
+| Source | Authoritative for |
+|---|---|
+| `docs/initiative/architecture.md`, `contracts.md`, `decisions.md` | **Accepted design.** The trust boundaries, the cross-repository ownership matrix, and the numbered decision log D-001…D-011. |
+| The Linear `hextap` project (team SB23) | **State, work, and evidence.** What is broken, what is being done about it, who is doing it, and what proved it. |
+| This file | The **evidence index** — the identifiers a reader needs in order to check the platform's claims against GitHub directly. |
+
+This file does not restate defects. It names their Linear ids and stops. That is deliberate: a
+defect described in two places drifts in one of them, and the copy in the repository is always the
+one that goes stale — which is exactly how the document this one replaces became misleading.
+
+Identifiers below were verified live against GitHub and Linear on **2026-08-30**. Reverify before
+acting on them — [Reverifying](#reverifying) gives the commands for both, including the Linear
+queries, since no `gh` command can check the defect list.
+
+Two claims are exceptions to the rule above, and both are marked where they appear. The **install**
+gate rests on a local observation with no fetchable identifier behind it. The **tap credential's
+scope** was observed once and cannot be reverified by any command a reader can run.
+
+## The five gates
+
+Hextap is an authority-and-evidence firewall. It exists because passing one boundary was once
+allowed to imply the next, and a tap-owned Formula got overwritten. The gates are therefore named,
+separate, and never collapsed into a single status:
+
+| Gate | Question it answers | What it explicitly does **not** prove |
 |---|---|---|
-| Strict versioned manifests | Complete locally | Schema-1 Go compatibility plus schema-2 Bun commands/targets/Formula profile; exact keys, duplicate/Unicode rejection, conformance tests. |
-| Deterministic build and verification | Complete locally; hosted namespace proof pending | Darwin/Linux compatibility; explicit raw/archive assets; Windows PE32+; dedicated Bun runtime cache; offline adapter namespace; checksums; live-bounded native execution. |
-| Reusable workflow versioning | Complete locally | Caller manifest artifact ID/SHA handoff; six `job.workflow_sha` self-checkouts; queued per-repository concurrency. |
-| Release publication/recovery | Complete locally | Exact assets, draft resume, immutable published rerun acceptance, stable-only Homebrew. |
-| Tap publisher | Complete locally | Source/tap equality, manifest-declared assets, Formula-only stage, direct-push retry, exact tap CI SHA. |
-| `brew-hextap` command | Complete locally | `version`, `onboard`, `validate`, `doctor`; standard-library-only build. |
-| Toolkit self-release source | Complete locally | Strict self-manifest, one-binary adapter, same-commit relative caller, four native targets. |
-| Local onboarding | Complete locally | Seven artifacts, create-only rooted transaction, idempotent rerun, zero remote mutation. |
-| Read-only online doctor | Complete with fake integration | Main, immutable releases, secret name, exact rulesets, stable tag SHA, tap Project/Formula canonical content. |
-| Portable agent skill inventory/upgrade | Complete locally | All-location version inventory, JSON, forward-only intact managed upgrade, retained recovery copy. |
-| Toolkit developer orchestration | Complete locally | Status, quick/full validation, SemVer plan, protected PR/merge, exact main/release run correlation, Hextap-only install. |
+| **Source** | Did the commit reach `main` through the protected pull-request flow, with the required check green and tag protection enforced? | That a human reviewed it. `required_approving_review_count` is **0** on the owned rulesets (`internal/onboard/templates.go`), with no code-owner or last-push approval, so a PR can merge unapproved. This gate evidences protected merge, not review. It also does not prove anything was built or released. |
+| **Release** | Did the hosted matrix build, verify, attest and publish an immutable release? | That Homebrew received anything. Release publication and Formula publication are separate jobs and have failed independently — repeatedly. |
+| **Tap** | Was the tap-owned Formula updated by a real tap commit, and did tap CI pass on that exact SHA? **The operative question is "is this the SHA consumers actually receive?"** — that is, the commit that landed on tap `main`, not a pull request's branch head. | That the Formula installs, or that the tap itself is protected. Note the tap carries the download URL and SHA-256, not the package bytes. |
+| **Install** | Does the package install, and does the installed binary report the expected version and commit? | That the running service is healthy or that its data is compatible. |
+| **Runtime** | Is the running process actually serving correctly against its current data? | Nothing further — this is the last gate, and it is the weakest one here. |
 
-## External gates before adopter publication
+> **One passed gate never grants authority or proves the next.** Code approval is not tag
+> authority. A green source run is not Formula publication. Installation is not runtime health.
 
-1. Merge this toolkit PR after CI and human review.
-2. After the source-side self-release P0 below is merged, satisfy its external
-   repository gates, publish a coordinator-controlled stable toolkit release,
-   and record the exact tag-to-commit mapping. No toolkit tag or release exists
-   as part of this PR.
-3. Merge the separately reviewed adopter and tap PRs. Coordinator evidence says
-   adopter PR #4 head `dc576a7...5009` and tap PR #5 head `5e21bf3...9a3d`
-   currently have equal manifests and green required checks; merge state remains
-   external.
-4. Run `brew hextap doctor --online` with repository-admin read access and
-   confirm immutable releases, `main`, the single secret name, exact source
-   rulesets, toolkit pin, and the now-present paired tap registration/Formula.
-5. Execute one controlled full release and one `homebrew-only` recovery, then
-   verify the immutable release, Formula bytes, direct tap commit, and exact tap
-   CI run. Use the next aligned stable adopter tag: existing
-   `claude-rc-proxy v0.1.0` predates the current XDG-aware caveats and is outside
-   the strict manifest-equality recovery window.
+## Per-version ledger
 
-## Source-side P0 before the first toolkit tag
+**One row per version, and this table is the only place a version's outcome is stated.** Every
+identifier for a toolkit version — source, release, and tap — lives here. Prose elsewhere in this
+document points at these rows and does not restate them.
 
-This branch adds the toolkit's own strict source manifest, validating build
-adapter, and same-commit thin caller. The one-executable archive contains
-`brew-hextap`, `LICENSE`, and `README.md`; `hextapctl` remains built from source
-by the reusable workflow and for development. The caller runs `full` only from
-a tag and reserves manual dispatch for `homebrew-only` recovery of an existing
-stable immutable tag.
+That constraint is deliberate and was learned the hard way: the `0.1.0` outcome was previously
+written in three places (a narrative sentence, a release row, and a job table), was wrong three
+times in three different directions, and each correction fixed one representation while leaving
+another standing. A fact stated once cannot go inconsistent with itself. It is the same argument
+this document makes about not duplicating Linear defect descriptions, applied one level up.
 
-Before creating toolkit `v0.1.0`, the coordinator must merge this source
-change, enable immutable releases, configure the one required secret, and
-confirm the source rulesets. After the immutable source release exists, the
-separate tap bootstrap must pair the exact `Projects/hextap.json` registration
-with a release-backed `Formula/hextap.rb`; a later `homebrew-only` dispatch
-then completes or recovers Formula publication. None of those live or sibling
-repository mutations are performed by this branch.
+Read the gate columns independently. **A run's overall conclusion is not any gate's verdict** —
+the release gate and the Homebrew step are separate columns because they can and do disagree. Which
+versions they disagree on is in the table, not in this sentence.
 
-## Follow-up work, not blockers for this PR
+**Source gate — evidenced for every row, not inferred from identity.** Merge/tag identity alone
+proves only that the tag names the merge commit; it does not prove the PR-head check passed or that
+protection was enforced. So each row carries its own **PR head CI** and **merged-`main` CI** run.
+All eleven pairs are `success`, and the PR merge commit equals the tag commit in all eleven rows.
 
-- Replace the Actionlint 1.7.12 compatibility gate when an upstream release
-  natively supports `concurrency.queue` and `job.workflow_*`.
-- Capture the first real online-doctor transcript without secret values.
-- Add live hosted-runner evidence for queued invocations, all declared native
-  runners, immutable published reruns, and tap CI retention behavior.
-- Revisit multi-project/tap-scale orchestration only after a real collision or
-  throughput need is observed.
+Protection needs separate, dated evidence, because a CI run proves a conclusion and not that a
+ruleset was enforced when the merge happened. Ruleset **version history** supplies it:
+
+| Ruleset | Latest version | Last modified (UTC) | Target | Enforcement |
+|---|---|---|---|---|
+| `21411731` `hextap/main` | `47577297` | `2026-08-25T10:22:54Z` | branch | `active` |
+| `21411735` `hextap/release-tags` | `47577264` | `2026-08-25T10:22:35Z` | tag | `active` |
+
+`hextap/main` has two versions, both created that day; `hextap/release-tags` has one and has never
+been modified. Enforcement is part of a ruleset's definition, so toggling it would have created a
+later version, and none exists.
+
+Compare that against **the events the gate protects — the merge and the tag creation — not release
+publication**, which happens after the tag push and so is too late to evidence anything. The
+earliest protected events in this table belong to `v0.1.0`:
+
+| Event | Time (UTC) |
+|---|---|
+| Last ruleset change (`47577297`) | `2026-08-25T10:22:54Z` |
+| `v0.1.0` merge commit `2d4b4615` | `2026-08-26T12:37:51Z` |
+| `v0.1.0` tag created (annotated) | `2026-08-26T14:23:37Z` |
+
+The last ruleset change predates `v0.1.0`'s merge by **1d 2h** and its tag by **1d 4h**. Every
+later version's merge and tag are later still, so **both rulesets were `active` with unchanged
+definitions before the earliest protected event in the table, and remained so throughout** — which
+covers every row. (Release *publication* at `2026-08-26T14:28:43Z` is five minutes after the tag
+and is not what the claim rests on.)
+
+```sh
+# The events protection must be compared against: the merge commit and the tag
+# creation, not release publication (publication happens after the tag push).
+gh api repos/SijanC147/<REPO>/commits/<MERGE_SHA> --jq '.commit.committer.date'
+gh api repos/SijanC147/<REPO>/git/ref/tags/<TAG> --jq '.object'        # type: tag = annotated
+gh api repos/SijanC147/<REPO>/git/tags/<TAG_OBJECT_SHA> --jq '.tagger.date'
+
+# Ruleset history is per-repository; the adopter ruleset IDs are in the table above.
+gh api repos/SijanC147/<REPO>/rulesets/<RULESET_ID>/history
+gh api repos/SijanC147/<REPO>/rulesets/<RULESET_ID>/history/<VERSION_ID> \
+  --jq '{name:.state.name,target:.state.target,enforcement:.state.enforcement}'
+
+# Every ruleset body, not just one: the list above shows only id/name/enforcement,
+# so drift in conditions, required checks or bypass actors is invisible there.
+# Run the detail endpoint for each of the six IDs in the protection table.
+for REPO_ID in "hextap-toolkit 21411731" "hextap-toolkit 21411735" \
+               "claude-rc-proxy 21345746" "claude-rc-proxy 21345761" \
+               "better-ccflare 21627513" "better-ccflare 21627514"; do
+  set -- $REPO_ID
+  gh api "repos/SijanC147/$1/rulesets/$2" \
+    --jq '{repo:"'"$1"'",id,name,target,enforcement,conditions,bypass_actors,
+           rules:[.rules[]|{type,parameters}]}'
+done
+```
+
+**The limit of that evidence, stated rather than glossed:** it establishes the rulesets' continuous
+configuration, not that any individual historical merge was evaluated against them.
+`repos/SijanC147/hextap-toolkit/rulesets/rule-suites`, which would carry per-evaluation records,
+returns `[]`. So per-merge enforcement records are **not available** for these releases, and no
+claim in this document rests on them.
+
+The **Source gate** column sits in the table with the others, so a reader auditing only the ledger
+sees all three represented gates. It reads `passed` in all eleven rows today; carrying it anyway
+means a future version whose source evidence differs needs a cell rather than a prose exception.
+
+**The tap commit column is the SHA that landed on tap `main`, and the tap CI run is the one that
+ran against *that* SHA.** The nine publisher rows are direct pushes, so the landed commit and its
+`push` run are the same thing. The **two bold rows** went through a tap pull request, which
+produces *two* runs — a `pull_request` run against the branch head and a `push` run against the
+merge commit. Only the second evidences the gate, because the merge commit is the SHA consumers
+receive.
+
+| Version | PR | Merge / tag commit | PR head CI | Merged-`main` CI | **Source gate** | Release run | Release ID | **Release gate** | Homebrew step | Tap commit | Tap CI | **Tap gate** |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `v0.1.0` | #3 | `2d4b4615829f983bb4ea7ff2a4b154fb56fd16ea` | `32838086815` | `32969601857` | passed | `32980009852` | `377208649` | **passed** | **failed** — recovery `32990280006` also failed | **`ded1feb1`** (tap PR #9) | `32991730400` | passed |
+| `v0.1.1` | #4 | `f96c843ea73ebbd521fed3ddbd6622e9ba6982d6` | `32995754608` | `32996124215` | passed | `32996698520` | `377318696` | passed | passed | `345653c0` | `32997289004` | passed |
+| `v0.1.2` | #5 | `ddc8371e522a968b051fba26a64bc0d4c39d4d8b` | `33003923022` | `33004349130` | passed | `33004764036` | `377369388` | passed | passed | `3cc76f5d` | `33005207889` | passed |
+| `v0.2.0` | #6 | `9a59d2ac9aace0f14a08a921bad0276c00be29e8` | `33014779714` | `33015151916` | passed | `33015551268` | `377435759` | passed | passed | `2aaf9df9` | `33016011545` | passed |
+| `v0.3.0` | #7 | `16117b0839fc70487aab9491ee3665379c1f026c` | `33024390659` | `33024655766` | passed | `33024860915` | `377484943` | passed | passed | `dee6a25c` | `33025200293` | passed |
+| `v0.3.1` | #8 | `b6a270c29aa02e9b0c76c1d638e8f0d100cba925` | `33026009028` | `33026299647` | passed | `33026549801` | `377493707` | passed | passed | `3ea83f86` | `33026787454` | passed |
+| `v0.4.0` | #9 | `f3106610e2ffe4aeb673721219592816a3ef8c1e` | `33037762660` | `33038031679` | passed | `33038299518` | `377559153` | passed | passed | `2519d6f0` | `33038612791` | passed |
+| `v0.4.1` | #10 | `67898bb09280a5325b89c1b23a70f2fc8b64ffae` | `33042376451` | `33042645416` | passed | `33042920074` | `377586076` | passed | passed | `dd0b55e0` | `33043233099` | passed |
+| `v0.4.2` | #11 | `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26` | `33048175244` | `33048572779` | passed | `33048934828` | `377628533` | passed | passed | `3e30186f` | `33049332506` | passed |
+| `v0.5.0` | #12 | `1cd2338f522a22b26d79d5f5303ef11130f495d6` | `33222541721` | `33222845927` | passed | `33223146605` | `378825128` | **passed** | **failed** — recovery `33223947922` passed | **`a9a96e62`** (tap PR #13) | `33223845247` | passed |
+| `v0.6.0` | #13 | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `33232103954` | `33232339531` | passed | `33232555139` | `378869000` | passed | passed | `f8719fb0` | `33232801566` | passed |
+
+### Reading the two exceptional rows
+
+`v0.1.0` and `v0.5.0` are the two rows whose Homebrew step failed inside an otherwise successful
+release run, and the two whose tap Formula was hand-authored through a pull request rather than
+pushed by the publisher. **Their verdicts are in the table and are not repeated here** — this
+section records only the evidence that does not fit in a cell.
+
+**Both reached the tap through a PR, and a PR produces two runs.** That distinction is the whole
+content of this section, because taking the wrong one gets the gate's verdict backwards:
+
+| Version | Branch head | `pull_request` run | Landed on `main` | `push` run — **the gate's evidence** |
+|---|---|---|---|---|
+| `v0.1.0` | `9d27f112` | `32981835518` **failure** | `ded1feb1` | `32991730400` **success** |
+| `v0.5.0` | `895c1d3b` | `33223670639` success | `a9a96e62` | `33223845247` **success** |
+
+For `v0.1.0` the two runs disagree, which is why picking the right one decides the row. The
+`pull_request` run failed on `test-bot (macos-15)`, which skipped `Published Formula gate`. The
+`push` run on the merge commit — `32991730400`, at `2026-08-26T17:00:55Z` — has all three jobs
+green, `Published Formula gate` included, and `Formula/hextap.rb` at `ded1feb1` carries the
+`v0.1.0` release URLs and SHA-256 values, so it is the published `0.1.0` Formula that was
+validated. The verdict this evidence supports is in the ledger row, not here.
+
+**This row has been wrong five times, and the reason is worth more than the row.** It was written
+as "reached the tap anyway", then "the tap gate failed", then "never evaluated", then "failed"
+again, and is now "passed". The three middle versions all reasoned — with progressively better
+job-level evidence — about a run that **was never the right run**. Nobody asked the question the
+gate's own definition asks: *is this the SHA consumers receive?* The first version was the closest
+to correct, and it was corrected away from.
+
+The general form: **the same PR-head versus merged-`main` distinction that the source columns
+apply rigorously was never applied to the tap column.** Nine rows hid the gap because the publisher
+pushes directly, so head and landed commit coincide. Only the two PR-based rows could expose it.
+
+Nine of the eleven Formula commits were written by the automated publisher. The two hand-authored
+exceptions are exactly the two versions whose Homebrew step failed, so commit authorship remains a
+durable signal for which versions needed manual intervention to publish. It says nothing about the
+tap gate — for that, read the two rows.
+
+> **Standing rule for this section.** It records evidence and mechanism only. Every per-version
+> verdict lives in the ledger row and nowhere else. This section has drifted back to restating
+> outcomes three times; if you are editing it and about to write "passed" or "failed" next to a
+> version number, that belongs in a cell instead.
+
+All eleven releases report `immutable: true`.
+
+As of **2026-08-30**, before this document's own pull request merged, `main` was
+`6632b029cee58feaa62736149a761f381388e323` — PR #14 (`docs: link operator manual`, main CI
+`33233091419`), one docs-only commit ahead of the `v0.6.0` tag. That SHA is recorded as a dated
+snapshot, not as a claim about where `main` points now; merging this PR alone moves it.
+
+The durable point is the relationship, which survives the SHA going stale: **a checkout ahead of
+the installed stable CLI is normal here.** Reason about what the CLI can do from
+`hextap --version`, not from the working tree. For the current head:
+`gh api repos/SijanC147/hextap-toolkit/commits/main --jq .sha`
+
+## Adopter ledger
+
+| | `hextap-toolkit` | `claude-rc-proxy` | `better-ccflare` |
+|---|---|---|---|
+| Current tag | `v0.6.0` | `v0.2.0` | `v3.9.0` |
+| Tag commit | `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c` | `dac8b2cf0f4e74d757892ffc6ae945cb10386e3d` | `3839c07d3901aa3dbfb228a7b1cf14f9d398eb0c` |
+| Protected PR head CI | #13 `33232103954` | #8 `33235247808` | #42 `33178228054`, #36 `33044333046` |
+| Merged-`main` CI | `33232339531` | `33235317382` | `33178383321` |
+| Release run | `33232555139` | `33237547108` | `33179109842` (RC `33178706785`) |
+| Release ID | `378869000` | `378892646` | `378533895` |
+| Immutable | yes | yes | yes |
+| Tap commit | `f8719fb0172a15ea31c88fbd62841fb2b96edd48` | `01de3a9c26779a514baf6b47b0f1409469514598` | `9f054fe0ab34cc06abddef56c9ab1c8fd1cf022c` |
+| Exact tap CI run | `33232801566` | `33237683107` | `33179476413` |
+| Installed version | `0.6.0` | `0.2.0` | `3.9.0` |
+| Source rulesets | `21411731` / `21411735` | `21345746` / `21345761` | `21627513` / `21627514` |
+
+`better-ccflare v3.9.0-rc.1` and `v3.9.0` were cut from the **same commit** `3839c07d…` — the
+first clean RC-to-stable sequence, and the intended shape of the flow.
+
+`hextap/main` and `hextap/release-tags` are `active` on all three repositories. They are the
+**source** repositories' rulesets. Earlier notes recorded `21411731` / `21411735` as belonging to
+the tap; they belong to `hextap-toolkit`, and the tap has none — see the tap gate below.
+
+### The `v0.5.0` ordering
+
+| Time (UTC, 2026-08-29) | Event |
+|---|---|
+| `00:18:40` | Release run `33223146605` starts. |
+| `00:24:56` | It **fails** at the Homebrew boundary. |
+| `00:32:39` | Tap PR #13 merges as `a9a96e62`, carrying the hand-authored Formula commit `895c1d3b`. |
+| `00:34:48` | `homebrew-only` recovery `33223947922` starts. |
+| `00:35:46` | It **passes** — against Formula bytes a human had already placed. |
+
+That ordering matters and is easy to get backwards: the recovery run did not author the `0.5.0`
+Formula, it validated one that was already there. Recording the recovery as having "published"
+`0.5.0` would credit the automation with a step a person performed.
+
+### Recovery precedent
+
+`homebrew-only` dispatch completes the Homebrew stage without rebuilding or re-releasing, and has
+run green three times. Each is a `workflow_dispatch` run in the **source** repository, not the tap
+— querying the tap for them returns `404`.
+
+The three are routinely cited together as evidence that the recovery path works. Traced
+individually, **they are three different events**:
+
+| Run | Version | What actually happened |
+|---|---|---|
+| `33223947922` | toolkit `v0.5.0` | Formula bytes were **already in the tap** from PR #13 (`895c1d3b`, hand-authored) before this run started. It validated them; it did not author them. |
+| `33000535526` | claude-rc-proxy `v0.1.1` | The publisher **succeeded** — it pushed `00098656` at `18:19:08`, inside the failing run. Tap CI `32999041554` then failed, and the release run failed 6 seconds later because it was waiting on it. This run is a **retry**, not a re-publication. |
+| `33051618673` | better-ccflare | Not a recovery at all. Stable run `33050987950` had already **succeeded** at `07:52:08`; this ran at `07:53:27` as the documented idempotent rerun. |
+
+**`homebrew-only` has never authored a Formula into the tap.** In all three cases the bytes were
+already there — placed by a person for `v0.5.0`, by the failing run's own publisher for
+claude-rc-proxy `v0.1.1`, and by an entirely successful run for better-ccflare. All three runs
+finished in **under 70 seconds** (58s, 65s, 61s), which is consistent with finding the tap already
+current rather than performing work.
+
+State the property precisely, because the loose version of this sentence has already misled this
+project once:
+
+> **Proven: idempotent `homebrew-only` re-validation, three times.**
+> **Never exercised: republish-after-publisher-failure.**
+
+"Recovery repeatedly proven" is the phrasing to avoid. It reads as the second property while only
+the first has evidence.
+
+### What failed in the claude-rc-proxy case — SB23-745
+
+The `v0.1.1` failure is the one with a legible cause, and it is not the publisher. Tap run
+`32999041554`, on the Formula commit the publisher had just pushed:
+
+| Job | Conclusion |
+|---|---|
+| `test-bot (macos-15)` | **success** |
+| `Published Formula gate` | **success** |
+| `Claude RC proxy release tooling` | **failure**, at step `Test release payload and publication logic` |
+
+The Formula published correctly and passed `brew test-bot`. An **unrelated job in the same tap
+workflow** failed, which set the run's overall conclusion to failure, which the source release run
+was waiting on — so the release failed at `Publish Formula and wait for tap CI` despite Homebrew
+publication having worked.
+
+That is this project's own founding error running backwards: a gate reading a *different* gate's
+result as its own. `Publish Formula and wait for tap CI` waits on the tap run's aggregate
+conclusion rather than on the jobs that actually evidence Formula publication.
+
+The source-side job timings localise the fault further, and rule the push logic out:
+
+| Time (UTC, 2026-08-26) | Event |
+|---|---|
+| `18:18:38` | `Publish Homebrew Formula` job starts. |
+| `18:19:06` | Step 8, `Publish Formula and wait for tap CI`, starts. |
+| `18:19:08` | Formula commit `00098656` lands in the tap — **2 seconds in**. The push succeeded. |
+| `18:21:47` | The same step **fails**, after a further 2m 39s. |
+| `18:21:50` | The job ends. |
+
+So the publisher pushed successfully almost immediately and then died in the **wait and
+tap-CI-correlation** phase — not in push, CAS, or retry. Whatever is wrong is downstream of
+publication, in run discovery and result interpretation.
+
+**No remedy is proposed here, deliberately.** An earlier draft of this section prescribed how the
+wait step should be narrowed. That was a design change stated in an evidence index — the same
+category error as keeping a roadmap in this file — and it would have relaxed the Tap gate's
+requirement that tap CI pass, which `scripts/publish-homebrew.sh` enforces explicitly. Accepted
+design belongs in `architecture.md` and `decisions.md`; proposed work belongs in Linear.
+
+The evidence above is recorded here. The hypothesis, the argument about which axis may narrow and
+which must not, and the caution against loosening run discovery are on **SB23-745**, where they can
+be reviewed and decided. This is one instance and is **not** a called root cause — the toolkit
+`v0.1.0` failures (`32980009852`, `32990280006`) and `v0.5.0`'s failure cause are still untraced to
+job level.
+
+For the shape of the underlying mistake: SB23-642 was one gate **overwriting** another's work.
+This is one gate **reading** another's verdict. Both are gate conflation — here sitting inside the
+publisher itself.
+
+## Gate status — as of 2026-08-30
+
+Each heading below states a **dated conclusion**, not a standing one. Conclusions move; the
+identifiers under them do not. When SB23-737 lands, the tap heading is wrong and this file is
+behind Linear — which is authoritative for current gate state. Re-derive before relying on any
+verdict here; each section names the command that does it.
+
+### Source — evidenced as of 2026-08-30
+
+Protected PR head CI, protected merge, merged-`main` CI, and tag-to-commit identity are green
+across all three repositories, with the run IDs in the per-version and adopter ledgers above.
+
+Protection needs dated evidence in each repository, not just the toolkit — and it must be compared
+against **the events the gate protects**, which are the merge and the tag creation. Comparing
+against release *publication* would not do: the tag push starts the release workflow and
+publication happens minutes later, so a ruleset activated after the merge or tag but before
+publication would pass that comparison while the gate had in fact not been enforced.
+
+All three current tags are **annotated**, so tag creation carries a real timestamp rather than
+being inferred. In each case the release run starts within six seconds of the tagger date, which
+confirms the tag was pushed immediately rather than created locally and held.
+
+| Repository | Rulesets | Latest ruleset change (UTC) | Merge commit (UTC) | Tag created (UTC) | Margin before merge |
+|---|---|---|---|---|---|
+| `hextap-toolkit` | `21411731`, `21411735` | `2026-08-25T10:22:54Z` | `2026-08-29T03:49:13Z` | `2026-08-29T03:54:53Z` | 3d 17h |
+| `claude-rc-proxy` | `21345746`, `21345761` | `2026-08-26T19:05:23Z` | `2026-08-29T05:04:56Z` | `2026-08-29T06:02:54Z` | 2d 10h |
+| `better-ccflare` | `21627513`, `21627514` | `2026-08-27T05:46:10Z` | `2026-08-28T14:04:44Z` | `2026-08-28T14:13:39Z` | 1d 8h |
+
+All six rulesets are `enforcement: active`, targeting `branch` and `tag` respectively, and in every
+repository the **last** ruleset change predates **both** the merge and the tag creation of the
+release its ledger row describes. The `/history` commands that produce these version IDs and
+timestamps are in the [per-version ledger](#per-version-ledger)'s reverification block above —
+[Reverifying](#reverifying) carries the current-state ruleset calls, which cannot show history.
+
+**Two limits, stated rather than glossed.** First, the adopter rulesets *were* modified during the
+overall period — `claude-rc-proxy`'s `hextap/main` has three versions and its `release-tags` two —
+so "unchanged since before the **first** release" is true of the toolkit and **not** of them. The
+claim above is deliberately scoped to each repository's **current** tag. Second, this is evidence
+of continuous *configuration*, not of per-merge *evaluation*: `rule-suites`, which would carry
+per-evaluation records, returns `[]` in all three repositories, so no claim here rests on them.
+
+### Release — evidenced as of 2026-08-30
+
+The full hosted matrix, hosted Windows proof, exact asset graph, attestations, immutable
+publication, and stable/prerelease routing are all evidenced by the run and release IDs above.
+Windows is proved through better-ccflare `33179109842`; the earlier Windows failure `33045627299`
+was corrected by toolkit `v0.4.2` before that proof was accepted.
+
+### Tap — publication evidenced; protection **absent as of 2026-08-30**
+
+Publication is evidenced: three real tap commits, each with a green `brew test-bot` run on that
+exact SHA.
+
+Protection was not, on the date checked. `homebrew-hextap` `main` reported `protected: false` and
+its rulesets endpoint returned `[]`. Re-derive rather than trusting this paragraph:
+
+```sh
+gh api repos/SijanC147/homebrew-hextap/branches/main --jq '{protected:.protected}'
+gh api repos/SijanC147/homebrew-hextap/rulesets
+```
+
+To be precise about why that matters, since it is easy to overstate: the tap does **not** hold the
+package bytes. A rendered Formula carries the release URL and its SHA-256
+(`internal/formula/render.go`), and the assets themselves stay in the source repository's immutable
+release. What the tap holds is the **download instruction** — which URL every consumer fetches and
+which digest it is checked against.
+
+That is not a smaller problem than "holding the bytes", it is a different one. Write access to the
+tap does not let an attacker swap the payload behind a fixed checksum; it lets them repoint the URL
+**and** supply a matching `sha256` in the same commit. Controlling both halves defeats checksum
+verification entirely, because the checksum is only ever compared against the value the tap itself
+supplies. The mitigation is therefore review and protection of tap commits, not stronger hashing.
+Unprotected, this is the least protected repository in the platform and the most valuable one to
+tamper with. → **SB23-737**
+
+The credential used to push those tap commits was characterised as a broad classic PAT rather than
+a tap-scoped one. **That characterisation is unverified here and cannot be reverified from this
+document.** It is loaded from `op://CICD/GH_PAT/credential`, and no command below — nor any command
+available to a reader — can inspect a 1Password item or a token's scopes; if the item is rotated the
+observation becomes unreproducible. It is recorded because it drove SB23-736, not because this file
+evidences it. → **SB23-736**
+
+### Install — observed on one machine, and the one gate with no durable evidence
+
+On 2026-08-30, `hextap 0.6.0` reported commit `9d1f6ef1ca365f83b118473d5bfcda416e7bf77c`, matching
+the `v0.6.0` tag exactly, and `brew list --versions` reported `hextap 0.6.0`,
+`claude-rc-proxy 0.2.0`, `better-ccflare 3.9.0`, with agent skill `1.3.0`.
+
+**Read that as an observation, not as an identifier.** Every other gate in this file is anchored to
+something a later reader can fetch — a run ID, a commit, a release ID. This one is not. Re-running
+the install commands inspects *the reader's own machine now*; it cannot confirm that this gate
+passed here on that date, and no transcript or artifact was captured that would. By the standard
+the top of this document sets, that makes the install gate **unverified in the durable sense**,
+however green it looked at the time.
+
+The gap is worth closing rather than papering over: a hosted install check, or a stored transcript,
+would give this gate an identifier like every other. Until then, treat it as the weakest row in the
+file after runtime.
+
+It is also an installation gate, not a distribution gate — it says nothing about a consumer without
+tap access. → **SB23-751**
+
+### Runtime — **not verified**
+
+`brew services list` reports the `claude-rc-proxy` and `better-ccflare` LaunchAgents as `started`.
+That is process registration, not health, and installing a keg does not restart a service. No
+process was inspected and no request was served as evidence for this document. better-ccflare
+runtime and database compatibility after the `v3.9.0` upgrade is **unknown, not disproven**.
+→ **SB23-750**
+
+Hextap deliberately does not own this gate. It manages package publication and installation; it
+does not start, stop or restart services, apply or reverse migrations, or certify data
+compatibility. Those are project-owned.
+
+## Open defects
+
+Ids only, with the priority and status they carried on 2026-08-30. **No titles or summaries** —
+those are the part that goes stale silently while a status stays put, and duplicating them here
+would rebuild the second source of truth this document exists to remove. Read the issue.
+
+Even the priority and status columns below are a dated convenience, not authority. Get the current
+list, with titles, from Linear:
+
+```sh
+# Platform issues — requires the Linear MCP tools or the Linear API
+list_issues(project: "hextap", fields: ["id","title","priority","status"])
+```
+
+The same drift already happened once to the issue index in this project's agent memory, which was
+written and wrong within the hour. It was deleted rather than corrected, for this reason.
+
+### Platform — the `hextap` project
+
+| Id | Priority | Status |
+|---|---|---|
+| SB23-680 | Urgent | In Progress |
+| SB23-736 | Urgent | Todo |
+| SB23-737 | High | Todo |
+| SB23-739 | High | In Progress |
+| SB23-742 | High | Todo |
+| SB23-753 | High | In Progress |
+| SB23-754 | High | Todo |
+| SB23-755 | High | Todo |
+| SB23-756 | High | Todo |
+| SB23-738 | Medium | In Progress |
+| SB23-740 | Medium | In Progress |
+| SB23-741 | Medium | Backlog |
+| SB23-743 | Medium | Backlog |
+| SB23-745 | Medium | Backlog |
+| SB23-746 | Medium | Todo |
+| SB23-751 | Medium | Backlog |
+| SB23-744 | Low | Backlog |
+| SB23-747 | Low | Backlog |
+| SB23-748 | Low | Backlog |
+| SB23-749 | Low | In Progress |
+| SB23-752 | None | Backlog |
+
+### Cross-linked — owned by adopter projects
+
+These are tagged `hextap:adopter` and stay visible from the platform side, but they are **not**
+platform work and must not be pulled into the platform backlog.
+
+| Id | Project | Priority | Status |
+|---|---|---|---|
+| SB23-314 | `better-ccflare` | Medium | Backlog |
+| SB23-750 | `better-ccflare` | Medium | Backlog |
+| SB23-713 | `claude-peers` | Low | — |
+
+### Documentation surfaces
+
+**GitBook — published and public.** GitBook project `hextap-toolkit` (workspace SB23,
+`site_qHQ9P`) is connected by Git Sync to `./docs` and serves
+**<https://sb23.gitbook.io/hextap-toolkit/>**, which returns HTTP `200` unauthenticated. The
+`GitBook (./docs)` check runs on every pull request, so sync is gated rather than assumed — which
+is what makes this URL safe to record here.
+
+The Operator Manual Codex Site is a **separate** surface from that GitBook site, and is not in the
+same state — see below.
+
+### Unverified surfaces
+
+Absence of evidence, recorded as such rather than as failure:
+
+- **`doctor --online`** — local `gh` authentication is currently **working** (`SijanC147`, scopes
+  `gist`, `read:org`, `repo`, `workflow`), so authentication is no longer the obstacle it was when
+  SB23-742 was filed. Run against this repository it now fails with `doctor: caller workflow lacks
+  an exact stable toolkit version and full SHA pin` — that is SB23-739, the self-caller false
+  negative, **not** a real drift finding. An authenticated transcript against an *external* adopter
+  is still uncaptured.
+- **The Operator Manual Codex Site** — an unauthenticated request returns HTTP `401`. That may be
+  intentional; the access model has never been decided or written down. → **SB23-746**
+- **WebMCP** — only ever exposed `ask_hextap_manual`, and it has not been discovered from recent
+  clients. Not being discovered is not proof the Site stopped exposing it.
+- **Required-secret inventory and the immutable-release repository setting** — functionally
+  exercised by every release above, but the settings themselves are unverified.
+
+An empty result is not a negative result. `hextap status --json` reporting an empty
+`projects`/`formulae` array beside an ownership warning is SB23-738 failing to resolve ownership —
+it is **not** evidence that those objects do not exist.
+
+## Reverifying
+
+Every identifier in this document is checkable. None of these commands mutate anything.
+
+```sh
+# Releases, immutability, and tag-to-commit identity.
+# <REPO> is whichever repository owns the row you are checking:
+#   hextap-toolkit | claude-rc-proxy | better-ccflare
+# Release IDs and tags are per-repository. This endpoint is repository-scoped, so
+# querying the toolkit for an adopter's release ID (378892646, 378533895) returns
+# 404 rather than another project's data.
+#
+# A 404 has SEVERAL causes and does not by itself diagnose a wrong repository:
+# the release may have been deleted, be invisible to the current token, or the ID
+# may be wrong. A deleted or inaccessible release is exactly the missing-evidence
+# condition this ledger exists to surface, so do not dismiss a 404 as a typo.
+# Check both: that the repository owns the row, AND that the resource still exists
+# by listing the repository's releases.
+gh release list --repo SijanC147/<REPO> --limit 20
+gh api repos/SijanC147/<REPO>/releases \
+  --jq '.[]|"\(.tag_name) id=\(.id) immutable=\(.immutable)"'
+gh api repos/SijanC147/<REPO>/tags --jq '.[]|"\(.name) \(.commit.sha)"'
+
+# One release by ID, for the Release ID column
+gh api repos/SijanC147/<REPO>/releases/<RELEASE_ID> \
+  --jq '{tag:.tag_name,immutable,published:.published_at}'
+
+# Worked examples, one per repository
+gh api repos/SijanC147/hextap-toolkit/releases/378869000  --jq '.tag_name'  # v0.6.0
+gh api repos/SijanC147/claude-rc-proxy/releases/378892646 --jq '.tag_name'  # v0.2.0
+gh api repos/SijanC147/better-ccflare/releases/378533895  --jq '.tag_name'  # v3.9.0
+
+# Any run ID in this file: name, trigger, conclusion, and the commit it ran on.
+# Substitute the repository that owns the run — a run ID is only valid in its own
+# repository, and asking the wrong one returns a 404 that looks like a missing run.
+#   source runs  -> hextap-toolkit | claude-rc-proxy | better-ccflare
+#   tap CI runs  -> homebrew-hextap
+gh api repos/SijanC147/<REPO>/actions/runs/<RUN_ID> \
+  --jq '"\(.name) | \(.head_branch) | \(.event) | \(.conclusion) | \(.head_sha)"'
+
+# Worked examples, one of each
+gh api repos/SijanC147/hextap-toolkit/actions/runs/33232555139 --jq '.conclusion'   # toolkit release
+gh api repos/SijanC147/claude-rc-proxy/actions/runs/33237547108 --jq '.conclusion'  # adopter release
+gh api repos/SijanC147/homebrew-hextap/actions/runs/33237683107 --jq '.conclusion'  # tap CI
+
+# Job-level detail, which is what distinguishes "the Formula failed to publish"
+# from "an unrelated job failed and took the run's conclusion with it"
+gh api repos/SijanC147/<REPO>/actions/runs/<RUN_ID>/jobs \
+  --jq '.jobs[]|"\(.name): \(.conclusion)"'
+
+# Source gate: a run ID alone does not establish protected merge. Compare the PR's
+# final head against the PR run's head_sha, and the merge commit against the tag,
+# or a green run from an earlier head or a different PR would appear to qualify.
+gh pr view <PR> --repo SijanC147/<REPO> \
+  --json number,headRefOid,mergeCommit,mergedAt,state
+gh api repos/SijanC147/<REPO>/actions/runs/<PR_RUN_ID> --jq '.head_sha'   # == headRefOid
+# Annotated tags need dereferencing: git/ref returns the TAG OBJECT's sha, not the
+# commit, so comparing it to a merge commit reports a false mismatch every time.
+# All three current tags are annotated.
+TAG_OBJ=$(gh api repos/SijanC147/<REPO>/git/ref/tags/<TAG> --jq '.object.sha')
+gh api repos/SijanC147/<REPO>/git/ref/tags/<TAG> --jq '.object.type'      # "tag" = annotated
+gh api repos/SijanC147/<REPO>/git/tags/$TAG_OBJ --jq '.object.sha'        # the commit
+# A lightweight tag instead returns .object.type == "commit"; use that sha directly.
+
+# Tap gate: use the run against the commit that LANDED on tap main. A tap PR also
+# produces a pull_request run against its branch head, which is not the SHA
+# consumers receive and can disagree with the merged-SHA run.
+# Scope to the tap's test workflow. The repository-wide runs endpoint returns every
+# workflow that ran on the SHA, so an unrelated green run can be mistaken for the tap
+# gate. scripts/publish-homebrew.sh queries tests.yml specifically for this reason;
+# the projection below also prints .path so the workflow can be confirmed.
+gh api "repos/SijanC147/homebrew-hextap/actions/workflows/tests.yml/runs?head_sha=<LANDED_SHA>" \
+  --jq '.workflow_runs[]|"\(.id) \(.path) \(.event)/\(.conclusion)"'
+
+# Tap publication, and tap protection
+gh api repos/SijanC147/homebrew-hextap/commits/f8719fb0 --jq '.commit.message'
+gh api repos/SijanC147/homebrew-hextap/branches/main --jq '{protected:.protected}'
+gh api repos/SijanC147/homebrew-hextap/rulesets
+
+# Source protection.
+# Listing id/name/enforcement is NOT sufficient: conditions, protected targets,
+# required checks and bypass actors can all drift while the name and enforcement
+# stay identical, leaving the gate looking green. Fetch each ruleset's detail
+# endpoint and compare the fields that actually confer protection, as
+# internal/onboard's validateOnlineRulesets does.
+gh api repos/SijanC147/<REPO>/rulesets --jq '.[]|"\(.id) \(.name) \(.enforcement)"'
+gh api repos/SijanC147/hextap-toolkit/rulesets/21411731 \
+  --jq '{target,enforcement,conditions,bypass_actors,rules:[.rules[]|{type,parameters}]}'
+# `target` matters: a ruleset drifting between branch and tag protection is
+# invisible if you compare only conditions and rules.
+
+# Install gate
+hextap --version
+brew list --versions hextap claude-rc-proxy better-ccflare
+```
+
+Recovery runs live in the **source** repository, not the tap. Querying the tap for them returns
+`404`, and that `404` means the wrong repository was asked, not that the recovery never happened.
+
+### Linear state
+
+The GitHub commands above cover the release, tap and install identifiers. They do **not** cover the
+defect list, which is Linear's, and no `gh` command can. Use the Linear MCP tools or the Linear API:
+
+```
+list_issues(project: "hextap")          # current platform issues, priorities, statuses
+get_issue("SB23-745")                   # one issue, with its full description and comments
+list_comments(issueId: "SB23-745")      # the worklog, including evidence posted by agents
+```
+
+Cross-linked adopter issues live in the `better-ccflare` and `claude-peers` projects, not in
+`hextap` — `list_issues(project: "hextap")` will not return them.
+
+## Maintaining this file
+
+Add a row when a release ships. Move a gate's paragraph when its evidence changes. Remove an entry
+from [Open defects](#open-defects) when Linear closes the issue, not when it feels resolved.
+
+Do not add narrative status. If something cannot be written as an identifier or as an explicit
+"unverified", it belongs in Linear, where it can be assigned and closed — not here, where it will
+quietly rot and mislead the next session that reads it.
