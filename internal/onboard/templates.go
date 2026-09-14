@@ -205,6 +205,15 @@ Set the one required Actions secret. This command prompts securely; do not put a
 	result.WriteString("3. From that immutable release and its verified `SHA256SUMS`, have the coordinator use the trusted pinned toolkit to render the exact Formula. Do not invent checksums or commit a placeholder Formula.\n")
 	fmt.Fprintf(&result, "4. Open one tap pull request that adds both `Projects/%s.json` and the release-backed `Formula/%s.rb`; merge only after tap CI passes.\n", formula, formula)
 	result.WriteString("5. Dispatch the existing stable tag in `homebrew-only` mode to finish or recover publication. Do not create a replacement tag.\n\n")
+	// The toolkit's own caller is relative and carries no external pin, so the
+	// pinned-caller paragraph cannot be written for it: both values are empty by
+	// definition, and validate.go compares this document byte-for-byte against
+	// this generator. Without the branch, .hextap/SETUP.md could never match for
+	// the one repository that owns the reusable workflow.
+	if toolkitVersion == "" && toolkitSHA == "" {
+		result.WriteString("This repository owns the reusable release workflow, so its caller references it relatively and carries no external pin. There is no toolkit tag or commit to keep in sync here, and none may be added: a pin would make the repository an adopter of a different copy of itself.\n\nWhat runs is therefore whichever commit the run was started from, not the tag being released. On a tag push the two are the same, and `full` mode asserts it. On a `homebrew-only` dispatch from `main`, step 5 above, the toolkit code that executes is `main`, while the source being released is still checked out at the tag and still required to be contained in `main`. Read a recovery run's provenance as the tag for the released source and the dispatched ref for the code that published it.\n")
+		return result.Bytes()
+	}
 	fmt.Fprintf(&result, "The caller is pinned to stable toolkit tag `%s` at full commit `%s`; keep both the tag comment and immutable SHA provenance when upgrading. Never replace the pin with `@main` or a floating major tag.\n", toolkitVersion, toolkitSHA)
 	return result.Bytes()
 }

@@ -275,3 +275,44 @@ func writeToolkitSelfProject(t *testing.T) string {
 	}
 	return project
 }
+
+// TestSetupDocumentHasASelfAdopterVariant guards SB23-755's first defect. The
+// document ends by naming the stable toolkit tag and commit the caller is
+// pinned to. Both are empty for the repository that owns the reusable workflow,
+// and validate.go compares the committed file byte-for-byte against this
+// generator, so without a variant .hextap/SETUP.md could never match for the
+// toolkit itself.
+func TestSetupDocumentHasASelfAdopterVariant(t *testing.T) {
+	selfAdopter := string(setupDocument(toolkitSelfRepository, "hextap", "", ""))
+	external := string(setupDocument("SijanC147/example-tool", "example-tool", "v1.2.3", testToolkitSHA))
+
+	if strings.Contains(selfAdopter, "pinned to stable toolkit tag") {
+		t.Fatalf("self-adopter document claims an external pin:\n%s", selfAdopter)
+	}
+	if !strings.Contains(selfAdopter, "owns the reusable release workflow") {
+		t.Fatalf("self-adopter document does not explain the relative caller:\n%s", selfAdopter)
+	}
+
+	// The external form must be untouched: this variant exists for one identity
+	// and widening it would hand an adopter a way out of the full-SHA pin.
+	if !strings.Contains(external, "pinned to stable toolkit tag `v1.2.3` at full commit `"+testToolkitSHA+"`") {
+		t.Fatalf("external document lost its pin paragraph:\n%s", external)
+	}
+	if strings.Contains(external, "owns the reusable release workflow") {
+		t.Fatalf("external document carries the self-adopter paragraph:\n%s", external)
+	}
+
+	// One half empty is a malformed pin, not a self-adopter, and must keep the
+	// pinned paragraph so the mismatch is visible rather than excused.
+	for name, half := range map[string][2]string{
+		"an empty version alone": {"", testToolkitSHA},
+		"an empty SHA alone":     {"v1.2.3", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			document := string(setupDocument(toolkitSelfRepository, "hextap", half[0], half[1]))
+			if strings.Contains(document, "owns the reusable release workflow") {
+				t.Fatalf("%s was treated as a self-adopter:\n%s", name, document)
+			}
+		})
+	}
+}
