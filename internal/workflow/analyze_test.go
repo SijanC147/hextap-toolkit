@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -2259,6 +2260,46 @@ func TestCallerJobCarriesOnlyReusableCallKeys(t *testing.T) {
 		"a name":        "    name: Publish\n",
 		"a concurrency": "    concurrency: release\n",
 		"permissions":   "    permissions:\n      contents: write\n",
+	} {
+		t.Run("accepted "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: withJobKey(extra)})
+			if findings := preflightFindings(t, report, Policy{}); len(findings) != 0 {
+				t.Fatalf("findings = %v, want a caller carrying %s verified", findings, name)
+			}
+		})
+	}
+	// needs: is in callerJobKeys because GitHub accepts it on a job that calls a
+	// reusable workflow. With exactly one job it can only name that job or one
+	// that does not exist, so GitHub rejects the file at load and no release job
+	// starts, while the caller still verified. The diagnostic names the
+	// dependency rather than the key, so these cases assert on that instead of
+	// on "needs:".
+	for name, dependency := range map[string]string{
+		"needs: build":   "build",
+		"needs: [build]": "build",
+		"needs: release": "release",
+	} {
+		extra := "    " + name + "\n"
+		t.Run("rejected "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: withJobKey(extra)})
+			findings := preflightFindings(t, report, Policy{})
+			missing := 0
+			for _, finding := range findings {
+				if finding.Rule == RuleMissingHextapCaller {
+					missing++
+					if !strings.Contains(finding.Detail, strconv.Quote(dependency)) {
+						t.Fatalf("finding = %v, want it to name the dependency %q", finding, dependency)
+					}
+				}
+			}
+			if missing != 1 {
+				t.Fatalf("findings = %v, want exactly one missing-hextap-caller finding", findings)
+			}
+		})
+	}
+	for name, extra := range map[string]string{
+		"an empty needs sequence": "    needs: []\n",
+		"an empty needs scalar":   "    needs:\n",
 	} {
 		t.Run("accepted "+name, func(t *testing.T) {
 			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: withJobKey(extra)})

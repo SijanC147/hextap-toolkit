@@ -1422,7 +1422,7 @@ func (report *Report) callerVerification(policy Policy) (string, bool) {
 				return fmt.Sprintf("%s carries %d jobs, and every job of a caller is a release run against the same tag; the caller must carry exactly one",
 					callerFile, count), false
 			}
-			if job, key, found := unsupportedCallerJobKey(workflow.document); found {
+			if job, key, detail, found := unsupportedCallerJobKey(workflow.document); found {
 				switch key {
 				case "strategy":
 					return fmt.Sprintf("job %q of %s carries a strategy, so it would run the release once per matrix leg against the same tag",
@@ -1430,6 +1430,9 @@ func (report *Report) callerVerification(policy Policy) (string, bool) {
 				case "if":
 					return fmt.Sprintf("job %q of %s carries an if: condition, so it cannot be shown to run for the pushed tag, and a caller whose call is skipped owns nothing",
 						job, callerFile), false
+				case "needs":
+					return fmt.Sprintf("job %q of %s depends on %q, and a caller carrying exactly one job has nothing to depend on, so GitHub rejects the file and no release job starts",
+						job, callerFile, detail), false
 				}
 				return fmt.Sprintf("job %q of %s carries %s:, which GitHub does not accept on a job that calls a reusable workflow, so the file is rejected and no release job starts",
 					job, callerFile, key), false
@@ -1479,35 +1482,40 @@ var callerJobKeys = map[string]struct{}{
 }
 
 // unsupportedCallerJobKey names the first job carrying a key a caller may not,
-// and the key.
-func unsupportedCallerJobKey(document *node) (job, key string, found bool) {
+// the key, and a detail about it when the key has one, such as the name a
+// dangling needs: depends on.
+func unsupportedCallerJobKey(document *node) (job, key, detail string, found bool) {
 	if document == nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	jobs := document.child("jobs")
 	if jobs == nil || jobs.kind != nodeMapping {
-		return "", "", false
+		return "", "", "", false
 	}
 	for _, name := range jobs.keys {
 		current := jobs.values[name]
 		if current == nil || current.kind != nodeMapping {
 			continue
 		}
-		if _, key, found := unsupportedCallerKey(current); found {
-			return name, key, true
+		if detail, key, found := unsupportedCallerKey(current); found {
+			return name, key, detail, true
 		}
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // unsupportedCallerKey returns the first key of a job outside callerJobKeys.
 // if and strategy are reported first so the diagnostic names the sharper
-// reason.
+// reason. The first return carries a detail about the offending key when there
+// is one to give, such as the name a dangling needs: depends on.
 func unsupportedCallerKey(job *node) (string, string, bool) {
 	for _, guard := range []string{"if", "strategy"} {
 		if job.has(guard) {
 			return "", guard, true
 		}
+	}
+	if dependency, dangling := danglingCallerDependency(job); dangling {
+		return dependency, "needs", true
 	}
 	for _, key := range job.keys {
 		if _, ok := callerJobKeys[key]; !ok {
@@ -1515,6 +1523,39 @@ func unsupportedCallerKey(job *node) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+// danglingCallerDependency reports a non-empty needs: on a caller job, and the
+// first name it depends on. GitHub accepts needs: on a job that calls a
+// reusable workflow, which is why it is in callerJobKeys, but a caller carries
+// exactly one job, so any name it lists is either the job itself or a job that
+// does not exist. GitHub rejects the file at load and no release job ever
+// starts. Without this the caller still verifies and the preflight reports no
+// finding, so a broken caller reads as a healthy owner of the tag.
+//
+// An empty sequence and an empty scalar are both accepted: they depend on
+// nothing, so GitHub loads the file.
+func danglingCallerDependency(job *node) (string, bool) {
+	needs := job.child("needs")
+	if needs == nil {
+		return "", false
+	}
+	switch needs.kind {
+	case nodeScalar:
+		name := strings.TrimSpace(needs.value)
+		return name, name != ""
+	case nodeSequence:
+		for _, item := range needs.items {
+			if item == nil || item.kind != nodeScalar {
+				continue
+			}
+			if name := strings.TrimSpace(item.value); name != "" {
+				return name, true
+			}
+		}
+		return "", false
+	}
+	return "", false
 }
 
 func resolveCallerFile(callerFile string) string {
