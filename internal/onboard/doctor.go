@@ -127,9 +127,11 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 	if err := validateOnlineRulesets(repository, validated.RequiredChecks); err != nil {
 		return nil, err
 	}
-	resolved, err := resolveStableToolkitTag(validated.ToolkitVersion)
-	if err != nil || resolved != validated.ToolkitSHA {
-		return nil, errors.New("online doctor: stable toolkit tag does not resolve to the caller workflow SHA")
+	if !selfCallerPin(validated) {
+		resolved, err := resolveStableToolkitTag(validated.ToolkitVersion)
+		if err != nil || resolved != validated.ToolkitSHA {
+			return nil, errors.New("online doctor: stable toolkit tag does not resolve to the caller workflow SHA")
+		}
 	}
 	tapDestination := canonicalTapPath(validated.Manifest.Formula.Name)
 	tapData, err := ghRead(maximumLocalFile, "api", "-H", "Accept: application/vnd.github.raw+json", "repos/SijanC147/homebrew-hextap/contents/"+tapDestination)
@@ -164,13 +166,20 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 	} else if _, err := formulaengine.ValidateCanonical([]byte(formulaData), validated.Manifest); err != nil {
 		return nil, errors.New("online doctor: tap Formula does not satisfy the manifest Formula contract")
 	}
+	// Name the provenance line for what actually happened. Reporting "stable
+	// toolkit provenance" after skipping it would claim a check that never ran,
+	// which is the failure this whole family of checks exists to prevent.
+	provenance := "stable toolkit provenance"
+	if selfCallerPin(validated) {
+		provenance = "toolkit self-caller: no external pin to verify"
+	}
 	return []string{
 		"GitHub authentication",
 		"default branch main",
 		"immutable releases",
 		"Actions secret name",
 		"owned active ruleset bodies",
-		"stable toolkit provenance",
+		provenance,
 		"canonical tap registration and Formula contract",
 	}, nil
 }
@@ -286,6 +295,21 @@ func normalizeRuleset(body remoteRulesetDetail, actors []normalizedBypassActor) 
 		Conditions:   conditions,
 		Rules:        rules,
 	}, nil
+}
+
+// selfCallerPin reports the toolkit's own relative same-repository caller, by
+// the only signature it has: validateWorkflow returns an empty toolkit version
+// and SHA for it, and for nothing else. An external caller cannot reach here
+// with an empty pin, because validateWorkflow fails locally with "caller
+// workflow lacks an exact stable toolkit version and full SHA pin" before any
+// online check runs.
+//
+// The pair is tested rather than a path, so widening this to any other caller
+// shape would take a deliberate change to validateWorkflow rather than a
+// filename that happens to match. One half empty is not a self-caller: that is
+// a malformed pin, and it still fails the provenance check below.
+func selfCallerPin(validated ValidateResult) bool {
+	return validated.ToolkitVersion == "" && validated.ToolkitSHA == ""
 }
 
 func resolveStableToolkitTag(version string) (string, error) {
