@@ -257,6 +257,79 @@ func TestDoctorOnlineAcceptsLightweightAndBoundedAnnotatedTags(t *testing.T) {
 	}
 }
 
+// TestDoctorOnlineSkipsProvenanceForTheSelfCallerOnly guards SB23-848. SB23-739
+// taught the local validator to accept the toolkit's relative same-repository
+// caller by returning an empty toolkit version and SHA. The online path still
+// resolved that empty version as a tag, so `doctor --online` against the
+// toolkit root could only ever fail, and the failure read like remote drift
+// rather than the absent pin it is.
+//
+// The check is skipped rather than replaced. Replacing it with something the
+// toolkit can satisfy, such as HEAD being reachable from a stable tag, needs a
+// local commit that doctorOnline cannot see: it receives only a ValidateResult,
+// with no project root, and the online path shells out solely through `gh api`
+// plus one `gh auth status`. Reading HEAD would take both a signature change
+// and a git invocation, which is the new call shape SB23-848 said to avoid. It
+// would also fail on any ordinary development commit on main after a release,
+// reporting the repository's normal state as drift.
+func TestDoctorOnlineSkipsProvenanceForTheSelfCallerOnly(t *testing.T) {
+	project := writeGoProject(t)
+	if _, err := Onboard(validOptions(project)); err != nil {
+		t.Fatal(err)
+	}
+	logPath := writeFakeGH(t, project)
+	validated, err := Validate(ValidateOptions{Project: project})
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if validated.ToolkitVersion == "" || validated.ToolkitSHA == "" {
+		t.Fatalf("fixture must carry an external pin, got %q %q", validated.ToolkitVersion, validated.ToolkitSHA)
+	}
+
+	// The self-caller's signature, and the only way both arrive empty.
+	validated.ToolkitVersion = ""
+	validated.ToolkitSHA = ""
+	checks, err := doctorOnline(validated)
+	if err != nil {
+		t.Fatalf("doctorOnline(self-caller) = %v, want the sequence to continue past provenance", err)
+	}
+	// Continuing past provenance is the point: the tap registration and Formula
+	// contract check runs after it and must still be reached and reported.
+	if len(checks) == 0 || !strings.Contains(strings.Join(checks, "\n"), "canonical tap registration") {
+		t.Fatalf("checks = %v, want the online sequence to reach the tap contract check", checks)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "git/ref/tags/") {
+		t.Fatalf("self-caller resolved a toolkit tag, want the provenance check skipped:\n%s", log)
+	}
+}
+
+// TestSelfCallerPinRequiresBothHalvesEmpty keeps the guard narrow. A pin with
+// one half empty is malformed, not a self-caller, and must still be carried
+// into the provenance check rather than skipped past it.
+func TestSelfCallerPinRequiresBothHalvesEmpty(t *testing.T) {
+	for name, test := range map[string]struct {
+		version string
+		sha     string
+		want    bool
+	}{
+		"both empty is the self-caller": {want: true},
+		"an external pin is not":        {version: "v1.2.3", sha: testToolkitSHA},
+		"an empty version alone is not": {sha: testToolkitSHA},
+		"an empty SHA alone is not":     {version: "v1.2.3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := selfCallerPin(ValidateResult{ToolkitVersion: test.version, ToolkitSHA: test.sha})
+			if got != test.want {
+				t.Fatalf("selfCallerPin(%q, %q) = %v, want %v", test.version, test.sha, got, test.want)
+			}
+		})
+	}
+}
+
 func TestDoctorOnlineReportsEveryRemoteInvariantFailure(t *testing.T) {
 	tests := map[string]string{
 		"auth":                      "auth",

@@ -127,9 +127,11 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 	if err := validateOnlineRulesets(repository, validated.RequiredChecks); err != nil {
 		return nil, err
 	}
-	resolved, err := resolveStableToolkitTag(validated.ToolkitVersion)
-	if err != nil || resolved != validated.ToolkitSHA {
-		return nil, errors.New("online doctor: stable toolkit tag does not resolve to the caller workflow SHA")
+	if !selfCallerPin(validated) {
+		resolved, err := resolveStableToolkitTag(validated.ToolkitVersion)
+		if err != nil || resolved != validated.ToolkitSHA {
+			return nil, errors.New("online doctor: stable toolkit tag does not resolve to the caller workflow SHA")
+		}
 	}
 	tapDestination := canonicalTapPath(validated.Manifest.Formula.Name)
 	tapData, err := ghRead(maximumLocalFile, "api", "-H", "Accept: application/vnd.github.raw+json", "repos/SijanC147/homebrew-hextap/contents/"+tapDestination)
@@ -286,6 +288,21 @@ func normalizeRuleset(body remoteRulesetDetail, actors []normalizedBypassActor) 
 		Conditions:   conditions,
 		Rules:        rules,
 	}, nil
+}
+
+// selfCallerPin reports the toolkit's own relative same-repository caller, by
+// the only signature it has: validateWorkflow returns an empty toolkit version
+// and SHA for it, and for nothing else. An external caller cannot reach here
+// with an empty pin, because validateWorkflow fails locally with "caller
+// workflow lacks an exact stable toolkit version and full SHA pin" before any
+// online check runs.
+//
+// The pair is tested rather than a path, so widening this to any other caller
+// shape would take a deliberate change to validateWorkflow rather than a
+// filename that happens to match. One half empty is not a self-caller: that is
+// a malformed pin, and it still fails the provenance check below.
+func selfCallerPin(validated ValidateResult) bool {
+	return validated.ToolkitVersion == "" && validated.ToolkitSHA == ""
 }
 
 func resolveStableToolkitTag(version string) (string, error) {
