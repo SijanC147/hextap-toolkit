@@ -166,13 +166,20 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 	} else if _, err := formulaengine.ValidateCanonical([]byte(formulaData), validated.Manifest); err != nil {
 		return nil, errors.New("online doctor: tap Formula does not satisfy the manifest Formula contract")
 	}
+	// Name the provenance line for what actually happened. Reporting "stable
+	// toolkit provenance" after skipping it would claim a check that never ran,
+	// which is the failure this whole family of checks exists to prevent.
+	provenance := "stable toolkit provenance"
+	if selfCallerPin(validated) {
+		provenance = "toolkit self-caller: no external pin to verify"
+	}
 	return []string{
 		"GitHub authentication",
 		"default branch main",
 		"immutable releases",
 		"Actions secret name",
 		"owned active ruleset bodies",
-		"stable toolkit provenance",
+		provenance,
 		"canonical tap registration and Formula contract",
 	}, nil
 }
