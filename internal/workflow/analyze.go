@@ -1431,6 +1431,10 @@ func (report *Report) callerVerification(policy Policy) (string, bool) {
 					return fmt.Sprintf("job %q of %s carries an if: condition, so it cannot be shown to run for the pushed tag, and a caller whose call is skipped owns nothing",
 						job, callerFile), false
 				case "needs":
+					if detail == "" {
+						return fmt.Sprintf("job %q of %s carries a needs: value that is neither a job name nor a list of them, which GitHub does not accept on a job that calls a reusable workflow, so the file is rejected and no release job starts",
+							job, callerFile), false
+					}
 					return fmt.Sprintf("job %q of %s depends on %q, and a caller carrying exactly one job has nothing to depend on, so GitHub rejects the file and no release job starts",
 						job, callerFile, detail), false
 				}
@@ -1535,16 +1539,28 @@ func unsupportedCallerKey(job *node) (string, string, bool) {
 //
 // An empty sequence and an empty scalar are both accepted: they depend on
 // nothing, so GitHub loads the file.
+// The second return reports that the needs: must be rejected. The first names
+// the job it depends on when there is one to name; it is empty when the value
+// is a shape GitHub does not accept at all, which is rejected just the same.
 func danglingCallerDependency(job *node) (string, bool) {
 	needs := job.child("needs")
-	if needs == nil {
+	if needs == nil || needs.isEmpty() {
+		// isEmpty covers the null spellings as well as a bare needs:. GitHub
+		// treats needs:, needs: null, needs: ~, Null and NULL as the same empty
+		// value, so rejecting one and accepting another would refuse a caller
+		// that loads perfectly well, and would name a job called "null".
 		return "", false
 	}
 	switch needs.kind {
 	case nodeScalar:
-		name := strings.TrimSpace(needs.value)
-		return name, name != ""
+		if name := strings.TrimSpace(needs.value); name != "" {
+			return name, true
+		}
+		return "", true
 	case nodeSequence:
+		if len(needs.items) == 0 {
+			return "", false
+		}
 		for _, item := range needs.items {
 			if item == nil || item.kind != nodeScalar {
 				continue
@@ -1553,9 +1569,13 @@ func danglingCallerDependency(job *node) (string, bool) {
 				return name, true
 			}
 		}
-		return "", false
+		// A sequence with entries but no usable job name, such as [""] or a
+		// nested sequence. GitHub rejects the file, so the caller owns nothing.
+		return "", true
 	}
-	return "", false
+	// A mapping, or any other kind. needs: accepts a string or a sequence of
+	// strings and nothing else, so the file does not load.
+	return "", true
 }
 
 func resolveCallerFile(callerFile string) string {

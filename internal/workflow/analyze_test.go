@@ -2300,11 +2300,44 @@ func TestCallerJobCarriesOnlyReusableCallKeys(t *testing.T) {
 	for name, extra := range map[string]string{
 		"an empty needs sequence": "    needs: []\n",
 		"an empty needs scalar":   "    needs:\n",
+		// GitHub treats every null spelling as the same empty value, so
+		// rejecting one and accepting another would refuse a caller that loads,
+		// and would report a job named "null".
+		"an explicit null needs":   "    needs: null\n",
+		"a tilde null needs":       "    needs: ~\n",
+		"a capitalised null needs": "    needs: Null\n",
+		"an upper-case null needs": "    needs: NULL\n",
 	} {
 		t.Run("accepted "+name, func(t *testing.T) {
 			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: withJobKey(extra)})
 			if findings := preflightFindings(t, report, Policy{}); len(findings) != 0 {
 				t.Fatalf("findings = %v, want a caller carrying %s verified", findings, name)
+			}
+		})
+	}
+	// Shapes GitHub does not accept for needs: at all. The file never loads, so
+	// the caller owns nothing, and the diagnostic cannot name a dependency.
+	for name, extra := range map[string]string{
+		"a flow mapping needs":       "    needs: {build: yes}\n",
+		"a block mapping needs":      "    needs:\n      build: yes\n",
+		"an empty string in needs":   "    needs: [\"\"]\n",
+		"an empty entry in needs":    "    needs:\n      - \"\"\n",
+		"a nested sequence in needs": "    needs:\n      - - build\n",
+	} {
+		t.Run("rejected "+name, func(t *testing.T) {
+			report := analyzeWorkflows(t, map[string]string{DefaultCallerFile: withJobKey(extra)})
+			findings := preflightFindings(t, report, Policy{})
+			missing := 0
+			for _, finding := range findings {
+				if finding.Rule == RuleMissingHextapCaller {
+					missing++
+					if !strings.Contains(finding.Detail, "neither a job name nor a list of them") {
+						t.Fatalf("finding = %v, want it to name the unusable needs: shape", finding)
+					}
+				}
+			}
+			if missing != 1 {
+				t.Fatalf("findings = %v, want exactly one missing-hextap-caller finding", findings)
 			}
 		})
 	}
