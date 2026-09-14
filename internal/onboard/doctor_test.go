@@ -295,8 +295,18 @@ func TestDoctorOnlineSkipsProvenanceForTheSelfCallerOnly(t *testing.T) {
 	}
 	// Continuing past provenance is the point: the tap registration and Formula
 	// contract check runs after it and must still be reached and reported.
-	if len(checks) == 0 || !strings.Contains(strings.Join(checks, "\n"), "canonical tap registration") {
+	reported := strings.Join(checks, "\n")
+	if len(checks) == 0 || !strings.Contains(reported, "canonical tap registration") {
 		t.Fatalf("checks = %v, want the online sequence to reach the tap contract check", checks)
+	}
+	// A skipped check must not be reported as one that ran. Claiming coverage
+	// that was never exercised is the defect this package's checks exist to
+	// catch, and it would be worse here than the failure it replaced.
+	if strings.Contains(reported, "stable toolkit provenance") {
+		t.Fatalf("checks = %v, want the skipped provenance check not reported as passed", checks)
+	}
+	if !strings.Contains(reported, "no external pin to verify") {
+		t.Fatalf("checks = %v, want the self-caller provenance line to say it was not verified", checks)
 	}
 	log, err := os.ReadFile(logPath)
 	if err != nil {
