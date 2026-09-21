@@ -13,20 +13,44 @@ import (
 )
 
 const (
-	arm64URLToken                    = "@ARM64_URL@"
-	arm64SHAToken                    = "@ARM64_SHA256@"
-	amd64URLToken                    = "@AMD64_URL@"
-	amd64SHAToken                    = "@AMD64_SHA256@"
-	profileArchitectureTemplateBlock = `  if Hardware::CPU.arm?
-    url "@ARM64_URL@"
-    sha256 "@ARM64_SHA256@"
-  else
-    url "@AMD64_URL@"
-    sha256 "@AMD64_SHA256@"
-  end`
+	arm64URLToken = "@ARM64_URL@"
+	arm64SHAToken = "@ARM64_SHA256@"
+	amd64URLToken = "@AMD64_URL@"
+	amd64SHAToken = "@AMD64_SHA256@"
+	// rubyConstantPattern is a Ruby constant reference, optionally namespaced:
+	// GitHubPrivateReleaseDownloadStrategy, or Hextap::PrivateAsset. It is
+	// deliberately narrower than Ruby allows, because the only thing that
+	// belongs here is a download strategy class name.
+	rubyConstantPattern = `[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*`
 )
 
 var profileTokenPattern = regexp.MustCompile(`@[^@\t \r\n]+@`)
+
+// profileArchitectureBlockPattern is the canonical architecture block, with one
+// thing allowed to vary: each url may carry a Homebrew download strategy.
+//
+// The block used to be an exact literal, which made a whole class of adopter
+// impossible to package. Homebrew attaches a download strategy in exactly one
+// way, a `using:` argument on the url call, and a formula whose release asset
+// lives in a private repository cannot be installed without one: the rendered
+// release URL cannot be authenticated, so the strategy is the install route
+// rather than a preference (SB23-2503). A template that needed one could not
+// match the literal, so the tap-owned profile and the private-asset route were
+// mutually exclusive (SB23-2540).
+//
+// The suffix is optional and it is the ONLY thing permitted after the URL
+// token, so the block stays a fixed shape rather than a free-form match, and
+// the four tokens stay the only variable parts of the rendering. Both urls are
+// captured so the caller can require them to agree; see
+// validateProfileTemplateTokens for why that matters.
+var profileArchitectureBlockPattern = regexp.MustCompile(
+	`  if Hardware::CPU\.arm\?\n` +
+		`    url "` + regexp.QuoteMeta(arm64URLToken) + `"(, using: ` + rubyConstantPattern + `)?\n` +
+		`    sha256 "` + regexp.QuoteMeta(arm64SHAToken) + `"\n` +
+		`  else\n` +
+		`    url "` + regexp.QuoteMeta(amd64URLToken) + `"(, using: ` + rubyConstantPattern + `)?\n` +
+		`    sha256 "` + regexp.QuoteMeta(amd64SHAToken) + `"\n` +
+		`  end`)
 
 type profileTokenOccurrence struct {
 	index int
@@ -155,8 +179,18 @@ func renderProfileTemplate(template []byte, project manifest.Manifest, version, 
 }
 
 func validateProfileTemplateTokens(template []byte) ([]profileTokenOccurrence, error) {
-	if count := bytes.Count(template, []byte(profileArchitectureTemplateBlock)); count != 1 {
-		return nil, fmt.Errorf("tap-owned Formula template must contain exactly one canonical architecture metadata block, found %d", count)
+	blocks := profileArchitectureBlockPattern.FindAllSubmatch(template, -1)
+	if len(blocks) != 1 {
+		return nil, fmt.Errorf("tap-owned Formula template must contain exactly one canonical architecture metadata block, found %d", len(blocks))
+	}
+	// Both architectures must name the same strategy, or neither. A template
+	// that authenticates the arm64 asset and not the x86_64 one installs on one
+	// Mac and fails on the other, and the failure is a 404 on a private asset,
+	// which reads like a typo in the formula name rather than a missing
+	// credential. Accepting one suffix without the other would make the cheaper
+	// half of that mistake silent.
+	if !bytes.Equal(blocks[0][1], blocks[0][2]) {
+		return nil, errors.New("tap-owned Formula template must name the same download strategy for both architectures")
 	}
 	tokens := []string{arm64URLToken, arm64SHAToken, amd64URLToken, amd64SHAToken}
 	allowed := make(map[string]bool, len(tokens))
