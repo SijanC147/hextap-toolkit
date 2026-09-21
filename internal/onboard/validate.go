@@ -100,7 +100,7 @@ func Validate(options ValidateOptions) (ValidateResult, error) {
 	if !exactFileMode(info, 0o644) {
 		return ValidateResult{}, errors.New("caller workflow mode must be 0644")
 	}
-	toolkitVersion, toolkitSHA, err := validateWorkflow(root, repository, workflow)
+	toolkitVersion, toolkitSHA, err := validateWorkflow(root, repository, project.Release.SubmodulesMode(), workflow)
 	if err != nil {
 		return ValidateResult{}, err
 	}
@@ -215,9 +215,9 @@ func readManagedArtifact(root, relative string) ([]byte, os.FileInfo, error) {
 // the workflow relatively, because the release tag it is building already is
 // the execution identity and there is nothing external to pin to. A relative
 // caller returns an empty toolkit version and SHA: it has no external pin.
-func validateWorkflow(root, repository string, data []byte) (version, commit string, err error) {
+func validateWorkflow(root, repository, submodules string, data []byte) (version, commit string, err error) {
 	if selfCallerPattern.Match(data) {
-		if err := validateSelfCaller(root, repository, data); err != nil {
+		if err := validateSelfCaller(root, repository, submodules, data); err != nil {
 			return "", "", err
 		}
 		return "", "", nil
@@ -230,7 +230,7 @@ func validateWorkflow(root, repository string, data []byte) (version, commit str
 	if err := validateToolkitPin(version, commit); err != nil {
 		return "", "", err
 	}
-	if !bytes.Equal(data, workflowBytes(version, commit)) {
+	if !bytes.Equal(data, workflowBytes(version, commit, submodules)) {
 		return "", "", errors.New("caller workflow does not match the exact owned thin caller")
 	}
 	return version, commit, nil
@@ -243,7 +243,7 @@ func validateWorkflow(root, repository string, data []byte) (version, commit str
 // relative reference actually resolves to, and the exact owned self-caller
 // bytes. Owner is deliberately not rechecked here: Validate already restricts
 // the supported owner, so duplicating that condition would add nothing.
-func validateSelfCaller(root, repository string, data []byte) error {
+func validateSelfCaller(root, repository, submodules string, data []byte) error {
 	_, name, err := parseRepository(repository)
 	if err != nil {
 		return err
@@ -256,7 +256,7 @@ func validateSelfCaller(root, repository string, data []byte) error {
 	} else if !exactFileMode(info, 0o644) {
 		return fmt.Errorf("same-repository reusable workflow %s mode must be 0644", reusableWorkflowPath)
 	}
-	if !bytes.Equal(data, selfCallerBytes()) {
+	if !bytes.Equal(data, selfCallerBytes(submodules)) {
 		return errors.New("caller workflow does not match the exact owned same-repository self-caller")
 	}
 	return nil
@@ -265,8 +265,8 @@ func validateSelfCaller(root, repository string, data []byte) error {
 // selfCallerBytes is the exact owned toolkit self-caller. Onboarding never
 // generates it — no adopter may have one — so it is a validation expectation
 // rather than a template in templates.go.
-func selfCallerBytes() []byte {
-	return []byte(`name: Hextap toolkit release
+func selfCallerBytes(submodules string) []byte {
+	return []byte(fmt.Sprintf(`name: Hextap toolkit release
 
 on:
   push:
@@ -290,10 +290,10 @@ jobs:
     with:
       manifest_path: .hextap.json
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-      mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}
+      mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}%s
     secrets:
       op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-`)
+`, submodulesInput(submodules)))
 }
 
 func validateMainRuleset(data []byte) ([]string, error) {

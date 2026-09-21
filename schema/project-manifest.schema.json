@@ -288,11 +288,37 @@
         "linux": {
           "type": "boolean"
         },
+        "checkout": {
+          "$ref": "#/$defs/releaseCheckout"
+        },
         "profile": {
           "$ref": "#/$defs/releaseProfile"
         },
         "targets": {
           "$ref": "#/$defs/releaseTargets"
+        }
+      }
+    },
+    "releaseCheckout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "submodules"
+      ],
+      "properties": {
+        "submodules": {
+          "type": "string",
+          "oneOf": [
+            {
+              "const": "false"
+            },
+            {
+              "const": "true"
+            },
+            {
+              "const": "recursive"
+            }
+          ]
         }
       }
     },
@@ -323,6 +349,9 @@
       "properties": {
         "build_script": {
           "$ref": "#/$defs/relativePath"
+        },
+        "checkout": {
+          "$ref": "#/$defs/releaseCheckout"
         },
         "profile": {
           "$ref": "#/$defs/releaseProfile"

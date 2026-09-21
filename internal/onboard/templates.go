@@ -82,7 +82,19 @@ CGO_ENABLED=0 GOOS="$HEXTAP_TARGET_OS" GOARCH="$HEXTAP_TARGET_ARCH" \
 `, versionSymbol, commitSymbol, goPackage))
 }
 
-func workflowBytes(toolkitVersion, toolkitSHA string) []byte {
+// submodulesInput renders the caller's submodules line, or nothing at all when
+// the manifest leaves release.checkout out or sets the default. A caller that
+// checks out no submodules stays byte-identical to the one onboarding wrote
+// before this input existed, so no adopter's committed workflow is invalidated
+// by the field arriving.
+func submodulesInput(submodules string) string {
+	if submodules == "" || submodules == manifest.SubmodulesNone {
+		return ""
+	}
+	return fmt.Sprintf("\n      submodules: %q", submodules)
+}
+
+func workflowBytes(toolkitVersion, toolkitSHA, submodules string) []byte {
 	return []byte(fmt.Sprintf(`name: Hextap release
 
 on:
@@ -107,10 +119,10 @@ jobs:
     with:
       manifest_path: .hextap.json
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-      mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}
+      mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}%s
     secrets:
       op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-`, toolkitSHA, toolkitVersion))
+`, toolkitSHA, toolkitVersion, submodulesInput(submodules)))
 }
 
 func mainRulesetBytes(checks []string) ([]byte, error) {

@@ -578,7 +578,7 @@ func TestManagedConflictsCauseZeroWrites(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, workflowBytes("v1.2.3", testToolkitSHA), 0o600); err != nil {
+			if err := os.WriteFile(path, workflowBytes("v1.2.3", testToolkitSHA, ""), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		},

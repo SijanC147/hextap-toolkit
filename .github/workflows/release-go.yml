@@ -12,6 +12,11 @@ on:
       mode:
         required: true
         type: string
+      submodules:
+        description: Submodule checkout mode for the caller source; false, true, or recursive.
+        required: false
+        type: string
+        default: "false"
     secrets:
       op_service_account_token:
         required: true
@@ -46,6 +51,22 @@ jobs:
       manifest_artifact_id: ${{ steps.manifest-artifact.outputs.artifact-id }}
       manifest_sha256: ${{ steps.manifest.outputs.sha256 }}
     steps:
+      - name: Validate submodule checkout mode
+        env:
+          RAW_SUBMODULES: ${{ inputs.submodules }}
+        run: |
+          if [[ ! "$RAW_SUBMODULES" =~ ^(false|true|recursive)$ ]]; then
+            printf '::error title=Invalid submodules input::%s\n' \
+              "submodules must be false, true, or recursive"
+            exit 1
+          fi
+
+      # No submodules here on purpose. This checkout is detached to the
+      # resolved tag by the "Resolve and detach tagged source" step below,
+      # and git checkout does not move submodule work trees, so any
+      # submodule fetched here would sit at the commit recorded on the
+      # pushed ref rather than on the tag. Nothing in this job reads
+      # submodule content: it resolves the tag and validates the manifest.
       - name: Check out caller source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -142,6 +163,25 @@ jobs:
           [[ "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
           printf 'sha256=%s\n' "$manifest_sha256" >> "$GITHUB_OUTPUT"
 
+      # The submodules input is read from the caller workflow file at the
+      # dispatched ref. The manifest is read at the resolved tag and is the
+      # authority for everything else in this workflow. Nothing makes the two
+      # agree on their own, so a tag that changes release.checkout.submodules
+      # without its thin caller being regenerated would build with the stale
+      # caller value, or with the false default, against empty component
+      # directories, and report success. This refuses that run, in validate,
+      # before the quality and build checkouts exist.
+      - name: Require the caller submodule mode to match the sealed manifest
+        env:
+          RAW_SUBMODULES: ${{ inputs.submodules }}
+          MANIFEST_SUBMODULES: ${{ steps.manifest.outputs.submodules }}
+        run: |
+          if [[ "$RAW_SUBMODULES" != "$MANIFEST_SUBMODULES" ]]; then
+            printf '::error title=Submodule checkout mode does not match the manifest::%s\n' \
+              "the caller passed '$RAW_SUBMODULES' and the tagged manifest declares '$MANIFEST_SUBMODULES'; regenerate the caller with hextap onboard"
+            exit 1
+          fi
+
       - name: Validate Homebrew-only release
         if: steps.metadata.outputs.mode == 'homebrew-only'
         env:
@@ -186,6 +226,7 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
           path: source
           persist-credentials: false
+          submodules: ${{ inputs.submodules }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.validate.outputs.runtime == 'bun'
         with:
@@ -278,6 +319,7 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
           path: source
           persist-credentials: false
+          submodules: ${{ inputs.submodules }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit

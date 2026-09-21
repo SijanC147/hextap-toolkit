@@ -42,6 +42,7 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 	assertStructProperties(t, definition(t, definitions, "repository"), reflect.TypeOf(Repository{}))
 	assertStructProperties(t, definition(t, definitions, "assets"), reflect.TypeOf(Assets{}))
 	assertStructProperties(t, definition(t, definitions, "release"), reflect.TypeOf(Release{}))
+	assertStructProperties(t, definition(t, definitions, "releaseCheckout"), reflect.TypeOf(ReleaseCheckout{}))
 	assertStructProperties(t, definition(t, definitions, "releaseProfile"), reflect.TypeOf(ReleaseProfile{}))
 	assertStructProperties(t, definition(t, definitions, "command"), reflect.TypeOf(Command{}))
 	assertStructProperties(t, definition(t, definitions, "targetArtifacts"), reflect.TypeOf(TargetArtifacts{}))
@@ -52,6 +53,7 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 		"repository",
 		"assets",
 		"release",
+		"releaseCheckout",
 		"releaseLegacy",
 		"releaseProfileContract",
 		"releaseProfile",
@@ -86,6 +88,7 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 	assertRequired(t, definition(t, definitions, "repository"), "owner", "name")
 	assertRequired(t, definition(t, definitions, "assets"), "darwin_arm64", "darwin_amd64")
 	assertRequired(t, definition(t, definitions, "release"), "build_script")
+	assertRequired(t, definition(t, definitions, "releaseCheckout"), "submodules")
 	assertRequired(t, definition(t, definitions, "releaseProfile"), "runtime", "runtime_version", "install", "quality", "prepare")
 	assertRequired(t, definition(t, definitions, "command"), "name", "argv")
 	assertRequired(t, definition(t, definitions, "releaseTargets"), "darwin_arm64", "darwin_amd64")
@@ -281,6 +284,9 @@ func TestManifestConformanceCorpus(t *testing.T) {
 		}},
 		{name: "invalid caveats terminator", mutate: func(value map[string]any) {
 			object(t, value["homebrew"], "homebrew")["caveats"] = "before\nEOS\nafter"
+		}},
+		{name: "invalid schema 1 release checkout", mutate: func(value map[string]any) {
+			object(t, value["release"], "release")["checkout"] = map[string]any{"submodules": "recursive"}
 		}},
 	}
 

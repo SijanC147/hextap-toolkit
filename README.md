@@ -489,6 +489,7 @@ service, caveats, tests, comments, or formatting into source metadata.
 | `formula.assets` | Distinct safe `.tar.gz` basenames for Darwin arm64 and amd64. |
 | `release.build_script` | Clean repository-relative path; absolute paths, traversal, backslashes, and unsafe path components are rejected. |
 | `release.linux` | Required boolean recording whether the future release workflow should also build Linux archives. |
+| `release.checkout` | Schema 2 only, optional. One field, `submodules`, which must be the string `"false"`, `"true"`, or `"recursive"`. Omitting the block means `"false"`. |
 | `release.profile` | Schema 2 only. Requires `runtime: bun`, a pinned stable `runtime_version`, exact frozen-lock install argv, named quality argv, and named build-preparation argv. |
 | `release.targets` | Schema 2 only. Requires Darwin arm64/amd64; permits paired Linux arm64/amd64 and optional Windows amd64. Asset basenames must be globally unique after case-folding and may not use reserved `SHA256SUMS`. |
 | `target.binary` / `archive` | Explicit raw executable and/or canonical `.tar.gz` output derived from one adapter invocation. `archive_contents` is required with an archive. |
@@ -514,6 +515,36 @@ Formula must be byte-identical to that template rendered with its canonical
 current URLs and lowercase checksums. Hextap then renders the new Formula solely
 from the same template, so service, caveats, tests, comments, Ruby expressions,
 and formatting remain reviewed tap-owned bytes without interpreting Ruby.
+
+### Submodules
+
+A project that carries components as git submodules declares
+`release.checkout.submodules`, and `hextap onboard` writes the matching
+`submodules:` input into the generated caller. The reusable workflow checks
+those submodules out itself, on the two checkouts that run project-owned
+commands against the resolved tag, and it does so **before** the offline
+boundary. `release.build_script` must never fetch: the build runs inside
+`sudo -n unshare --net` on Linux, where it has no network and cannot recover a
+missing component. A manifest that omits the block behaves exactly as it did
+before the field existed, so nothing changes for a project without submodules.
+
+The input alone is not enough for a **private** submodule. `actions/checkout`
+authenticates with the job's `GITHUB_TOKEN`, which cannot read a sibling
+private repository, so a private submodule fails the checkout with a clone
+error rather than producing an empty tree. That needs a credential with
+Contents read on each submodule repository, a fine-grained PAT mapped into the
+workflow, and it is tracked separately as SB23-2470. Until it lands, this input
+covers public submodules.
+
+The documented interim workaround, initialising submodules from
+`release.profile.prepare`, is narrower than it looks. `prepare` runs only when
+`release.profile.runtime` is `bun`, so a Go-runtime project has no `prepare`
+step at all. When it does run it runs from the repository root with the
+runner's `PATH`, so `git` is reachable and
+`["git", "submodule", "update", "--init", "--recursive"]` is expressible as
+argv. But the caller-source checkout sets `persist-credentials: false`, so that
+`git` invocation carries no token either, and the workaround is also limited to
+public submodules.
 
 Stable versions accepted by Formula commands are strict `X.Y.Z` SemVer:
 

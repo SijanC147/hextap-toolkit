@@ -76,8 +76,44 @@ type Assets struct {
 type Release struct {
 	BuildScript string                     `json:"build_script"`
 	Linux       *bool                      `json:"linux,omitempty"`
+	Checkout    *ReleaseCheckout           `json:"checkout,omitempty"`
 	Profile     *ReleaseProfile            `json:"profile,omitempty"`
 	Targets     map[string]TargetArtifacts `json:"targets,omitempty"`
+}
+
+// ReleaseCheckout declares how the reusable workflow checks the caller's
+// source out, for the two checkouts that run project-owned commands against
+// the resolved tag. It is not a build-time setting: the workflow performs the
+// checkout before the offline boundary, so release.build_script never fetches.
+type ReleaseCheckout struct {
+	Submodules string `json:"submodules"`
+}
+
+// SubmodulesMode returns the declared submodule checkout mode, or the default
+// when the manifest omits release.checkout.
+func (r Release) SubmodulesMode() string {
+	if r.Checkout == nil {
+		return SubmodulesNone
+	}
+	return r.Checkout.Submodules
+}
+
+// The submodule checkout modes actions/checkout accepts. Anything else is
+// silently coerced to false by the action, so the manifest rejects it here
+// rather than letting a typo reproduce the empty-tree bug it exists to fix.
+const (
+	SubmodulesNone      = "false"
+	SubmodulesTop       = "true"
+	SubmodulesRecursive = "recursive"
+)
+
+func (c ReleaseCheckout) validate() error {
+	switch c.Submodules {
+	case SubmodulesNone, SubmodulesTop, SubmodulesRecursive:
+		return nil
+	default:
+		return fmt.Errorf("validate manifest: release.checkout.submodules must be %q, %q, or %q", SubmodulesNone, SubmodulesTop, SubmodulesRecursive)
+	}
 }
 
 // ReleaseProfile defines project-owned commands that are executed directly,
@@ -163,9 +199,10 @@ func (m Manifest) MarshalJSON() ([]byte, error) {
 		Formula: m.Formula,
 		Release: struct {
 			BuildScript string                     `json:"build_script"`
+			Checkout    *ReleaseCheckout           `json:"checkout,omitempty"`
 			Profile     *ReleaseProfile            `json:"profile"`
 			Targets     map[string]TargetArtifacts `json:"targets"`
-		}{BuildScript: m.Release.BuildScript, Profile: m.Release.Profile, Targets: m.Release.Targets},
+		}{BuildScript: m.Release.BuildScript, Checkout: m.Release.Checkout, Profile: m.Release.Profile, Targets: m.Release.Targets},
 		Homebrew: struct {
 			MacOSOnly      bool     `json:"macos_only"`
 			TestArgs       []string `json:"test_args"`
@@ -310,9 +347,14 @@ func validateRequiredFields(data []byte) error {
 			return err
 		}
 	case ProfileSchema:
-		release, err := requireExactObjectFields(root["release"], "release", []string{"build_script", "profile", "targets"}, nil)
+		release, err := requireExactObjectFields(root["release"], "release", []string{"build_script", "profile", "targets"}, []string{"checkout"})
 		if err != nil {
 			return err
+		}
+		if checkout, declared := release["checkout"]; declared {
+			if _, err := requireExactObjectFields(checkout, "release.checkout", []string{"submodules"}, nil); err != nil {
+				return err
+			}
 		}
 		profile, err := requireExactObjectFields(release["profile"], "release.profile", []string{"runtime", "runtime_version", "install", "quality", "prepare"}, nil)
 		if err != nil {
@@ -495,12 +537,17 @@ func (m Manifest) Validate() error {
 	}
 	switch m.Schema {
 	case LegacySchema:
-		if m.Release.Linux == nil || m.Release.Profile != nil || m.Release.Targets != nil {
+		if m.Release.Linux == nil || m.Release.Profile != nil || m.Release.Targets != nil || m.Release.Checkout != nil {
 			return errors.New("validate manifest: schema 1 release requires only build_script and linux")
 		}
 	case ProfileSchema:
 		if m.Release.Linux != nil || m.Release.Profile == nil || m.Release.Targets == nil {
 			return errors.New("validate manifest: schema 2 release requires build_script, profile, and targets")
+		}
+		if m.Release.Checkout != nil {
+			if err := m.Release.Checkout.validate(); err != nil {
+				return err
+			}
 		}
 		if err := m.Release.Profile.validate(); err != nil {
 			return err
