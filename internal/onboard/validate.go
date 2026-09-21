@@ -150,7 +150,7 @@ func Validate(options ValidateOptions) (ValidateResult, error) {
 	if err != nil {
 		return ValidateResult{}, err
 	}
-	if !exactFileMode(setupInfo, 0o644) || !bytes.Equal(setup, setupDocument(repository, project.Formula.Name, toolkitVersion, toolkitSHA)) {
+	if !exactFileMode(setupInfo, 0o644) || !bytes.Equal(setup, setupDocument(repository, project.Formula.Name, toolkitVersion, toolkitSHA, project.Release.SubmodulesMode())) {
 		return ValidateResult{}, errors.New("SETUP.md does not match the exact safe follow-up instructions")
 	}
 

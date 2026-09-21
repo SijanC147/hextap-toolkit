@@ -203,7 +203,7 @@ func encodeJSON(value any) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-func setupDocument(repository, formula, toolkitVersion, toolkitSHA string) []byte {
+func setupDocument(repository, formula, toolkitVersion, toolkitSHA, submodules string) []byte {
 	var result bytes.Buffer
 	result.WriteString(`# Hextap setup
 
@@ -217,12 +217,26 @@ Before releasing, make `)
 	result.WriteString("`.")
 	result.WriteString(`
 
-Set the one required Actions secret. This command prompts securely; do not put a value in argv or a file:
-
 `)
-	result.WriteString("```sh\n")
-	fmt.Fprintf(&result, "gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/%s\n", repository)
-	result.WriteString("```\n\n")
+	// A caller that checks out submodules maps a second secret, so the
+	// instructions have to name both or the adopter sets one and the checkout
+	// falls back to github.token, which cannot read a sibling private
+	// repository. Raised by Codex on PR #24 as P1: the document said "the one
+	// required Actions secret" for every project, including ones whose
+	// generated caller already referenced SUBMODULES_TOKEN.
+	if submodules == "" || submodules == manifest.SubmodulesNone {
+		result.WriteString("Set the one required Actions secret. This command prompts securely; do not put a value in argv or a file:\n\n")
+		result.WriteString("```sh\n")
+		fmt.Fprintf(&result, "gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/%s\n", repository)
+		result.WriteString("```\n\n")
+	} else {
+		result.WriteString("Set the two required Actions secrets. These commands prompt securely; do not put a value in argv or a file:\n\n")
+		result.WriteString("```sh\n")
+		fmt.Fprintf(&result, "gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/%s\n", repository)
+		fmt.Fprintf(&result, "gh secret set SUBMODULES_TOKEN --repo github.com/%s\n", repository)
+		result.WriteString("```\n\n")
+		fmt.Fprintf(&result, "`SUBMODULES_TOKEN` exists because this project declares `release.checkout.submodules: %q`. It must be a fine-grained personal access token with **Contents read on this repository and on each submodule repository, and nothing else**. Include this repository: `actions/checkout` uses that token for the primary clone as well as for the submodule fetches, so a token scoped to the submodules alone fails the clone before reaching one. It is a different credential from the tap publisher token and the two must not be conflated. Leaving it unset falls back to the job's `GITHUB_TOKEN`, which cannot read a sibling private repository, so a private submodule fails the checkout.\n\n", submodules)
+	}
 	result.WriteString("Review the two owned ruleset payloads:\n\n```sh\n")
 	result.WriteString("cat .hextap/rulesets/main.json\n")
 	result.WriteString("cat .hextap/rulesets/release-tags.json\n")

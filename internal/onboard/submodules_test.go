@@ -103,3 +103,48 @@ func TestTheCredentialMappingAndTheInputAppearTogetherOrNotAtAll(t *testing.T) {
 		}
 	}
 }
+
+// The generated SETUP.md is the adopter's checklist, and it is compared byte
+// for byte like every other generated file. A caller that maps
+// SUBMODULES_TOKEN while the setup document names only one secret leaves the
+// adopter setting one of two, falling back to the job's GITHUB_TOKEN, and both
+// source checkouts failing on the first private submodule. Raised by Codex on
+// PR #24 as P1.
+func TestSetupInstructionsNameEverySecretTheCallerMaps(t *testing.T) {
+	for _, mode := range []string{"", manifest.SubmodulesNone} {
+		setup := string(setupDocument("SijanC147/example", "example", "v1.2.3", testToolkitSHA, mode))
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		if strings.Contains(setup, "SUBMODULES_TOKEN") {
+			t.Fatalf("the setup document for submodules = %q tells the adopter to set a secret the caller never maps", mode)
+		}
+		if !strings.Contains(setup, "the one required Actions secret") {
+			t.Fatalf("the setup document for submodules = %q lost its single-secret wording:\n%s", mode, setup)
+		}
+		if strings.Contains(caller, "SUBMODULES_TOKEN") {
+			t.Fatalf("the caller for submodules = %q maps a secret the setup document does not name", mode)
+		}
+	}
+
+	for _, mode := range []string{manifest.SubmodulesTop, manifest.SubmodulesRecursive} {
+		setup := string(setupDocument("SijanC147/example", "example", "v1.2.3", testToolkitSHA, mode))
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		if !strings.Contains(caller, "SUBMODULES_TOKEN") {
+			t.Fatalf("the caller for submodules = %q does not map SUBMODULES_TOKEN", mode)
+		}
+		for _, required := range []string{
+			"the two required Actions secrets",
+			"gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/SijanC147/example",
+			"gh secret set SUBMODULES_TOKEN --repo github.com/SijanC147/example",
+			"Contents read on this repository and on each submodule repository",
+			"a token scoped to the submodules alone fails the clone",
+			"must not be conflated",
+		} {
+			if !strings.Contains(setup, required) {
+				t.Fatalf("the setup document for submodules = %q is missing %q:\n%s", mode, required, setup)
+			}
+		}
+		if strings.Contains(setup, "the one required Actions secret") {
+			t.Fatalf("the setup document for submodules = %q still says one secret", mode)
+		}
+	}
+}
