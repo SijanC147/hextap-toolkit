@@ -544,12 +544,22 @@ caller generated for a project that declares `release.checkout` maps it:
       submodules_token: ${{ secrets.SUBMODULES_TOKEN }}
 ```
 
-The credential needs **Contents read on each submodule repository and nothing
-else**. A fine-grained personal access token scoped to exactly those
-repositories is the intended shape. It is a different credential from the tap
-publisher token and the two must not be conflated. `GITHUB_TOKEN` cannot
-substitute for it, whatever permissions the caller grants the job, because the
-limit is repository ownership rather than scope.
+The credential needs **Contents read on the caller's own repository and on each
+submodule repository, and nothing else**. Include the caller repository:
+`token:` is not a submodule-only credential. `actions/checkout` writes it into
+an `http.<origin>/.extraheader` before it fetches anything, so it replaces
+`GITHUB_TOKEN` for the **primary clone of the caller's own repository** as well
+as for the submodule fetches. A token scoped to the submodule repositories
+alone fails the primary clone with an authentication error before it reaches a
+single submodule, and that error looks enough like the private-submodule
+failure this feature fixes that the obvious repair is to keep widening the
+token until the release goes green. Scope it to the caller plus its submodules
+and nothing further.
+
+It is a different credential from the tap publisher token and the two must not
+be conflated. `GITHUB_TOKEN` cannot substitute for it, whatever permissions the
+caller grants the job, because the limit is repository ownership rather than
+scope.
 
 A project with no submodules, or with public ones, maps nothing and its
 generated caller is byte-identical to one written before any of this existed.

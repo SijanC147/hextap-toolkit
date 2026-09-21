@@ -285,12 +285,22 @@ func TestTheCallerSubmoduleModeIsBoundToTheSealedManifest(t *testing.T) {
 	}
 }
 
-// The credential goes where submodules are actually fetched and nowhere else.
-// actions/checkout passes its own token: to submodule fetches, so the whole
-// credential path is this one mapping. The job's GITHUB_TOKEN cannot read a
-// sibling private repository, and seven of the eight repositories in this
-// family are private, so for those adopters the input alone produces a clone
-// error rather than an empty tree.
+// The credential is placed only on the checkouts that fetch submodules. Read
+// the next sentence before citing that as the blast radius, because it is not.
+//
+// token: is not a submodule-only credential. actions/checkout writes it into
+// an http.<origin>/.extraheader in configureAuth() before any fetch, so on the
+// steps that carry it it replaces GITHUB_TOKEN for the PRIMARY CLONE of the
+// caller's own repository as well. A token scoped to the submodule
+// repositories alone therefore fails the primary clone before reaching a
+// submodule. The security reviewer of PR #24 found that the README documented
+// the narrower scope, which would have broken the release for the normal case
+// and pushed the adopter to widen the token until it went green, which is the
+// over-scoping SB23-736 exists to undo.
+//
+// The job's GITHUB_TOKEN cannot read a sibling private repository, and seven
+// of the eight repositories in this family are private, so for those adopters
+// the input alone produces a clone error rather than an empty tree.
 const submodulesToken = "token: ${{ secrets.submodules_token || github.token }}"
 
 func TestTheSubmoduleCredentialReachesOnlyTheCheckoutsThatFetchSubmodules(t *testing.T) {
@@ -319,7 +329,8 @@ func TestTheSubmoduleCredentialReachesOnlyTheCheckoutsThatFetchSubmodules(t *tes
 
 	if len(tokenedWithoutThread) > 0 {
 		t.Errorf("the checkout at %s carries %s but fetches no submodules.\n"+
-			"A credential belongs only where it is used. Every other checkout here either pins the toolkit, which is the trust boundary, or is the validate caller checkout whose submodules would be stale anyway.",
+			"A credential belongs only where it is used, and this one is not narrow: actions/checkout authenticates the primary clone with it too, so every step that carries it presents the adopter's token for the whole repository. "+
+			"Every other checkout here either pins the toolkit, which is the trust boundary, or is the validate caller checkout whose submodules would be stale anyway.",
 			strings.Join(tokenedWithoutThread, ", "), submodulesToken)
 	}
 
@@ -362,5 +373,45 @@ func TestEveryCheckoutStillRefusesToPersistCredentials(t *testing.T) {
 	}
 	if len(steps) != 9 {
 		t.Fatalf("expected 9 checkout calls, got %d", len(steps))
+	}
+}
+
+// The credential's safety argument is a property of this exact action version,
+// not of anything in this repository.
+//
+// The security reviewer of PR #24 read actions/checkout at the pinned sha and
+// established, from its source, that the file holding the token is deleted
+// under await before the checkout step returns, that no submodule config can
+// name it because the only code that writes one is gated on persistCredentials
+// at its call site, and that the token never enters the job environment. That
+// is what makes it safe for the quality job to run adopter-declared commands
+// after a checkout that held a credential.
+//
+// TestEveryCheckoutStillRefusesToPersistCredentials asserts persist-credentials:
+// false, which is the input to that cleanup rather than its outcome. A bump to
+// a version that persisted submodule auth differently would break the argument
+// and nothing else here would go red. So the pin itself is the control, and
+// changing it has to be deliberate.
+//
+// The offline boundary is not what protects the credential. It stops network
+// egress from the build adapter. The credential is protected by the cleanup
+// inside the checkout step and by never entering the environment, which are
+// independent of it: the Go path has no unshare and is equally safe on this
+// point. Anyone citing "the offline boundary contains the credential" is
+// citing the wrong mechanism.
+func TestTheCredentialBearingCheckoutsUseTheAuditedActionVersion(t *testing.T) {
+	const auditedCheckout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+
+	for _, step := range parseCheckoutSteps(t, workflow) {
+		if !step.declares(submodulesToken) {
+			continue
+		}
+		if !step.declares("uses: " + auditedCheckout) {
+			t.Fatalf("the credential-bearing checkout at %s does not use %s.\n"+
+				"The credential cleanup argument was verified by reading that exact version's source, not this repository's code. "+
+				"Re-read git-source-provider.ts and git-auth-helper.ts at the new version and confirm the token file is still removed under await and that submodule auth is still gated on persistCredentials, then update this test and say so in the pull request.",
+				step.jobAndLine, auditedCheckout)
+		}
 	}
 }
