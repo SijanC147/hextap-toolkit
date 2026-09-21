@@ -415,3 +415,31 @@ func TestTheCredentialBearingCheckoutsUseTheAuditedActionVersion(t *testing.T) {
 		}
 	}
 }
+
+// The workflow's own secret description is the fourth place this credential's
+// scope is written down, after the README, the generated setup document and
+// the contract test comment. Codex found the first three wrong in turn and
+// then found this one still wrong after the others were fixed, which is what a
+// derived set looks like when it is audited one file at a time.
+//
+// An adopter reading the reusable workflow rather than the README gets this
+// text, so it has to carry the same claim: the token authenticates the primary
+// clone, therefore the caller repository belongs in its scope.
+func TestTheSecretDescriptionNamesTheCallerRepositoryInItsScope(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	description := textBetween(t, workflow, "      submodules_token:\n", "\n        required: false")
+
+	for _, required := range []string{
+		"Contents read on the CALLER repository and on each",
+		"submodule repository",
+		"replaces\n          GITHUB_TOKEN for the primary clone",
+		"fails that clone before reaching one",
+		"falls back to github.token",
+	} {
+		if !strings.Contains(description, required) {
+			t.Fatalf("the submodules_token description is missing %q.\n"+
+				"This text is what an adopter reading the workflow provisions a credential from, so it carries the same scope claim as the README and the generated setup document.\n%s",
+				required, description)
+		}
+	}
+}

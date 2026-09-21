@@ -22,12 +22,16 @@ on:
         required: true
       submodules_token:
         description: >-
-          Credential with Contents read on each submodule repository, for a
-          caller whose submodules are private. The job's GITHUB_TOKEN cannot
-          read a sibling private repository, so without this a private
-          submodule fails the checkout with a clone error. Unset falls back to
-          github.token, which is correct for public submodules and for a caller
-          with none.
+          Credential with Contents read on the CALLER repository and on each
+          submodule repository, for a caller whose submodules are private.
+          Include the caller: actions/checkout writes this token into an
+          http.<origin>/.extraheader before it fetches anything, so it replaces
+          GITHUB_TOKEN for the primary clone as well, and a token scoped to the
+          submodules alone fails that clone before reaching one. The job's
+          GITHUB_TOKEN cannot read a sibling private repository, so without
+          this a private submodule fails the checkout with a clone error. Unset
+          falls back to github.token, which is correct for public submodules
+          and for a caller with none.
         required: false
 
 concurrency:
