@@ -229,7 +229,7 @@ func TestManifestExportCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantOutput := "formula=claude-rc-proxy\nbinary=claude-rc-proxy\nowner=SijanC147\nrepository_name=claude-rc-proxy\nrepository=SijanC147/claude-rc-proxy\narm64_asset=claude-rc-proxy-darwin-arm64.tar.gz\namd64_asset=claude-rc-proxy-darwin-amd64.tar.gz\nbuild_script=scripts/hextap-build\nlinux=true\nruntime=go\nnative_matrix={\"include\":[{\"runner\":\"ubuntu-24.04\",\"target\":\"linux-amd64\"},{\"runner\":\"ubuntu-24.04-arm\",\"target\":\"linux-arm64\"},{\"runner\":\"macos-15\",\"target\":\"darwin-arm64\"},{\"runner\":\"macos-15-intel\",\"target\":\"darwin-amd64\"}]}\n"
+	wantOutput := "formula=claude-rc-proxy\nbinary=claude-rc-proxy\nowner=SijanC147\nrepository_name=claude-rc-proxy\nrepository=SijanC147/claude-rc-proxy\narm64_asset=claude-rc-proxy-darwin-arm64.tar.gz\namd64_asset=claude-rc-proxy-darwin-amd64.tar.gz\nbuild_script=scripts/hextap-build\nlinux=true\nruntime=go\nnative_matrix={\"include\":[{\"runner\":\"ubuntu-24.04\",\"target\":\"linux-amd64\"},{\"runner\":\"ubuntu-24.04-arm\",\"target\":\"linux-arm64\"},{\"runner\":\"macos-15\",\"target\":\"darwin-arm64\"},{\"runner\":\"macos-15-intel\",\"target\":\"darwin-amd64\"}]}\nsubmodules=false\n"
 	if string(data) != wantOutput {
 		t.Fatalf("GitHub output = %q, want %q", data, wantOutput)
 	}

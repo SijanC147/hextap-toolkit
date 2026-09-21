@@ -199,9 +199,10 @@ func (m Manifest) MarshalJSON() ([]byte, error) {
 		Formula: m.Formula,
 		Release: struct {
 			BuildScript string                     `json:"build_script"`
+			Checkout    *ReleaseCheckout           `json:"checkout,omitempty"`
 			Profile     *ReleaseProfile            `json:"profile"`
 			Targets     map[string]TargetArtifacts `json:"targets"`
-		}{BuildScript: m.Release.BuildScript, Profile: m.Release.Profile, Targets: m.Release.Targets},
+		}{BuildScript: m.Release.BuildScript, Checkout: m.Release.Checkout, Profile: m.Release.Profile, Targets: m.Release.Targets},
 		Homebrew: struct {
 			MacOSOnly      bool     `json:"macos_only"`
 			TestArgs       []string `json:"test_args"`

@@ -21,6 +21,13 @@ type WorkflowExport struct {
 	Runtime        string
 	RuntimeVersion string
 	NativeMatrix   string
+	// Submodules is the sealed manifest's checkout mode. The reusable
+	// workflow compares it against the caller's submodules input and refuses
+	// a run where the two disagree: the caller file is read at the dispatched
+	// ref and the manifest at the resolved tag, so a tag that changes the
+	// mode without its thin caller being regenerated would otherwise build
+	// with the stale value and report success.
+	Submodules string
 }
 
 // WorkflowExport requires the caller repository to exactly match the
@@ -51,6 +58,7 @@ func (m Manifest) WorkflowExport(repository string) (WorkflowExport, error) {
 		Runtime:        runtime,
 		RuntimeVersion: runtimeVersion,
 		NativeMatrix:   nativeMatrix(m),
+		Submodules:     m.Release.SubmodulesMode(),
 	}, nil
 }
 

@@ -107,6 +107,7 @@ func runManifestExport(args []string, stdout, stderr io.Writer) int {
 		{Key: "linux", Value: strconv.FormatBool(values.Linux)},
 		{Key: "runtime", Value: values.Runtime},
 		{Key: "native_matrix", Value: values.NativeMatrix},
+		{Key: "submodules", Value: values.Submodules},
 	}
 	if values.RuntimeVersion != "" {
 		fields = append(fields, githuboutput.Field{Key: "runtime_version", Value: values.RuntimeVersion})

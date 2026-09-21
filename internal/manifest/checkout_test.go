@@ -160,3 +160,76 @@ func TestCheckoutOnSchemaOneIsRejectedByBothContracts(t *testing.T) {
 		t.Fatal("the machine schema accepted release.checkout on schema 1")
 	}
 }
+
+// MarshalJSON projects an explicit field set per schema rather than marshalling
+// the struct, so a field added to the struct and not to the projection is
+// dropped in silence. The result is still a valid manifest, which is what makes
+// it dangerous: a recursive selection becomes the default false on a round trip
+// and nothing reports it. Raised by Codex on PR #23 as P2.
+func TestCheckoutSurvivesAMarshalRoundTrip(t *testing.T) {
+	for _, mode := range []string{SubmodulesTop, SubmodulesRecursive, SubmodulesNone} {
+		project, err := Parse([]byte(withCheckout(`{"submodules": "` + mode + `"}`)))
+		if err != nil {
+			t.Fatalf("Parse(submodules = %q) = %v", mode, err)
+		}
+		encoded, err := json.Marshal(project)
+		if err != nil {
+			t.Fatalf("Marshal(submodules = %q) = %v", mode, err)
+		}
+		if !strings.Contains(string(encoded), `"checkout":{"submodules":"`+mode+`"}`) {
+			t.Fatalf("release.checkout was dropped when marshalling submodules = %q:\n%s", mode, encoded)
+		}
+		round, err := Parse(encoded)
+		if err != nil {
+			t.Fatalf("Parse(round trip, submodules = %q) = %v", mode, err)
+		}
+		if got := round.Release.SubmodulesMode(); got != mode {
+			t.Fatalf("round trip turned submodules %q into %q", mode, got)
+		}
+	}
+}
+
+// A manifest that never declared the block must not gain one, or every
+// generated document changes shape for adopters who do not use this.
+func TestAManifestWithoutCheckoutDoesNotGainOneWhenMarshalled(t *testing.T) {
+	project, err := Parse([]byte(bunProfileManifest))
+	if err != nil {
+		t.Fatalf("Parse(fixture) = %v", err)
+	}
+	encoded, err := json.Marshal(project)
+	if err != nil {
+		t.Fatalf("Marshal(fixture) = %v", err)
+	}
+	if strings.Contains(string(encoded), `"checkout"`) {
+		t.Fatalf("marshalling invented a release.checkout block:\n%s", encoded)
+	}
+}
+
+// The workflow refuses a run where the caller input and the sealed manifest
+// disagree, and it can only do that if the export carries the manifest value.
+func TestWorkflowExportCarriesTheSealedSubmoduleMode(t *testing.T) {
+	for _, mode := range []string{SubmodulesTop, SubmodulesRecursive} {
+		project, err := Parse([]byte(withCheckout(`{"submodules": "` + mode + `"}`)))
+		if err != nil {
+			t.Fatalf("Parse(submodules = %q) = %v", mode, err)
+		}
+		values, err := project.WorkflowExport(project.RepositorySlug())
+		if err != nil {
+			t.Fatalf("WorkflowExport(submodules = %q) = %v", mode, err)
+		}
+		if values.Submodules != mode {
+			t.Fatalf("WorkflowExport().Submodules = %q, want %q", values.Submodules, mode)
+		}
+	}
+	project, err := Parse([]byte(bunProfileManifest))
+	if err != nil {
+		t.Fatalf("Parse(fixture) = %v", err)
+	}
+	values, err := project.WorkflowExport(project.RepositorySlug())
+	if err != nil {
+		t.Fatalf("WorkflowExport(fixture) = %v", err)
+	}
+	if values.Submodules != SubmodulesNone {
+		t.Fatalf("a manifest without release.checkout exported %q, want %q; the workflow default is %q and the two must agree", values.Submodules, SubmodulesNone, SubmodulesNone)
+	}
+}

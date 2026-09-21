@@ -249,3 +249,38 @@ func checkoutStepKeys(lines []string, start int) []string {
 	}
 	return keys
 }
+
+// The input is read from the caller workflow file at the dispatched ref. The
+// manifest is read at the resolved tag and is the authority for everything
+// else here. Without a comparison a tag that changes
+// release.checkout.submodules while its thin caller was not regenerated builds
+// with the stale caller value, or with the false default, against empty
+// component directories, and reports success. That is the defect this whole
+// change exists to close, arriving through a different door. Raised by Codex
+// on PR #23 as P1.
+func TestTheCallerSubmoduleModeIsBoundToTheSealedManifest(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	validateJob := textBetween(t, workflow, "  validate:\n", "\n  quality:\n")
+
+	assertContains(t, validateJob, "      - name: Require the caller submodule mode to match the sealed manifest\n")
+	assertContains(t, validateJob, "          RAW_SUBMODULES: ${{ inputs.submodules }}")
+	assertContains(t, validateJob, "          MANIFEST_SUBMODULES: ${{ steps.manifest.outputs.submodules }}")
+	assertContains(t, validateJob, `if [[ "$RAW_SUBMODULES" != "$MANIFEST_SUBMODULES" ]]; then`)
+
+	// The comparison is worth nothing if it runs after the checkouts it
+	// guards. Both threaded checkouts live in jobs that need validate, so
+	// being anywhere in validate is enough, but it must come after the step
+	// that produces the manifest value it reads.
+	sealAt := strings.Index(validateJob, "        id: manifest\n")
+	compareAt := strings.Index(validateJob, "- name: Require the caller submodule mode to match the sealed manifest")
+	if sealAt == -1 || compareAt == -1 || sealAt >= compareAt {
+		t.Fatalf("the comparison must follow the step that seals the manifest; seal at %d, compare at %d", sealAt, compareAt)
+	}
+
+	for _, job := range []string{"  quality:\n", "  build:\n"} {
+		body := textBetween(t, workflow, job, "\n    steps:\n")
+		if !strings.Contains(body, "needs:") || !strings.Contains(body, "validate") {
+			t.Fatalf("job %q must declare needs on validate, or the comparison cannot gate its checkout:\n%s", strings.TrimSpace(job), body)
+		}
+	}
+}
