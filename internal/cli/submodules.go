@@ -72,11 +72,11 @@ func runReleaseSubmodules(args []string, stdout, stderr io.Writer) int {
 	// Refusing is the honest position while the nested set is unsealed.
 	// "true" fetches the top-level submodules, which the list does bound.
 	// Raised by the security reviewer of PR #30 as P1; sealing the nested set
-	// is SB23-2555.
+	// is SB23-2560.
 	if mode == manifest.SubmodulesRecursive {
 		return fail(stderr, "check submodules: release.checkout.submodules is %q, and this check reads only the top-level .gitmodules. "+
 			"A nested .gitmodules, at the gitlink commit the tag pins inside a sealed submodule, would steer the credential at a repository nothing sealed. "+
-			"Set release.checkout.submodules to %q, which fetches the top-level submodules this list does bound, or seal the nested set first (SB23-2555)",
+			"Set release.checkout.submodules to %q, which fetches the top-level submodules this list does bound, or seal the nested set first (SB23-2560)",
 			mode, manifest.SubmodulesTop)
 	}
 

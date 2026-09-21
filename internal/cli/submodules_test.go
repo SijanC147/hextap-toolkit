@@ -223,7 +223,7 @@ func TestRecursiveIsRefusedWhileTheNestedSetIsUnsealed(t *testing.T) {
 	if code == 0 {
 		t.Fatal("exit 0, want failure; a nested .gitmodules would steer the credential at a repository nothing sealed, which is the same defect one level down")
 	}
-	if !strings.Contains(stderr, "nested") || !strings.Contains(stderr, "SB23-2555") {
+	if !strings.Contains(stderr, "nested") || !strings.Contains(stderr, "SB23-2560") {
 		t.Errorf("the error does not say why recursive is refused or where the follow-up is: %s", stderr)
 	}
 }
