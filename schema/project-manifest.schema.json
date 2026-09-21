@@ -319,8 +319,65 @@
               "const": "recursive"
             }
           ]
+        },
+        "submodules_allowed": {
+          "description": "The exact https:// URL of every submodule this release is permitted to fetch. actions/checkout presents the submodule credential to every repository the tagged .gitmodules names, so this list, and not the tagged commit, is what bounds the set of repositories that credential reaches. Required and non-empty when submodules is true or recursive; must be absent or empty when submodules is false.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/submoduleURL"
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "submodules"
+              ],
+              "properties": {
+                "submodules": {
+                  "const": "false"
+                },
+                "submodules_allowed": {
+                  "type": "array",
+                  "maxItems": 0
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "submodules",
+                "submodules_allowed"
+              ],
+              "properties": {
+                "submodules": {
+                  "oneOf": [
+                    {
+                      "const": "true"
+                    },
+                    {
+                      "const": "recursive"
+                    }
+                  ]
+                },
+                "submodules_allowed": {
+                  "type": "array",
+                  "minItems": 1
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "submoduleURL": {
+      "description": "An exact https:// clone URL, in canonical form, with no credentials, query, fragment or pattern character. https only because the submodule credential is an http.<origin>/.extraheader, which an ssh, scp-like, relative or file URL cannot carry.",
+      "type": "string",
+      "pattern": "^https://[a-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._~%!$&'()+,;=:@/-]+$"
     },
     "releaseLegacy": {
       "type": "object",

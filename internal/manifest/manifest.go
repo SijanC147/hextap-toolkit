@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/SijanC147/hextap-toolkit/internal/gitmodules"
 )
 
 const (
@@ -87,6 +89,18 @@ type Release struct {
 // checkout before the offline boundary, so release.build_script never fetches.
 type ReleaseCheckout struct {
 	Submodules string `json:"submodules"`
+	// SubmodulesAllowed seals the exact set of submodule URLs the release is
+	// permitted to fetch. actions/checkout presents the submodule credential
+	// to every repository the tagged .gitmodules names, so without this list
+	// the set of repositories that credential reaches is decided by the
+	// tagged commit rather than by anything the adopter sealed in advance
+	// (SB23-2504). The validate job compares the tagged .gitmodules against
+	// this list before either credential-bearing checkout runs.
+	//
+	// It is deliberately absent from WorkflowExport: the check reads the
+	// sealed manifest file directly, so a multi-line adopter-controlled list
+	// never passes through GITHUB_OUTPUT.
+	SubmodulesAllowed []string `json:"submodules_allowed,omitempty"`
 }
 
 // SubmodulesMode returns the declared submodule checkout mode, or the default
@@ -110,10 +124,55 @@ const (
 func (c ReleaseCheckout) validate() error {
 	switch c.Submodules {
 	case SubmodulesNone, SubmodulesTop, SubmodulesRecursive:
-		return nil
 	default:
 		return fmt.Errorf("validate manifest: release.checkout.submodules must be %q, %q, or %q", SubmodulesNone, SubmodulesTop, SubmodulesRecursive)
 	}
+	return c.validateAllowed()
+}
+
+// validateAllowed holds the seal to the checkout mode in both directions.
+//
+// A project that fetches submodules must say which ones, because the release
+// presents a credential to every repository the tagged .gitmodules names and
+// this list is the only thing that bounds that set. A project that fetches
+// none must seal none, because a list nothing is ever compared against reads
+// as a protection that is not there.
+//
+// Requiring it here means an adopter learns at `hextap validate`, which runs
+// at onboarding time, rather than at release time.
+func (c ReleaseCheckout) validateAllowed() error {
+	if c.Submodules == SubmodulesNone {
+		if len(c.SubmodulesAllowed) != 0 {
+			return fmt.Errorf("validate manifest: release.checkout.submodules_allowed is set but release.checkout.submodules is %q, so no submodule is ever fetched and nothing compares the list against anything; remove the list or set a checkout mode that fetches submodules", SubmodulesNone)
+		}
+		return nil
+	}
+
+	if len(c.SubmodulesAllowed) == 0 {
+		return fmt.Errorf("validate manifest: release.checkout.submodules is %q but release.checkout.submodules_allowed is empty; list the exact https:// URL of every submodule this project fetches, because the release presents the submodule credential to every repository the tagged .gitmodules names and this list is what bounds that set (SB23-2504). hextap onboard fills it in from the checkout's own .gitmodules", c.Submodules)
+	}
+
+	seen := make(map[string]bool, len(c.SubmodulesAllowed))
+	for i, entry := range c.SubmodulesAllowed {
+		if err := gitmodules.ValidateAllowedURL(entry); err != nil {
+			return fmt.Errorf("validate manifest: release.checkout.submodules_allowed[%d] %q %v", i, entry, err)
+		}
+		if seen[entry] {
+			return fmt.Errorf("validate manifest: release.checkout.submodules_allowed[%d] %q is listed twice", i, entry)
+		}
+		seen[entry] = true
+	}
+	return nil
+}
+
+// SubmodulesAllowed returns the sealed submodule URL list, or none when the
+// manifest omits release.checkout. An empty list seals nothing, which is only
+// valid when no submodule is fetched.
+func (r Release) SubmodulesAllowed() []string {
+	if r.Checkout == nil {
+		return nil
+	}
+	return r.Checkout.SubmodulesAllowed
 }
 
 // ReleaseProfile defines project-owned commands that are executed directly,
@@ -352,7 +411,7 @@ func validateRequiredFields(data []byte) error {
 			return err
 		}
 		if checkout, declared := release["checkout"]; declared {
-			if _, err := requireExactObjectFields(checkout, "release.checkout", []string{"submodules"}, nil); err != nil {
+			if _, err := requireExactObjectFields(checkout, "release.checkout", []string{"submodules"}, []string{"submodules_allowed"}); err != nil {
 				return err
 			}
 		}
