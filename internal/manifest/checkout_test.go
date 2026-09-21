@@ -18,9 +18,22 @@ func withCheckout(body string) string {
 	return updated
 }
 
+// sealedCheckout returns a release.checkout body for a mode, carrying the
+// allowlist the mode requires: one URL when submodules are fetched, none when
+// they are not. Every case below that only cares about the mode uses this, so
+// the seal's own rules are tested in one place rather than incidentally here.
+func sealedCheckout(mode string) string {
+	if mode == SubmodulesNone {
+		return `{"submodules": "` + mode + `"}`
+	}
+	return `{"submodules": "` + mode + `", "submodules_allowed": ["` + sealedSubmoduleURL + `"]}`
+}
+
+const sealedSubmoduleURL = "https://github.com/SijanC147/claude-peers-mcp.git"
+
 func TestCheckoutAcceptsEveryCheckoutModeActionsCheckoutUnderstands(t *testing.T) {
 	for _, mode := range []string{SubmodulesNone, SubmodulesTop, SubmodulesRecursive} {
-		project, err := Parse([]byte(withCheckout(`{"submodules": "` + mode + `"}`)))
+		project, err := Parse([]byte(withCheckout(sealedCheckout(mode))))
 		if err != nil {
 			t.Fatalf("Parse(release.checkout.submodules = %q) = %v, want acceptance", mode, err)
 		}
@@ -52,10 +65,10 @@ func TestCheckoutRejectsNonStringAndMalformedBlocks(t *testing.T) {
 		"checkout as a string":          `"recursive"`,
 		"checkout as an array":          `["recursive"]`,
 		"empty checkout object":         `{}`,
-		"unknown sibling field":         `{"submodules": "true", "depth": 1}`,
+		"unknown sibling field":         `{"submodules": "true", "submodules_allowed": ["` + sealedSubmoduleURL + `"], "depth": 1}`,
 		"mis-cased submodules":          `{"Submodules": "true"}`,
 		"submodules spelled submodule":  `{"submodule": "true"}`,
-		"checkout carrying a token key": `{"submodules": "true", "token": "ghp_x"}`,
+		"checkout carrying a token key": `{"submodules": "true", "submodules_allowed": ["` + sealedSubmoduleURL + `"], "token": "ghp_x"}`,
 	} {
 		if _, err := Parse([]byte(withCheckout(body))); err == nil {
 			t.Errorf("%s was accepted; want rejection", name)
@@ -106,16 +119,25 @@ func TestCheckoutAgreesBetweenGoAndMachineSchema(t *testing.T) {
 		body  string
 		valid bool
 	}{
-		"valid false":             {body: `{"submodules": "false"}`, valid: true},
-		"valid true":              {body: `{"submodules": "true"}`, valid: true},
-		"valid recursive":         {body: `{"submodules": "recursive"}`, valid: true},
-		"invalid capital True":    {body: `{"submodules": "True"}`},
-		"invalid recurse":         {body: `{"submodules": "recurse"}`},
-		"invalid empty string":    {body: `{"submodules": ""}`},
-		"invalid boolean":         {body: `{"submodules": true}`},
-		"invalid unknown field":   {body: `{"submodules": "true", "depth": 1}`},
-		"invalid missing field":   {body: `{}`},
-		"invalid mis-cased field": {body: `{"Submodules": "true"}`},
+		"valid false":                         {body: `{"submodules": "false"}`, valid: true},
+		"valid true":                          {body: sealedCheckout(SubmodulesTop), valid: true},
+		"valid recursive":                     {body: sealedCheckout(SubmodulesRecursive), valid: true},
+		"invalid capital True":                {body: `{"submodules": "True"}`},
+		"invalid recurse":                     {body: `{"submodules": "recurse"}`},
+		"invalid empty string":                {body: `{"submodules": ""}`},
+		"invalid boolean":                     {body: `{"submodules": true}`},
+		"invalid unknown field":               {body: `{"submodules": "true", "submodules_allowed": ["` + sealedSubmoduleURL + `"], "depth": 1}`},
+		"invalid fetching without a seal":     {body: `{"submodules": "recursive"}`},
+		"invalid fetching with an empty seal": {body: `{"submodules": "true", "submodules_allowed": []}`},
+		"invalid seal without fetching":       {body: `{"submodules": "false", "submodules_allowed": ["` + sealedSubmoduleURL + `"]}`},
+		"invalid seal that is not https":      {body: `{"submodules": "true", "submodules_allowed": ["git@github.com:SijanC147/x.git"]}`},
+		"invalid seal percent-encoded":        {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/%78.git"]}`},
+		"invalid seal relative segment":       {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/../evil.git"]}`},
+		"invalid seal dot segment":            {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/./x.git"]}`},
+		"invalid seal doubled slash":          {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147//x.git"]}`},
+		"invalid seal carrying a pattern":     {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/*"]}`},
+		"invalid missing field":               {body: `{}`},
+		"invalid mis-cased field":             {body: `{"Submodules": "true"}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			encoded := []byte(withCheckout(testCase.body))
@@ -168,7 +190,7 @@ func TestCheckoutOnSchemaOneIsRejectedByBothContracts(t *testing.T) {
 // and nothing reports it. Raised by Codex on PR #23 as P2.
 func TestCheckoutSurvivesAMarshalRoundTrip(t *testing.T) {
 	for _, mode := range []string{SubmodulesTop, SubmodulesRecursive, SubmodulesNone} {
-		project, err := Parse([]byte(withCheckout(`{"submodules": "` + mode + `"}`)))
+		project, err := Parse([]byte(withCheckout(sealedCheckout(mode))))
 		if err != nil {
 			t.Fatalf("Parse(submodules = %q) = %v", mode, err)
 		}
@@ -176,8 +198,15 @@ func TestCheckoutSurvivesAMarshalRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Marshal(submodules = %q) = %v", mode, err)
 		}
-		if !strings.Contains(string(encoded), `"checkout":{"submodules":"`+mode+`"}`) {
+		expected := `"checkout":{"submodules":"` + mode + `"}`
+		if mode != SubmodulesNone {
+			expected = `"checkout":{"submodules":"` + mode + `","submodules_allowed":["` + sealedSubmoduleURL + `"]}`
+		}
+		if !strings.Contains(string(encoded), expected) {
 			t.Fatalf("release.checkout was dropped when marshalling submodules = %q:\n%s", mode, encoded)
+		}
+		if mode != SubmodulesNone && len(project.Release.SubmodulesAllowed()) != 1 {
+			t.Fatalf("the sealed list did not survive parsing submodules = %q: %#v", mode, project.Release.SubmodulesAllowed())
 		}
 		round, err := Parse(encoded)
 		if err != nil {
@@ -209,7 +238,7 @@ func TestAManifestWithoutCheckoutDoesNotGainOneWhenMarshalled(t *testing.T) {
 // disagree, and it can only do that if the export carries the manifest value.
 func TestWorkflowExportCarriesTheSealedSubmoduleMode(t *testing.T) {
 	for _, mode := range []string{SubmodulesTop, SubmodulesRecursive} {
-		project, err := Parse([]byte(withCheckout(`{"submodules": "` + mode + `"}`)))
+		project, err := Parse([]byte(withCheckout(sealedCheckout(mode))))
 		if err != nil {
 			t.Fatalf("Parse(submodules = %q) = %v", mode, err)
 		}
@@ -231,5 +260,22 @@ func TestWorkflowExportCarriesTheSealedSubmoduleMode(t *testing.T) {
 	}
 	if values.Submodules != SubmodulesNone {
 		t.Fatalf("a manifest without release.checkout exported %q, want %q; the workflow default is %q and the two must agree", values.Submodules, SubmodulesNone, SubmodulesNone)
+	}
+}
+
+// The remediation in this error has to be something the adopter can actually
+// do. It named `hextap onboard`, which for an EXISTING manifest parses it
+// before generating anything and returns this same error, so it sent the
+// adopter in a circle. Raised by the Codex reviewer of PR #30 as P2.
+func TestTheEmptySealErrorDoesNotSendTheAdopterToOnboard(t *testing.T) {
+	_, err := Parse([]byte(withCheckout(`{"submodules": "recursive"}`)))
+	if err == nil {
+		t.Fatal("a fetching mode with no sealed list was accepted")
+	}
+	if strings.Contains(err.Error(), "onboard") {
+		t.Errorf("the error tells the adopter to run onboard, which returns this same error for an existing manifest:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "by hand") || !strings.Contains(err.Error(), ".gitmodules") {
+		t.Errorf("the error does not say to add the field by hand, nor where to read the URLs from:\n%s", err)
 	}
 }

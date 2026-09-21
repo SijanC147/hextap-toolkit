@@ -195,6 +195,30 @@ jobs:
             exit 1
           fi
 
+      # actions/checkout presents the submodule credential to EVERY repository
+      # the tagged .gitmodules names, so without this the set of repositories
+      # that credential reaches is decided by the tagged commit rather than by
+      # anything the adopter sealed. A commit that edits .gitmodules would make
+      # the quality and build checkouts clone any private repository the
+      # credential can read, and the quality job then runs project-declared
+      # commands, with network, against a tree holding its contents. The attack
+      # never needs the credential to leak; it needs only the credential to be
+      # broader than the repositories anyone sealed.
+      #
+      # This reads the TAGGED .gitmodules, after the detach, and refuses the run
+      # when a declared URL is outside release.checkout.submodules_allowed or on
+      # a host the credential cannot authenticate. It lives in validate, which
+      # both credential-bearing checkouts declare needs on, so it is guaranteed
+      # to precede them.
+      - name: Require the tagged submodules to be sealed by the manifest
+        env:
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+        run: |
+          "$RUNNER_TEMP/hextapctl" release submodules \
+            --manifest "$RUNNER_TEMP/project-manifest.json" \
+            --gitmodules "$GITHUB_WORKSPACE/source/.gitmodules" \
+            --server-url "$GITHUB_SERVER_URL"
+
       - name: Validate Homebrew-only release
         if: steps.metadata.outputs.mode == 'homebrew-only'
         env:

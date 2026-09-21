@@ -121,11 +121,13 @@ func runManifestExport(args []string, stdout, stderr io.Writer) int {
 
 func runRelease(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return fail(stderr, "release subcommand required; expected metadata, profile, build, or verify")
+		return fail(stderr, "release subcommand required; expected metadata, submodules, profile, build, or verify")
 	}
 	switch args[0] {
 	case "metadata":
 		return runReleaseMetadata(args[1:], stdout, stderr)
+	case "submodules":
+		return runReleaseSubmodules(args[1:], stdout, stderr)
 	case "build":
 		return runReleaseBuild(args[1:], stdout, stderr)
 	case "profile":
@@ -133,7 +135,7 @@ func runRelease(args []string, stdout, stderr io.Writer) int {
 	case "verify":
 		return runReleaseVerify(args[1:], stdout, stderr)
 	default:
-		return fail(stderr, "unknown release subcommand %q; expected metadata, profile, build, or verify", args[0])
+		return fail(stderr, "unknown release subcommand %q; expected metadata, submodules, profile, build, or verify", args[0])
 	}
 }
 
