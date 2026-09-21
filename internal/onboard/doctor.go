@@ -284,6 +284,9 @@ func normalizeRuleset(body remoteRulesetDetail, actors []normalizedBypassActor) 
 	if err := decodeJSON(body.Rules, &rules); err != nil {
 		return normalizedRuleset{}, errors.New("malformed ruleset rules")
 	}
+	if body.Target == "tag" {
+		restoreTagUpdateDefault(rules)
+	}
 	if actors == nil {
 		actors = []normalizedBypassActor{}
 	}
@@ -295,6 +298,42 @@ func normalizeRuleset(body remoteRulesetDetail, actors []normalizedBypassActor) 
 		Conditions:   conditions,
 		Rules:        rules,
 	}, nil
+}
+
+// restoreTagUpdateDefault puts back the one parameter GitHub declines to store.
+// A tag-target `update` rule submitted with
+// `{"update_allows_fetch_and_merge": false}` is accepted and then stored with
+// no `parameters` object at all, measured on 2026-09-21 across three live
+// rulesets: the two written in August carry the parameter, the one written in
+// September does not, and a PUT of the generated body neither restores it nor
+// records a new version in the ruleset's history. The generated body is what
+// GitHub normalizes away, so re-applying the file cannot fix the drift.
+//
+// The absent parameter is GitHub's own default, so the two shapes describe the
+// same protection and only the comparison needs to know that. Generation keeps
+// writing the explicit form: dropping it there would make every ruleset written
+// before the change drift instead.
+//
+// Restoring the default rather than stripping the parameter is what keeps a
+// stored `true` reported as drift, which is a real weakening of tag protection
+// and the thing this check exists to catch. The tolerance is confined to a
+// tag-target `update` rule: a branch-target ruleset round-trips every
+// parameter, so an absent `parameters` there stays drift.
+func restoreTagUpdateDefault(rules any) {
+	entries, ok := rules.([]any)
+	if !ok {
+		return
+	}
+	for _, entry := range entries {
+		rule, ok := entry.(map[string]any)
+		if !ok || rule["type"] != "update" {
+			continue
+		}
+		if _, present := rule["parameters"]; present {
+			continue
+		}
+		rule["parameters"] = map[string]any{"update_allows_fetch_and_merge": false}
+	}
 }
 
 // selfCallerPin reports the toolkit's own relative same-repository caller, by

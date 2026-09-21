@@ -393,3 +393,113 @@ func TestDoctorOnlineReportsEveryRemoteInvariantFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestCompareRemoteRulesetAcceptsBothStoredTagUpdateShapes guards SB23-2539.
+// GitHub accepts a tag-target `update` rule carrying
+// `{"update_allows_fetch_and_merge": false}` and stores it without the
+// `parameters` object, measured on three live rulesets on 2026-09-21: the two
+// written in August retain the parameter, the one written in September does
+// not. `reflect.DeepEqual` over the decoded rule arrays therefore failed the
+// drift check on every ruleset written now, while the same repository's
+// branch-target ruleset round-tripped every parameter exactly.
+//
+// Both stored shapes are covered deliberately. A fix that only accepted the
+// absent shape, or that dropped the parameter from `tagRulesetBytes`, would
+// turn the two August adopters red to make one September adopter green.
+//
+// The tolerance normalises toward the explicit form and never strips, so a
+// stored `true` is still drift: the parameter absent means GitHub's default,
+// which is `false`, and nothing else.
+func TestCompareRemoteRulesetAcceptsBothStoredTagUpdateShapes(t *testing.T) {
+	expected, err := tagRulesetBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const repository = "SijanC147/example-tool"
+	summary := remoteRulesetSummary{
+		ID:          102,
+		Name:        "hextap/release-tags",
+		Target:      "tag",
+		SourceType:  "Repository",
+		Source:      repository,
+		Enforcement: "active",
+	}
+	remoteBody := func(updateRule string) []byte {
+		return []byte(`{"id":102,"name":"hextap/release-tags","target":"tag",` +
+			`"source_type":"Repository","source":"` + repository + `","enforcement":"active",` +
+			`"bypass_actors":[],"conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},` +
+			`"rules":[{"type":"deletion"},` + updateRule + `]}`)
+	}
+	for name, test := range map[string]struct {
+		rule    string
+		wantErr bool
+	}{
+		"parameters absent, the shape GitHub stores now": {
+			rule: `{"type":"update"}`,
+		},
+		"parameters present and false, the shape stored before": {
+			rule: `{"type":"update","parameters":{"update_allows_fetch_and_merge":false}}`,
+		},
+		"parameters present and true is real drift": {
+			rule:    `{"type":"update","parameters":{"update_allows_fetch_and_merge":true}}`,
+			wantErr: true,
+		},
+		"an absent rule is still drift": {
+			rule:    `{"type":"required_linear_history"}`,
+			wantErr: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := compareRemoteRuleset(remoteBody(test.rule), expected, repository, summary)
+			if test.wantErr && err == nil {
+				t.Fatalf("compareRemoteRuleset(%s) = nil, want drift", test.rule)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("compareRemoteRuleset(%s) = %v, want both stored shapes accepted", test.rule, err)
+			}
+		})
+	}
+}
+
+// TestCompareRemoteRulesetToleranceIsTagUpdateOnly keeps the tolerance from
+// widening into a general "an absent parameters object equals the default"
+// rule. A branch-target ruleset round-trips every parameter, measured on
+// 23761681 on 2026-09-21, so an absent `parameters` there is drift and must
+// stay drift.
+func TestCompareRemoteRulesetToleranceIsTagUpdateOnly(t *testing.T) {
+	expected, err := mainRulesetBytes([]string{"build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const repository = "SijanC147/example-tool"
+	summary := remoteRulesetSummary{
+		ID:          101,
+		Name:        "hextap/main",
+		Target:      "branch",
+		SourceType:  "Repository",
+		Source:      repository,
+		Enforcement: "active",
+	}
+	var body map[string]any
+	if err := json.Unmarshal(expected, &body); err != nil {
+		t.Fatal(err)
+	}
+	body["id"] = 101
+	body["source_type"] = "Repository"
+	body["source"] = repository
+	body["bypass_actors"] = []any{}
+	rules := body["rules"].([]any)
+	for _, rule := range rules {
+		entry := rule.(map[string]any)
+		if entry["type"] == "pull_request" {
+			delete(entry, "parameters")
+		}
+	}
+	remote, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := compareRemoteRuleset(remote, expected, repository, summary); err == nil {
+		t.Fatal("compareRemoteRuleset(branch ruleset, parameters stripped) = nil, want drift")
+	}
+}
