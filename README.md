@@ -565,16 +565,23 @@ what remains is the scope. If the remainder shares one owner, use a
 fine-grained token limited to exactly those repositories with Contents read and
 nothing else.
 
-If the remainder spans owners, a fine-grained token cannot express it. Moving
-those repositories under one owner is the only fix that keeps the narrow
-credential, and nothing in the manifest constrains a submodule URL, so that is
-a choice about repository layout rather than something the toolkit enforces.
-Otherwise use a **classic** personal access token belonging to a user who can
-read all of them, and understand the cost: its `repo` scope covers every
-repository that user can reach rather than the ones you list, so give it a
-short expiry and rotate it. A GitHub App installation token cannot substitute,
-because an installation belongs to one account and its token expires after an
-hour, while the workflow reads one statically stored secret.
+If the remainder spans owners, a fine-grained token cannot express it, and
+**that configuration is not supported yet**. Move those repositories under one
+owner: nothing in the manifest constrains a submodule URL, so that is a choice
+about repository layout rather than something the toolkit enforces.
+
+Do not reach for a broader credential instead. The workflow does not yet
+validate the submodule URLs a tagged commit declares, so a credential that can
+read more than the repositories above is a credential a later commit can point
+somewhere else, and the quality job runs project-declared commands with network
+after the checkout. Supporting a cross-owner layout needs a sealed allowlist of
+submodule URLs first, tracked as SB23-2483. Until it lands, keep the credential
+narrow or keep the repositories under one owner.
+
+A private submodule on a host other than the caller's own GitHub server is also
+unsupported, tracked as SB23-2485: `actions/checkout` scopes the token's
+authorization header to one server, so a single `submodules_token` cannot
+authenticate a second host.
 
 Getting this wrong in the safe direction is expensive too. A token that cannot
 read the caller fails the primary clone with an authentication error before it

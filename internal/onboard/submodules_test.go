@@ -151,12 +151,24 @@ func TestSetupInstructionsNameEverySecretTheCallerMaps(t *testing.T) {
 			"suffices exactly when every repository that must be read privately sits under one owner",
 			"strike the public ones, and what remains is the scope",
 			"must not be conflated",
-			"A GitHub App installation token cannot substitute",
-			"**classic** personal access token",
+			// The cross-owner case is documented as unsupported rather
+			// than answered with a broader credential. A classic repo-scoped
+			// PAT would authenticate every submodule a tagged .gitmodules
+			// names, and nothing seals that list, so a later commit could
+			// point it at any private repository its owner can read while the
+			// quality job runs project-declared commands with network.
+			// Removing the recommendation deletes that path; containing it
+			// needs the allowlist in SB23-2483.
+			"**that configuration is not supported yet**",
+			"Do not reach for a broader credential instead",
+			"SB23-2483",
 		} {
 			if !strings.Contains(setup, required) {
 				t.Fatalf("the setup document for submodules = %q is missing %q:\n%s", mode, required, setup)
 			}
+		}
+		if strings.Contains(setup, "classic") {
+			t.Fatalf("the setup document for submodules = %q recommends a broader credential; a tagged .gitmodules can point one at any repository its owner can read, and nothing seals that list yet", mode)
 		}
 		if strings.Contains(setup, "the two required Actions secrets") {
 			t.Fatalf("the setup document for submodules = %q calls the submodule credential required; it is needed only when a submodule is private", mode)
