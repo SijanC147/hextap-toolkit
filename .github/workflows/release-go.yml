@@ -202,10 +202,22 @@ jobs:
           RELEASE_SHA: ${{ steps.source.outputs.sha }}
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
           RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          # Same expression as the attest step, for the same reason; see the
+          # comment on "Require immutable release".
+          RELEASE_ATTESTED: ${{ !github.event.repository.private }}
         run: |
           state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease --jq '[.isDraft,.isImmutable,.isPrerelease] | @tsv')"
           [[ "$state" == $'false\ttrue\tfalse' ]]
-          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          # The SECOND call to `gh release verify`, and the one the review did
+          # not name. This is the homebrew-only path: the re-dispatch that
+          # republishes a Formula for a tag whose release already exists. For a
+          # private, deliberately unattested release it fails here, which means
+          # the recovery route for a failed `homebrew` job is broken in exactly
+          # the situation that needs it. Fixed with the other call rather than
+          # left for the release that would have found it.
+          if [[ "$RELEASE_ATTESTED" == "true" ]]; then
+            gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          fi
           mkdir "$RUNNER_TEMP/recovery-assets"
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
@@ -557,30 +569,102 @@ jobs:
             --version "$RELEASE_VERSION" \
             --commit "$RELEASE_SHA" \
             --dir "$RUNNER_TEMP/dist"
+      # PUBLIC REPOSITORIES ATTEST. PRIVATE ONES DO NOT.
+      #
+      # Build provenance attestation for a PRIVATE repository is an entitlement,
+      # not a universal feature. A user-owned private repository cannot have it
+      # at all, and an organisation-owned one only gets it on some plans, so a
+      # private repository on a Free or Team organisation fails the same way.
+      # The API refuses and the action fails the job:
+      #
+      #   Failed to persist attestation: Feature not available for user-owned
+      #   private repositories. To enable this feature, please make this
+      #   repository public.
+      #
+      # That killed claude-peers-suite's v0.1.0 after validate, quality, build
+      # and both native verifies had passed, and before the release existed, so
+      # a correct set of artefacts was thrown away over a step that could never
+      # have succeeded for that repository (SB23-2543).
+      #
+      # The condition is therefore `private` alone. An earlier version of this
+      # fix also tested `owner.type == 'User'`, which reads like precision and
+      # is wrong: it would have kept failing every private repository on a Free
+      # or Team organisation, which is most of them. Skipping the attestation
+      # for a repository that could have had one costs provenance; attempting
+      # one for a repository that cannot costs the whole release. Those are not
+      # comparable, so this errs toward skipping.
+      #
+      # This is deliberately coarse and it will under-attest. Distinguishing an
+      # entitled private repository from an unentitled one needs an input the
+      # adopter sets, which does not exist yet; until it does, private means no
+      # attestation.
+      #
+      # Skipped rather than made non-fatal. `continue-on-error` would leave the
+      # step red in a green run and say nothing about why. `attestations: write`
+      # stays on the job: the permission is harmless when unused, and removing
+      # it would silently disarm attestation for every public repository.
       - name: Attest assets
+        if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/dist/*
+      # A skipped step is easy to miss in a green run, and "this release has no
+      # provenance" is not something anyone should have to infer from an absence.
+      # This line is the completion proof for a private release, in place of the
+      # attestation; see skills/hextap/references/release-and-recovery.md.
+      - name: Note the unattested release
+        if: ${{ github.event.repository.private }}
+        run: |
+          echo "::notice::Build provenance attestation skipped. GitHub does not offer it for private repositories on every plan, so this release carries no attestation."
       - name: Publish complete draft
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          # Same expression as the attest step. publish-release.sh requires this
+          # and refuses to run without it, so the pair cannot drift silently.
+          RELEASE_ATTESTED: ${{ !github.event.repository.private }}
         run: |
           scripts/publish-release.sh \
             "$GITHUB_REPOSITORY" \
             "$RELEASE_TAG" \
             "$RUNNER_TEMP/dist" \
             "$RELEASE_PRERELEASE"
+      # RELEASE_ATTESTED MUST STAY THE SAME EXPRESSION AS THE ATTEST STEP ABOVE.
+      #
+      # `gh release verify` does not check that a release exists or is immutable.
+      # It checks for "a valid cryptographically signed attestation" (gh 2.x,
+      # `gh release verify --help`). So for a release this workflow deliberately
+      # did not attest, it can never succeed: the loop below would exhaust all
+      # twenty attempts and fail the job AFTER the release had been published,
+      # and `homebrew` would never run. The release exists, the assets are
+      # right, and the pipeline reports failure.
+      #
+      # That is the same shape of bug as the attestation failure this PR fixes,
+      # one step later, and it would have wasted a second tag to discover. Found
+      # by review rather than by a release, which is the only reason it did not.
+      #
+      # The two conditions are kept textually identical so the pair cannot drift
+      # into a state where the release is unattested but still verified for an
+      # attestation. internal/workflow pins that equality.
       - name: Require immutable release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_ATTESTED: ${{ !github.event.repository.private }}
         run: |
           for _ in {1..20}; do
             if state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')"; then
-              if [[ "$state" == $'false\ttrue' ]] && gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
-                exit 0
+              if [[ "$state" == $'false\ttrue' ]]; then
+                # Immutability is required either way; only the attestation
+                # half is conditional. An unattested release still has to be
+                # published and immutable before this step passes.
+                if [[ "$RELEASE_ATTESTED" != "true" ]]; then
+                  exit 0
+                fi
+                if gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
+                  exit 0
+                fi
               fi
             fi
             sleep 3

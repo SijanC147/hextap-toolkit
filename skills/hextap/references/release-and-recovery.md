@@ -32,8 +32,15 @@ such as `vX.Y.Z-rc.1` for prereleases. Build metadata is unsupported.
 
 The generated tag-triggered caller selects `full`. It validates the resolved tag
 source, runs source quality, builds every declared native target, verifies the
-exact deterministic assets, creates or resumes a draft, attests assets, and
-publishes one immutable GitHub release.
+exact deterministic assets, creates or resumes a draft, attests assets when the
+repository is public, and publishes one immutable GitHub release.
+
+Attestation is skipped for a **private** repository, because GitHub does not
+offer build provenance for private repositories on every plan and the action
+fails the job rather than degrading when it is unavailable. The run then logs a
+`::notice::` saying the release carries no attestation. A private release is
+complete without one, and that notice is what proves the step was considered
+rather than lost.
 
 Schema-2 Bun releases use the manifest-pinned Bun version, execute only the
 project-owned direct argv phases, and require tracked source to remain unchanged
@@ -54,8 +61,10 @@ offline success is absent or skipped.
   The publisher may change only Formula URL/SHA metadata and must correlate tap
   CI to the exact direct-push commit.
 - A rerun may accept an existing published release only when its prerelease state,
-  exact asset set, bytes, and attestations match. Otherwise stop; never delete or
-  replace the release.
+  exact asset set and bytes match, and, for a public repository, its attestations
+  match too. A private release has no attestation to compare, so the rerun accepts
+  it on the asset comparison alone. Otherwise stop; never delete or replace the
+  release.
 
 ## First registration bootstrap
 
@@ -93,10 +102,18 @@ for a future release; do not weaken equality or rewrite history.
 
 ## Completion proof
 
-Require the protected source merge, tag-to-main identity, immutable release and
-attestations, stable/prerelease classification, exact Formula bytes when stable,
-tap commit and exact correlated tap CI, plus installed consumer/service proof
-when that local mutation has separately been approved.
+Require the protected source merge, tag-to-main identity, immutable release,
+stable/prerelease classification, exact Formula bytes when stable, tap commit
+and exact correlated tap CI, plus installed consumer/service proof when that
+local mutation has separately been approved.
+
+The provenance half of that proof depends on visibility, and asking for the
+wrong one is how a correct release gets called incomplete:
+
+* **Public repository:** require the attestation.
+* **Private repository:** require the `Attest assets` step to be **skipped** and
+  the run to carry the `::notice::` line saying the release has no attestation.
+  Do not look for an attestation; there is none, and there cannot be one.
 
 For Hextap's own repository, prefer the confirmed `hextap dev deploy` or
 `dev release` state machine described in
