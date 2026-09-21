@@ -557,9 +557,13 @@ jobs:
             --version "$RELEASE_VERSION" \
             --commit "$RELEASE_SHA" \
             --dir "$RUNNER_TEMP/dist"
-      # Build provenance attestation is unavailable on a private repository
-      # owned by a user rather than an organisation. The API refuses it and the
-      # action fails the job:
+      # PUBLIC REPOSITORIES ATTEST. PRIVATE ONES DO NOT.
+      #
+      # Build provenance attestation for a PRIVATE repository is an entitlement,
+      # not a universal feature. A user-owned private repository cannot have it
+      # at all, and an organisation-owned one only gets it on some plans, so a
+      # private repository on a Free or Team organisation fails the same way.
+      # The API refuses and the action fails the job:
       #
       #   Failed to persist attestation: Feature not available for user-owned
       #   private repositories. To enable this feature, please make this
@@ -570,23 +574,36 @@ jobs:
       # a correct set of artefacts was thrown away over a step that could never
       # have succeeded for that repository (SB23-2543).
       #
+      # The condition is therefore `private` alone. An earlier version of this
+      # fix also tested `owner.type == 'User'`, which reads like precision and
+      # is wrong: it would have kept failing every private repository on a Free
+      # or Team organisation, which is most of them. Skipping the attestation
+      # for a repository that could have had one costs provenance; attempting
+      # one for a repository that cannot costs the whole release. Those are not
+      # comparable, so this errs toward skipping.
+      #
+      # This is deliberately coarse and it will under-attest. Distinguishing an
+      # entitled private repository from an unentitled one needs an input the
+      # adopter sets, which does not exist yet; until it does, private means no
+      # attestation.
+      #
       # Skipped rather than made non-fatal. `continue-on-error` would leave the
-      # step red in a green run and say nothing about why; an adopter that CAN
-      # attest still must, and this condition is false for every one of them.
-      # `attestations: write` stays on the job: the permission is harmless when
-      # unused, and removing it would silently disarm attestation for the
-      # organisation-owned and public repositories that do get it.
+      # step red in a green run and say nothing about why. `attestations: write`
+      # stays on the job: the permission is harmless when unused, and removing
+      # it would silently disarm attestation for every public repository.
       - name: Attest assets
-        if: ${{ !(github.event.repository.private && github.event.repository.owner.type == 'User') }}
+        if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/dist/*
       # A skipped step is easy to miss in a green run, and "this release has no
       # provenance" is not something anyone should have to infer from an absence.
+      # This line is the completion proof for a private release, in place of the
+      # attestation; see skills/hextap/references/release-and-recovery.md.
       - name: Note the unattested release
-        if: ${{ github.event.repository.private && github.event.repository.owner.type == 'User' }}
+        if: ${{ github.event.repository.private }}
         run: |
-          echo "::notice::Build provenance attestation skipped. GitHub does not offer it for user-owned private repositories, so this release carries no attestation."
+          echo "::notice::Build provenance attestation skipped. GitHub does not offer it for private repositories on every plan, so this release carries no attestation."
       - name: Publish complete draft
         env:
           GH_TOKEN: ${{ github.token }}
