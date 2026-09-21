@@ -27,7 +27,7 @@ func writeReusableWorkflowProject(t *testing.T) string {
 }
 
 func externalCaller(reference string) []byte {
-	owned := string(workflowBytes("v1.2.3", testToolkitSHA))
+	owned := string(workflowBytes("v1.2.3", testToolkitSHA, ""))
 	pinned := "    uses: SijanC147/hextap-toolkit/.github/workflows/release-go.yml@" + testToolkitSHA + " # v1.2.3\n"
 	replacement := "    uses: SijanC147/hextap-toolkit/.github/workflows/release-go.yml" + reference + "\n"
 	if !strings.Contains(owned, pinned) {
@@ -49,18 +49,18 @@ func TestRelativeSelfCallerIsAcceptedOnlyForTheToolkitRepositoryIdentity(t *test
 		{
 			name:       "toolkit self-caller in its own repository is accepted without an external pin",
 			repository: toolkitSelfRepository,
-			data:       selfCallerBytes(),
+			data:       selfCallerBytes(""),
 		},
 		{
 			name:       "relative caller in an adopter repository is rejected",
 			repository: "SijanC147/example-tool",
-			data:       selfCallerBytes(),
+			data:       selfCallerBytes(""),
 			wantReject: "relative same-repository caller is permitted only in",
 		},
 		{
 			name:       "relative caller in a look-alike repository name is rejected",
 			repository: supportedOwner + "/hextap-toolkit-fork",
-			data:       selfCallerBytes(),
+			data:       selfCallerBytes(""),
 			wantReject: "relative same-repository caller is permitted only in",
 		},
 		{
@@ -70,44 +70,44 @@ func TestRelativeSelfCallerIsAcceptedOnlyForTheToolkitRepositoryIdentity(t *test
 			// responsibility; it is not end-to-end proof that a fork can release.
 			name:       "the caller condition matches on repository name and leaves owner enforcement upstream",
 			repository: "another-owner/" + toolkitRepositoryName,
-			data:       selfCallerBytes(),
+			data:       selfCallerBytes(""),
 		},
 		{
 			name:       "relative caller with a malformed repository identity is rejected",
 			repository: "not-a-slug",
-			data:       selfCallerBytes(),
+			data:       selfCallerBytes(""),
 			wantReject: "repository must be OWNER/REPO with a safe GitHub identity",
 		},
 		{
 			name:       "relative caller without the same-repository reusable workflow is rejected",
 			repository: toolkitSelfRepository,
-			data:       selfCallerBytes(),
+			data:       selfCallerBytes(""),
 			omitCalled: true,
 			wantReject: "relative caller requires the same-repository reusable workflow",
 		},
 		{
 			name:       "self-caller with an additional inherited secret mapping is rejected",
 			repository: toolkitSelfRepository,
-			data:       []byte(strings.Replace(string(selfCallerBytes()), "    secrets:\n", "    secrets: inherit\n    secrets:\n", 1)),
+			data:       []byte(strings.Replace(string(selfCallerBytes("")), "    secrets:\n", "    secrets: inherit\n    secrets:\n", 1)),
 			wantReject: "does not match the exact owned same-repository self-caller",
 		},
 		{
 			name:       "self-caller granting an extra permission is rejected",
 			repository: toolkitSelfRepository,
-			data:       []byte(strings.Replace(string(selfCallerBytes()), "permissions:\n", "permissions:\n  packages: write\n", 1)),
+			data:       []byte(strings.Replace(string(selfCallerBytes("")), "permissions:\n", "permissions:\n  packages: write\n", 1)),
 			wantReject: "does not match the exact owned same-repository self-caller",
 		},
 		{
 			name:        "external adopter with a full SHA pin is accepted",
 			repository:  "SijanC147/example-tool",
-			data:        workflowBytes("v1.2.3", testToolkitSHA),
+			data:        workflowBytes("v1.2.3", testToolkitSHA, ""),
 			wantVersion: "v1.2.3",
 			wantCommit:  testToolkitSHA,
 		},
 		{
 			name:        "the toolkit repository may still use an external full SHA pin",
 			repository:  toolkitSelfRepository,
-			data:        workflowBytes("v1.2.3", testToolkitSHA),
+			data:        workflowBytes("v1.2.3", testToolkitSHA, ""),
 			wantVersion: "v1.2.3",
 			wantCommit:  testToolkitSHA,
 		},
@@ -156,7 +156,7 @@ func TestRelativeSelfCallerIsAcceptedOnlyForTheToolkitRepositoryIdentity(t *test
 		{
 			name:       "an adopter that adds the relative caller alongside a valid pin is rejected",
 			repository: "SijanC147/example-tool",
-			data:       []byte(string(workflowBytes("v1.2.3", testToolkitSHA)) + "\n  self:\n    uses: ./.github/workflows/release-go.yml\n"),
+			data:       []byte(string(workflowBytes("v1.2.3", testToolkitSHA, "")) + "\n  self:\n    uses: ./.github/workflows/release-go.yml\n"),
 			wantReject: "relative same-repository caller is permitted only in",
 		},
 	}
@@ -168,7 +168,7 @@ func TestRelativeSelfCallerIsAcceptedOnlyForTheToolkitRepositoryIdentity(t *test
 					t.Fatalf("Remove(%s): %v", reusableWorkflowPath, err)
 				}
 			}
-			version, commit, err := validateWorkflow(root, testCase.repository, testCase.data)
+			version, commit, err := validateWorkflow(root, testCase.repository, "", testCase.data)
 			if testCase.wantReject != "" {
 				if err == nil {
 					t.Fatalf("validateWorkflow() accepted %s; want rejection containing %q", testCase.name, testCase.wantReject)
@@ -193,7 +193,7 @@ func TestSelfCallerBytesRemainTheCommittedToolkitCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read committed toolkit caller: %v", err)
 	}
-	if string(committed) != string(selfCallerBytes()) {
+	if string(committed) != string(selfCallerBytes("")) {
 		t.Fatalf("the committed toolkit caller no longer equals the owned self-caller:\n%s", committed)
 	}
 	if strings.Contains(string(committed), "SijanC147/hextap-toolkit/.github/workflows/release-go.yml@") {
@@ -207,7 +207,7 @@ func TestSelfCallerModeMustBeExactlyRegularZeroSixFourFour(t *testing.T) {
 	if err := os.Chmod(path, 0o755); err != nil {
 		t.Fatalf("Chmod(%s): %v", path, err)
 	}
-	_, _, err := validateWorkflow(root, toolkitSelfRepository, selfCallerBytes())
+	_, _, err := validateWorkflow(root, toolkitSelfRepository, "", selfCallerBytes(""))
 	if err == nil || !strings.Contains(err.Error(), "mode must be 0644") {
 		t.Fatalf("validateWorkflow() error = %v, want a 0644 mode rejection", err)
 	}
@@ -232,7 +232,7 @@ func TestRelativeCallerInAnAdopterProjectFailsTheCompleteLocalContract(t *testin
 	if _, err := Onboard(validOptions(project)); err != nil {
 		t.Fatalf("Onboard() error = %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(project, filepath.FromSlash(workflowPath)), selfCallerBytes(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(project, filepath.FromSlash(workflowPath)), selfCallerBytes(""), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", workflowPath, err)
 	}
 	reusable := filepath.Join(project, filepath.FromSlash(reusableWorkflowPath))
@@ -262,7 +262,7 @@ func writeToolkitSelfProject(t *testing.T) string {
 	if _, err := Onboard(options); err != nil {
 		t.Fatalf("Onboard() error = %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(project, filepath.FromSlash(workflowPath)), selfCallerBytes(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(project, filepath.FromSlash(workflowPath)), selfCallerBytes(""), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", workflowPath, err)
 	}
 	reusable := filepath.Join(project, filepath.FromSlash(reusableWorkflowPath))

@@ -117,7 +117,7 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 	if err != nil {
 		return onboardingState{}, err
 	}
-	workflow := workflowBytes(options.ToolkitVersion, options.ToolkitSHA)
+	workflow := workflowBytes(options.ToolkitVersion, options.ToolkitSHA, project.Release.SubmodulesMode())
 	mainRuleset, err := mainRulesetBytes(checks)
 	if err != nil {
 		return onboardingState{}, err

@@ -12,6 +12,11 @@ on:
       mode:
         required: true
         type: string
+      submodules:
+        description: Submodule checkout mode for the caller source; false, true, or recursive.
+        required: false
+        type: string
+        default: "false"
     secrets:
       op_service_account_token:
         required: true
@@ -46,6 +51,22 @@ jobs:
       manifest_artifact_id: ${{ steps.manifest-artifact.outputs.artifact-id }}
       manifest_sha256: ${{ steps.manifest.outputs.sha256 }}
     steps:
+      - name: Validate submodule checkout mode
+        env:
+          RAW_SUBMODULES: ${{ inputs.submodules }}
+        run: |
+          if [[ ! "$RAW_SUBMODULES" =~ ^(false|true|recursive)$ ]]; then
+            printf '::error title=Invalid submodules input::%s\n' \
+              "submodules must be false, true, or recursive"
+            exit 1
+          fi
+
+      # No submodules here on purpose. This checkout is detached to the
+      # resolved tag by the "Resolve and detach tagged source" step below,
+      # and git checkout does not move submodule work trees, so any
+      # submodule fetched here would sit at the commit recorded on the
+      # pushed ref rather than on the tag. Nothing in this job reads
+      # submodule content: it resolves the tag and validates the manifest.
       - name: Check out caller source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -186,6 +207,7 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
           path: source
           persist-credentials: false
+          submodules: ${{ inputs.submodules }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.validate.outputs.runtime == 'bun'
         with:
@@ -278,6 +300,7 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
           path: source
           persist-credentials: false
+          submodules: ${{ inputs.submodules }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit
