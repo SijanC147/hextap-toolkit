@@ -61,8 +61,10 @@ offline success is absent or skipped.
   The publisher may change only Formula URL/SHA metadata and must correlate tap
   CI to the exact direct-push commit.
 - A rerun may accept an existing published release only when its prerelease state,
-  exact asset set, bytes, and attestations match. Otherwise stop; never delete or
-  replace the release.
+  exact asset set and bytes match, and, for a public repository, its attestations
+  match too. A private release has no attestation to compare, so the rerun accepts
+  it on the asset comparison alone. Otherwise stop; never delete or replace the
+  release.
 
 ## First registration bootstrap
 
