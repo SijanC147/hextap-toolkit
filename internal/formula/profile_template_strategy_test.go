@@ -175,6 +175,25 @@ func TestUpdateWithTemplateRejectsMalformedOrMismatchedDownloadStrategies(t *tes
 // A template with no suffix at all is what every existing adopter ships, and it
 // must keep working unchanged. Without this the fix could pass its own tests
 // while breaking better-ccflare and claude-rc-proxy.
+// A namespaced constant. The pattern documents `Hextap::PrivateAsset` as
+// supported and nothing proved it: a reviewer of #26 showed that deleting the
+// `(?:::[A-Z][A-Za-z0-9_]*)*` branch left every test passing, so the supported
+// shape rested on the comment alone.
+func TestUpdateWithTemplateAcceptsANamespacedStrategyConstant(t *testing.T) {
+	project := loadProfileManifest(t)
+	suffix := ", using: Hextap::PrivateAsset"
+	template := strategyTemplate(t, suffix, suffix)
+	original := renderProfileFromTemplate(t, template, "3.8.1", armSHA, amdSHA)
+
+	updated, _, err := UpdateWithTemplate(original, template, project, "3.8.2", newArmSHA, newAmdSHA)
+	if err != nil {
+		t.Fatalf("UpdateWithTemplate() error = %v", err)
+	}
+	if count := bytes.Count(updated, []byte(suffix)); count != 2 {
+		t.Fatalf("namespaced strategy occurrences after update = %d, want 2", count)
+	}
+}
+
 func TestUpdateWithTemplateStillAcceptsTheSuffixlessBlock(t *testing.T) {
 	project := loadProfileManifest(t)
 	template := strategyTemplate(t, "", "")
