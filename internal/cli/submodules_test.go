@@ -227,3 +227,31 @@ func TestRecursiveIsRefusedWhileTheNestedSetIsUnsealed(t *testing.T) {
 		t.Errorf("the error does not say why recursive is refused or where the follow-up is: %s", stderr)
 	}
 }
+
+// git matches an http.<origin>/.extraheader by ORIGIN, scheme included, so a
+// header written for an http:// caller origin does not apply to the https://
+// submodule URLs the seal requires. A host-only comparison passed anyway.
+// Raised by the Codex reviewer of PR #30 as P2.
+func TestAnHTTPCallerOriginIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "project-manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(suiteManifest(t, "true", suiteURLs)), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	gitmodulesPath := filepath.Join(dir, ".gitmodules")
+	if err := os.WriteFile(gitmodulesPath, []byte(suiteGitmodules), 0o600); err != nil {
+		t.Fatalf("write .gitmodules: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"release", "submodules",
+		"--manifest", manifestPath,
+		"--gitmodules", gitmodulesPath,
+		"--server-url", "http://github.com",
+	}, &stdout, &stderr, "test", "test")
+	if code == 0 {
+		t.Fatalf("exit 0, want failure; the credential could never reach an https submodule from an http origin\nstdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "want https") {
+		t.Errorf("the error does not name the scheme requirement: %s", stderr.String())
+	}
+}

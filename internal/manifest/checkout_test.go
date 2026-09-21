@@ -132,6 +132,9 @@ func TestCheckoutAgreesBetweenGoAndMachineSchema(t *testing.T) {
 		"invalid seal without fetching":       {body: `{"submodules": "false", "submodules_allowed": ["` + sealedSubmoduleURL + `"]}`},
 		"invalid seal that is not https":      {body: `{"submodules": "true", "submodules_allowed": ["git@github.com:SijanC147/x.git"]}`},
 		"invalid seal percent-encoded":        {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/%78.git"]}`},
+		"invalid seal relative segment":       {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/../evil.git"]}`},
+		"invalid seal dot segment":            {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/./x.git"]}`},
+		"invalid seal doubled slash":          {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147//x.git"]}`},
 		"invalid seal carrying a pattern":     {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/*"]}`},
 		"invalid missing field":               {body: `{}`},
 		"invalid mis-cased field":             {body: `{"Submodules": "true"}`},
@@ -257,5 +260,22 @@ func TestWorkflowExportCarriesTheSealedSubmoduleMode(t *testing.T) {
 	}
 	if values.Submodules != SubmodulesNone {
 		t.Fatalf("a manifest without release.checkout exported %q, want %q; the workflow default is %q and the two must agree", values.Submodules, SubmodulesNone, SubmodulesNone)
+	}
+}
+
+// The remediation in this error has to be something the adopter can actually
+// do. It named `hextap onboard`, which for an EXISTING manifest parses it
+// before generating anything and returns this same error, so it sent the
+// adopter in a circle. Raised by the Codex reviewer of PR #30 as P2.
+func TestTheEmptySealErrorDoesNotSendTheAdopterToOnboard(t *testing.T) {
+	_, err := Parse([]byte(withCheckout(`{"submodules": "recursive"}`)))
+	if err == nil {
+		t.Fatal("a fetching mode with no sealed list was accepted")
+	}
+	if strings.Contains(err.Error(), "onboard") {
+		t.Errorf("the error tells the adopter to run onboard, which returns this same error for an existing manifest:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "by hand") || !strings.Contains(err.Error(), ".gitmodules") {
+		t.Errorf("the error does not say to add the field by hand, nor where to read the URLs from:\n%s", err)
 	}
 }

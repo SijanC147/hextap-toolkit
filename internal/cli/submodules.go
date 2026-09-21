@@ -136,8 +136,15 @@ func callerHost(raw string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("is not a URL: %v", err)
 	}
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return "", fmt.Errorf("has scheme %q, want https", parsed.Scheme)
+	// https only, and not merely http-or-https. actions/checkout scopes the
+	// credential to an http.<origin>/.extraheader, and git matches that
+	// header by ORIGIN, scheme included: a header written for
+	// http://ghe.example does not apply to https://ghe.example/... Every
+	// sealed URL is required to be https, so accepting an http caller origin
+	// let a host-only comparison pass while the credential could never reach
+	// the submodule. Raised by the Codex reviewer of PR #30 as P2.
+	if parsed.Scheme != "https" {
+		return "", fmt.Errorf("has scheme %q, want https; the submodule credential is scoped to an http.<origin>/.extraheader whose origin includes the scheme, and every sealed submodule URL is https", parsed.Scheme)
 	}
 	if parsed.Host == "" {
 		return "", fmt.Errorf("names no host")

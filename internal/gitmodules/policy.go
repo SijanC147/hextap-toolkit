@@ -64,9 +64,19 @@ func ValidateAllowedURL(raw string) error {
 	if parsed.Fragment != "" {
 		return fmt.Errorf("carries a fragment")
 	}
-	for _, segment := range strings.Split(parsed.Path, "/") {
-		if segment == ".." || segment == "." {
-			return fmt.Errorf("has a relative path segment %q", segment)
+	// Every path segment must be non-empty and must not begin with a dot.
+	// "." and ".." are the relative segments, and an empty segment is a
+	// doubled slash; both let two spellings reach one repository, which is
+	// what the exact comparison cannot tolerate. Rejecting the whole
+	// dot-leading class rather than the two literals keeps this rule and the
+	// machine schema's pattern expressing the same thing, which is what the
+	// Codex reviewer of PR #30 found they did not.
+	for _, segment := range strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/") {
+		if segment == "" {
+			return fmt.Errorf("has an empty path segment; a doubled slash is a second spelling of one repository")
+		}
+		if strings.HasPrefix(segment, ".") {
+			return fmt.Errorf("has a path segment %q beginning with a dot; \".\" and \"..\" are relative segments and no repository path needs one", segment)
 		}
 	}
 	// A percent-encoded path survives the round trip below unchanged, because

@@ -149,7 +149,12 @@ func (c ReleaseCheckout) validateAllowed() error {
 	}
 
 	if len(c.SubmodulesAllowed) == 0 {
-		return fmt.Errorf("validate manifest: release.checkout.submodules is %q but release.checkout.submodules_allowed is empty; list the exact https:// URL of every submodule this project fetches, because the release presents the submodule credential to every repository the tagged .gitmodules names and this list is what bounds that set (SB23-2504). hextap onboard fills it in from the checkout's own .gitmodules", c.Submodules)
+		// The remediation deliberately does not name hextap onboard. For an
+		// existing manifest, onboard parses it before generating anything
+		// (resolveManifest in internal/onboard/onboard.go) and returns this
+		// same error, so telling the adopter to run onboard sends them in a
+		// circle. Filling the field automatically is SB23-2554.
+		return fmt.Errorf("validate manifest: release.checkout.submodules is %q but release.checkout.submodules_allowed is empty; add it by hand, listing the exact https:// URL of every submodule this project fetches, because the release presents the submodule credential to every repository the tagged .gitmodules names and this list is what bounds that set (SB23-2504). `git config -f .gitmodules --get-regexp '^submodule\\..*\\.url$'` prints exactly the URLs to seal", c.Submodules)
 	}
 
 	seen := make(map[string]bool, len(c.SubmodulesAllowed))
