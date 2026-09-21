@@ -561,8 +561,23 @@ be conflated. `GITHUB_TOKEN` cannot substitute for it, whatever permissions the
 caller grants the job, because the limit is repository ownership rather than
 scope.
 
-A project with no submodules, or with public ones, maps nothing and its
-generated caller is byte-identical to one written before any of this existed.
+A fine-grained token selects repositories under **one** resource owner. If the
+caller and a private submodule sit under different owners, no fine-grained
+token can cover both, and nothing in the manifest constrains a submodule URL to
+the caller's owner. That configuration needs a credential type that spans
+owners, a GitHub App installation token or a classic token, scoped as narrowly
+as that type allows. Moving the submodule under one owner is the cheaper fix
+where it is possible.
+
+A project with **public** submodules maps the secret but never has to set it.
+The caller maps `submodules_token` whenever `release.checkout.submodules` is
+not `"false"`, and an unset repository secret passes an empty value, which
+falls back to `github.token`. That clones a public submodule perfectly well, so
+the credential is worth creating only when a submodule is actually private.
+
+A project with **no** submodules maps nothing at all, and its generated caller
+and `.hextap/SETUP.md` are byte-identical to the ones written before any of
+this existed.
 
 The documented interim workaround, initialising submodules from
 `release.profile.prepare`, is narrower than it looks. `prepare` runs only when

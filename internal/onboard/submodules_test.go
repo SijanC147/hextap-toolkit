@@ -132,19 +132,32 @@ func TestSetupInstructionsNameEverySecretTheCallerMaps(t *testing.T) {
 			t.Fatalf("the caller for submodules = %q does not map SUBMODULES_TOKEN", mode)
 		}
 		for _, required := range []string{
-			"the two required Actions secrets",
 			"gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/SijanC147/example",
 			"gh secret set SUBMODULES_TOKEN --repo github.com/SijanC147/example",
 			"Contents read on this repository and on each submodule repository",
 			"a token scoped to the submodules alone fails the clone",
 			"must not be conflated",
+			// The fallback to github.token is what makes the credential
+			// unnecessary for public submodules, so the document must not
+			// call it required. Raised by Codex on PR #24 as P2: telling
+			// every submodule adopter to mint a long-lived token
+			// over-provisions a credential with access to the caller and
+			// everything it depends on.
+			"**Set it only if any of those submodules is private.**",
+			"Leave it unset for public submodules",
+			// A fine-grained token selects repositories under one resource
+			// owner, and nothing constrains a submodule URL to the caller's
+			// owner, so the instructions have to name a credential type that
+			// can span owners. Also Codex, P2.
+			"selects repositories under **one** resource owner",
+			"a GitHub App installation token or a classic token",
 		} {
 			if !strings.Contains(setup, required) {
 				t.Fatalf("the setup document for submodules = %q is missing %q:\n%s", mode, required, setup)
 			}
 		}
-		if strings.Contains(setup, "the one required Actions secret") {
-			t.Fatalf("the setup document for submodules = %q still says one secret", mode)
+		if strings.Contains(setup, "the two required Actions secrets") {
+			t.Fatalf("the setup document for submodules = %q calls the submodule credential required; it is needed only when a submodule is private", mode)
 		}
 	}
 }
