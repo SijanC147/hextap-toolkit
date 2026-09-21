@@ -13,8 +13,11 @@ Require all of the following:
 - The project manifest, build adapter, thin caller, tap payload, and owned
   ruleset payloads pass local validation; the authorized build smoke passes.
 - The source repository uses `main` as default, immutable releases are enabled,
-  exact owned rulesets are active, and only the required secret name exists for
-  Hextap publication.
+  exact owned rulesets are active, and every secret name the generated caller
+  references exists for Hextap publication: `OP_SERVICE_ACCOUNT_TOKEN` always,
+  and `SUBMODULES_TOKEN` as well when `release.checkout.submodules` is not
+  `false` and any submodule is private. Do not assert that one secret is the
+  only one; read the caller.
 - The tag target is the intended commit reachable from canonical `main`, the
   worktree is clean, Git remotes are safe, and the strict tag is unused.
 - For an already registered project, the complete tag-source manifest is

@@ -99,7 +99,7 @@ scope. Schema-2 build validation runs the install and preparation argv before
 the adapter. Doctor requires `go` for schema 1 and the pinned runtime (`bun`)
 for schema 2. Online doctor requires suitable `gh` authentication but never reads a
 secret value or repairs remote state. It checks canonical `main`, immutable
-releases, the required secret name, owned active rulesets, exact stable toolkit
+releases, the secret names the generated caller references, owned active rulesets, exact stable toolkit
 tag provenance, and the paired tap Project/Formula content.
 Schema 1 requires exact rendered Formula bytes. Schema 2 validates the class
 and architecture metadata locally while the tap-owned profile gate remains
