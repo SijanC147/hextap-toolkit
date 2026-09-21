@@ -544,38 +544,48 @@ caller generated for a project that declares `release.checkout` maps it:
       submodules_token: ${{ secrets.SUBMODULES_TOKEN }}
 ```
 
-The credential needs **Contents read on the caller's own repository and on each
-submodule repository, and nothing else**. Include the caller repository:
-`token:` is not a submodule-only credential. `actions/checkout` writes it into
-an `http.<origin>/.extraheader` before it fetches anything, so it replaces
-`GITHUB_TOKEN` for the **primary clone of the caller's own repository** as well
-as for the submodule fetches. A token scoped to the submodule repositories
-alone fails the primary clone with an authentication error before it reaches a
-single submodule, and that error looks enough like the private-submodule
-failure this feature fixes that the obvious repair is to keep widening the
-token until the release goes green. Scope it to the caller plus its submodules
-and nothing further.
+Work out what the credential needs from one rule rather than from a list of
+cases. **It must be able to read, privately, every repository the workflow
+clones: the caller and each submodule. Whatever it cannot read privately, it
+cannot clone.** `actions/checkout` writes the token into an
+`http.<origin>/.extraheader` before it fetches anything, so it presents the
+same credential for the primary clone as for the submodule fetches, which is
+why the caller is in the rule and not only its submodules.
+
+Two consequences follow, and between them they answer any layout:
+
+1. A **public** repository imposes no constraint, because cloning it needs no
+   credential at all. Only the private ones determine the scope.
+2. A **fine-grained** personal access token selects repositories under a single
+   resource owner, so it suffices exactly when every repository that must be
+   read privately sits under one owner.
+
+To apply it: list the caller and every submodule, strike the public ones, and
+what remains is the scope. If the remainder shares one owner, use a
+fine-grained token limited to exactly those repositories with Contents read and
+nothing else.
+
+If the remainder spans owners, a fine-grained token cannot express it. Moving
+those repositories under one owner is the only fix that keeps the narrow
+credential, and nothing in the manifest constrains a submodule URL, so that is
+a choice about repository layout rather than something the toolkit enforces.
+Otherwise use a **classic** personal access token belonging to a user who can
+read all of them, and understand the cost: its `repo` scope covers every
+repository that user can reach rather than the ones you list, so give it a
+short expiry and rotate it. A GitHub App installation token cannot substitute,
+because an installation belongs to one account and its token expires after an
+hour, while the workflow reads one statically stored secret.
+
+Getting this wrong in the safe direction is expensive too. A token that cannot
+read the caller fails the primary clone with an authentication error before it
+reaches a single submodule, and that error resembles the private-submodule
+failure this feature fixes closely enough that the obvious repair is to keep
+widening the token until the release goes green.
 
 It is a different credential from the tap publisher token and the two must not
 be conflated. `GITHUB_TOKEN` cannot substitute for it, whatever permissions the
 caller grants the job, because the limit is repository ownership rather than
 scope.
-
-A fine-grained token selects repositories under **one** resource owner. If the
-caller and a private submodule sit under different owners, no fine-grained
-token can cover both, and nothing in the manifest constrains a submodule URL to
-the caller's owner. Move the submodule under one owner if you can: that
-keeps the fine-grained token and its narrow scope, and it is the only option
-that does not widen the credential.
-
-If you cannot, the credential must be a **classic** personal access token
-belonging to a user who can read every repository involved. A GitHub App
-installation token does not work here: an installation belongs to one account,
-so its token cannot reach repositories owned by another, and it expires after
-an hour while the workflow reads one statically stored secret. A classic
-token's `repo` scope covers every repository that user can reach rather than
-the ones you list, so it is far broader than the release needs; give it a short
-expiry and rotate it.
 
 A project with **public** submodules maps the secret but never has to set it.
 The caller maps `submodules_token` whenever `release.checkout.submodules` is

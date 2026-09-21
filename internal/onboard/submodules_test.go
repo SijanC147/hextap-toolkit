@@ -134,31 +134,25 @@ func TestSetupInstructionsNameEverySecretTheCallerMaps(t *testing.T) {
 		for _, required := range []string{
 			"gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/SijanC147/example",
 			"gh secret set SUBMODULES_TOKEN --repo github.com/SijanC147/example",
-			"Contents read on this repository and on each submodule repository",
-			"a token scoped to the submodules alone fails the clone",
+			// Assert the RULE, not the cases. This paragraph produced five
+			// defects in one pull request, every one a wrong statement about
+			// which credential fits which configuration: under-scoped, then
+			// over-provisioned for public submodules, then an impossible
+			// cross-owner case, then a token type that cannot span owners,
+			// then over-broadening a public caller. Enumerating
+			// configurations is what kept it wrong, because every
+			// enumeration is a claim and there are more layouts than anyone
+			// enumerates correctly. A test that pinned the cases would lock
+			// the enumeration in, so these assert the rule that derives them.
+			"must be able to read, privately, every repository this workflow clones",
+			"Whatever it cannot read privately, it cannot clone",
+			"A **public** repository imposes no constraint",
+			"selects repositories under a single resource owner",
+			"suffices exactly when every repository that must be read privately sits under one owner",
+			"strike the public ones, and what remains is the scope",
 			"must not be conflated",
-			// The fallback to github.token is what makes the credential
-			// unnecessary for public submodules, so the document must not
-			// call it required. Raised by Codex on PR #24 as P2: telling
-			// every submodule adopter to mint a long-lived token
-			// over-provisions a credential with access to the caller and
-			// everything it depends on.
-			"**Set it only if any of those submodules is private.**",
-			"Leave it unset for public submodules",
-			// A fine-grained token selects repositories under one resource
-			// owner, and nothing constrains a submodule URL to the caller's
-			// owner, so the instructions have to name a credential type that
-			// can span owners. Also Codex, P2.
-			"selects repositories under **one** resource owner",
-			// A GitHub App installation belongs to one account, so its
-			// token cannot span owners, and it expires after an hour while
-			// this workflow reads one statically stored secret. Recommending
-			// it was wrong advice this lane introduced and Codex caught on
-			// PR #24. The document must name the classic token and say what
-			// accepting it costs.
-			"A GitHub App installation token does not work",
-			"must be a **classic** personal access token",
-			"**Move the submodule under one owner if you can.**",
+			"A GitHub App installation token cannot substitute",
+			"**classic** personal access token",
 		} {
 			if !strings.Contains(setup, required) {
 				t.Fatalf("the setup document for submodules = %q is missing %q:\n%s", mode, required, setup)
