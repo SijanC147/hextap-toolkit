@@ -284,3 +284,83 @@ func TestTheCallerSubmoduleModeIsBoundToTheSealedManifest(t *testing.T) {
 		}
 	}
 }
+
+// The credential goes where submodules are actually fetched and nowhere else.
+// actions/checkout passes its own token: to submodule fetches, so the whole
+// credential path is this one mapping. The job's GITHUB_TOKEN cannot read a
+// sibling private repository, and seven of the eight repositories in this
+// family are private, so for those adopters the input alone produces a clone
+// error rather than an empty tree.
+const submodulesToken = "token: ${{ secrets.submodules_token || github.token }}"
+
+func TestTheSubmoduleCredentialReachesOnlyTheCheckoutsThatFetchSubmodules(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	steps := parseCheckoutSteps(t, workflow)
+
+	var tokened, threadedWithoutToken, tokenedWithoutThread []string
+	for _, step := range steps {
+		carries := step.declares(submodulesToken)
+		if carries {
+			tokened = append(tokened, step.jobAndLine)
+		}
+		if step.threaded && !carries {
+			threadedWithoutToken = append(threadedWithoutToken, step.jobAndLine)
+		}
+		if carries && !step.threaded {
+			tokenedWithoutThread = append(tokenedWithoutThread, step.jobAndLine)
+		}
+	}
+
+	if len(threadedWithoutToken) > 0 {
+		t.Errorf("the checkout at %s fetches submodules but carries no %s.\n"+
+			"Every adopter repository in this family except the toolkit is private, so without the credential this checkout fails on the first private submodule with a clone error.",
+			strings.Join(threadedWithoutToken, ", "), submodulesToken)
+	}
+
+	if len(tokenedWithoutThread) > 0 {
+		t.Errorf("the checkout at %s carries %s but fetches no submodules.\n"+
+			"A credential belongs only where it is used. Every other checkout here either pins the toolkit, which is the trust boundary, or is the validate caller checkout whose submodules would be stale anyway.",
+			strings.Join(tokenedWithoutThread, ", "), submodulesToken)
+	}
+
+	if len(tokened) != 2 {
+		t.Errorf("%s appears on %d checkout calls (%s), want exactly 2, the same two that carry %s.",
+			submodulesToken, len(tokened), strings.Join(tokened, ", "), submodulesThread)
+	}
+}
+
+// The secret is optional and falls back to github.token. A caller that maps
+// nothing must keep working exactly as it did, which is what makes this
+// landable before the credential itself exists.
+func TestTheSubmoduleCredentialIsOptionalAndFallsBackToTheJobToken(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	secrets := textBetween(t, workflow, "    secrets:\n", "\nconcurrency:\n")
+
+	assertContains(t, secrets, "      submodules_token:\n")
+	assertContains(t, secrets, "        required: false\n")
+	assertNotContains(t, secrets, "      submodules_token:\n        required: true")
+	assertContains(t, workflow, "secrets.submodules_token || github.token")
+}
+
+// persist-credentials: false is what stops the credential surviving the step
+// that used it, and it has to hold on all nine after the change, not only on
+// the two that now carry a token.
+func TestEveryCheckoutStillRefusesToPersistCredentials(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	steps := parseCheckoutSteps(t, workflow)
+
+	var persisting []string
+	for _, step := range steps {
+		if !step.declares("persist-credentials: false") {
+			persisting = append(persisting, step.jobAndLine)
+		}
+	}
+	if len(persisting) > 0 {
+		t.Fatalf("the checkout at %s does not set persist-credentials: false.\n"+
+			"A credential written into the runner's git config outlives the step that wrote it, and the build runs later in the same job.",
+			strings.Join(persisting, ", "))
+	}
+	if len(steps) != 9 {
+		t.Fatalf("expected 9 checkout calls, got %d", len(steps))
+	}
+}

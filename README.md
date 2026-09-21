@@ -528,13 +528,31 @@ boundary. `release.build_script` must never fetch: the build runs inside
 missing component. A manifest that omits the block behaves exactly as it did
 before the field existed, so nothing changes for a project without submodules.
 
-The input alone is not enough for a **private** submodule. `actions/checkout`
-authenticates with the job's `GITHUB_TOKEN`, which cannot read a sibling
-private repository, so a private submodule fails the checkout with a clone
-error rather than producing an empty tree. That needs a credential with
-Contents read on each submodule repository, a fine-grained PAT mapped into the
-workflow, and it is tracked separately as SB23-2470. Until it lands, this input
-covers public submodules.
+A **private** submodule needs a credential as well as the input.
+`actions/checkout` authenticates with the job's `GITHUB_TOKEN`, which cannot
+read a sibling private repository, so a private submodule fails the checkout
+with a clone error rather than producing an empty tree.
+
+The workflow owns that credential, not the build adapter. It takes an optional
+`submodules_token` secret and passes it as `token:` on the same two checkouts
+that fetch submodules, falling back to `github.token` when it is unset. A
+caller generated for a project that declares `release.checkout` maps it:
+
+```yaml
+    secrets:
+      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+      submodules_token: ${{ secrets.SUBMODULES_TOKEN }}
+```
+
+The credential needs **Contents read on each submodule repository and nothing
+else**. A fine-grained personal access token scoped to exactly those
+repositories is the intended shape. It is a different credential from the tap
+publisher token and the two must not be conflated. `GITHUB_TOKEN` cannot
+substitute for it, whatever permissions the caller grants the job, because the
+limit is repository ownership rather than scope.
+
+A project with no submodules, or with public ones, maps nothing and its
+generated caller is byte-identical to one written before any of this existed.
 
 The documented interim workaround, initialising submodules from
 `release.profile.prepare`, is narrower than it looks. `prepare` runs only when

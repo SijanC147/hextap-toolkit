@@ -292,8 +292,8 @@ jobs:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}%s
     secrets:
-      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-`, submodulesInput(submodules)))
+      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}%s
+`, submodulesInput(submodules), submodulesSecret(submodules)))
 }
 
 func validateMainRuleset(data []byte) ([]string, error) {

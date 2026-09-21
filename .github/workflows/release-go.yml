@@ -20,6 +20,15 @@ on:
     secrets:
       op_service_account_token:
         required: true
+      submodules_token:
+        description: >-
+          Credential with Contents read on each submodule repository, for a
+          caller whose submodules are private. The job's GITHUB_TOKEN cannot
+          read a sibling private repository, so without this a private
+          submodule fails the checkout with a clone error. Unset falls back to
+          github.token, which is correct for public submodules and for a caller
+          with none.
+        required: false
 
 concurrency:
   group: hextap-release-${{ github.repository }}
@@ -227,6 +236,7 @@ jobs:
           path: source
           persist-credentials: false
           submodules: ${{ inputs.submodules }}
+          token: ${{ secrets.submodules_token || github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.validate.outputs.runtime == 'bun'
         with:
@@ -320,6 +330,7 @@ jobs:
           path: source
           persist-credentials: false
           submodules: ${{ inputs.submodules }}
+          token: ${{ secrets.submodules_token || github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit

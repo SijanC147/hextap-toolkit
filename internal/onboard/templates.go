@@ -94,6 +94,26 @@ func submodulesInput(submodules string) string {
 	return fmt.Sprintf("\n      submodules: %q", submodules)
 }
 
+// submodulesSecret renders the caller's submodules_token mapping, or nothing,
+// on the same condition as submodulesInput. Keying both off the effective
+// checkout mode is deliberate: every generated caller is compared byte for
+// byte by validate and by doctor, so mapping the secret unconditionally would
+// change the expected bytes for every existing adopter, including ones with no
+// submodules, and the first thing each would see is their own caller reported
+// as drifted from what the toolkit generates. An adopter who does not use
+// submodules never learns this exists.
+//
+// The secret is optional in the reusable workflow and falls back to
+// github.token when unset, so a caller that maps a repository secret which
+// does not exist yet still runs; it fails on the private submodule rather than
+// on the mapping.
+func submodulesSecret(submodules string) string {
+	if submodules == "" || submodules == manifest.SubmodulesNone {
+		return ""
+	}
+	return "\n      submodules_token: ${{ secrets.SUBMODULES_TOKEN }}"
+}
+
 func workflowBytes(toolkitVersion, toolkitSHA, submodules string) []byte {
 	return []byte(fmt.Sprintf(`name: Hextap release
 
@@ -121,8 +141,8 @@ jobs:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}%s
     secrets:
-      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-`, toolkitSHA, toolkitVersion, submodulesInput(submodules)))
+      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}%s
+`, toolkitSHA, toolkitVersion, submodulesInput(submodules), submodulesSecret(submodules)))
 }
 
 func mainRulesetBytes(checks []string) ([]byte, error) {

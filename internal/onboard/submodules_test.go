@@ -58,3 +58,48 @@ func TestCallerQuotesTheSubmodulesValue(t *testing.T) {
 		t.Fatalf("the caller does not quote the submodules value:\n%s", caller)
 	}
 }
+
+// Every generated caller is compared byte for byte by validate and by doctor.
+// Mapping the credential unconditionally would change the expected bytes for
+// every existing adopter, including ones with no submodules and no interest in
+// them, and the first thing each would see is their own caller reported as
+// drifted from what the toolkit now generates. That is a breaking change to
+// people who gain nothing from the feature.
+func TestTheCredentialMappingIsAbsentForAdoptersWithoutSubmodules(t *testing.T) {
+	for _, mode := range []string{"", manifest.SubmodulesNone} {
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		if strings.Contains(caller, "submodules_token") {
+			t.Fatalf("the caller for submodules = %q maps a credential it never uses:\n%s", mode, caller)
+		}
+		if strings.Contains(string(selfCallerBytes(mode)), "submodules_token") {
+			t.Fatalf("the self-caller for submodules = %q maps a credential it never uses", mode)
+		}
+	}
+}
+
+func TestTheCredentialMappingIsPresentForAdoptersWithSubmodules(t *testing.T) {
+	for _, mode := range []string{manifest.SubmodulesTop, manifest.SubmodulesRecursive} {
+		want := "      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}\n      submodules_token: ${{ secrets.SUBMODULES_TOKEN }}\n"
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		if !strings.Contains(caller, want) {
+			t.Fatalf("the caller for submodules = %q does not map submodules_token inside the secrets block:\n%s", mode, caller)
+		}
+		if !strings.Contains(string(selfCallerBytes(mode)), want) {
+			t.Fatalf("the self-caller for submodules = %q does not map submodules_token", mode)
+		}
+	}
+}
+
+// The mapping and the input are keyed off the same value, so a caller can
+// never ask for submodules without the credential that private ones need, or
+// map a credential for a checkout that fetches nothing.
+func TestTheCredentialMappingAndTheInputAppearTogetherOrNotAtAll(t *testing.T) {
+	for _, mode := range []string{"", manifest.SubmodulesNone, manifest.SubmodulesTop, manifest.SubmodulesRecursive} {
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		hasInput := strings.Contains(caller, "submodules: ")
+		hasSecret := strings.Contains(caller, "submodules_token:")
+		if hasInput != hasSecret {
+			t.Fatalf("submodules = %q produced input=%v secret=%v; they must agree:\n%s", mode, hasInput, hasSecret, caller)
+		}
+	}
+}
