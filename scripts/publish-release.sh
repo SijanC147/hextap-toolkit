@@ -24,6 +24,16 @@ if [[ "$prerelease" != true && "$prerelease" != false ]]; then
   echo "prerelease must be true or false" >&2
   exit 64
 fi
+# RELEASE_ATTESTED says whether this release carries a build provenance
+# attestation. It is REQUIRED rather than defaulting, because either default is
+# wrong: defaulting to true reintroduces the bug below for every caller that
+# forgets, and defaulting to false silently skips a real check for the public
+# repositories that do attest. An explicit answer is cheap; a silent wrong one
+# is what this whole family of bugs is made of.
+if [[ "${RELEASE_ATTESTED:-}" != true && "${RELEASE_ATTESTED:-}" != false ]]; then
+  echo "RELEASE_ATTESTED must be exported as true or false" >&2
+  exit 64
+fi
 
 mapfile -t expected_assets < <(find "$asset_dir" -mindepth 1 -maxdepth 1 -type f -print | sed 's#.*/##' | LC_ALL=C sort)
 if [[ ${#expected_assets[@]} -lt 3 ]] || ! printf '%s\n' "${expected_assets[@]}" | grep -Fxq SHA256SUMS; then
@@ -80,7 +90,16 @@ if [[ "$release_exists" == true ]]; then
         exit 1
       }
     done
-    gh release verify "$tag" --repo "$repository"
+    # THE THIRD CALL, on the branch that runs when the release already exists.
+    # A retried full run reaches here: the immutable release was published, a
+    # later step failed transiently, and the rerun finds its own release. For a
+    # private, deliberately unattested release `gh release verify` cannot pass,
+    # so the retry died in the publisher before reaching the guarded loop in the
+    # workflow. The assets were already verified byte for byte above; the
+    # attestation is the only part that is conditional.
+    if [[ "$RELEASE_ATTESTED" == true ]]; then
+      gh release verify "$tag" --repo "$repository"
+    fi
     echo "verified immutable $repository release $tag"
     exit 0
   fi

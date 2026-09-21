@@ -805,7 +805,7 @@ type releasePublisherResult struct {
 	err    error
 }
 
-func runReleasePublisher(t *testing.T, releaseState string, mismatch bool) releasePublisherResult {
+func runReleasePublisher(t *testing.T, releaseState string, mismatch bool, attested ...bool) releasePublisherResult {
 	t.Helper()
 	temporary := t.TempDir()
 	stubDirectory := filepath.Join(temporary, "bin")
@@ -895,6 +895,12 @@ exit 1
 	}
 	command.Env = append(os.Environ(),
 		"PATH="+stubDirectory+":/usr/bin:/bin",
+		// The publisher refuses to run without this rather than defaulting,
+		// because either default is silently wrong for half the adopters. These
+		// cases exercise the attested path, which is the one that still calls
+		// `gh release verify`; TestPublishReleaseSkipsVerifyWhenUnattested
+		// covers the other.
+		"RELEASE_ATTESTED="+releaseAttestedValue(attested),
 		"TEST_GH_LOG="+ghLogPath,
 		"TEST_RELEASE_STATE="+releaseState,
 		"TEST_REMOTE_ASSETS="+remoteDirectory,
@@ -987,4 +993,36 @@ func assertCount(t *testing.T, value, substring string, want int) {
 	if got := strings.Count(value, substring); got != want {
 		t.Fatalf("count of %q = %d, want %d", substring, got, want)
 	}
+}
+
+// releaseAttestedValue defaults the publisher's required flag to the attested
+// path, which is what every pre-existing case exercises, while letting one case
+// take the other branch.
+func releaseAttestedValue(attested []bool) string {
+	if len(attested) == 1 && !attested[0] {
+		return "false"
+	}
+	return "true"
+}
+
+// The third site of the attestation defect, pinned by behaviour rather than by
+// reading the script. A private release is published and immutable but carries
+// no attestation; a retried run reaches the existing-release branch, and
+// `gh release verify` must not be called, because it checks for an attestation
+// that was deliberately never created and would fail the retry in the publisher
+// before the workflow's own guarded loop could be reached.
+func TestPublishReleaseSkipsVerifyWhenUnattested(t *testing.T) {
+	result := runReleasePublisher(t, "false\ttrue\tfalse", false, false)
+	if result.err != nil {
+		t.Fatalf("publish-release.sh failed: %v\nstderr:\n%s", result.err, result.stderr)
+	}
+	if strings.Contains(result.ghLog, "release verify") {
+		t.Fatalf("gh release verify was called for an unattested release: %q", result.ghLog)
+	}
+	// Everything else still happens: the assets are still compared byte for
+	// byte, so skipping the attestation does not weaken the asset check.
+	if got := strings.Count(result.ghLog, "release download v1.2.3"); got != 3 {
+		t.Fatalf("downloaded assets = %d, want all 3; gh log: %s", got, result.ghLog)
+	}
+	assertNoReleaseMutation(t, result.ghLog)
 }

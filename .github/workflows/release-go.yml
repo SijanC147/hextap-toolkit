@@ -621,6 +621,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          # Same expression as the attest step. publish-release.sh requires this
+          # and refuses to run without it, so the pair cannot drift silently.
+          RELEASE_ATTESTED: ${{ !github.event.repository.private }}
         run: |
           scripts/publish-release.sh \
             "$GITHUB_REPOSITORY" \

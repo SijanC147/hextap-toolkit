@@ -13,6 +13,32 @@ import (
 // demands an attestation.
 const attestationVisibilityExpression = "github.event.repository.private"
 
+// Every file that may invoke `gh release verify`: the reusable workflow and
+// every shell script it runs. Scoped by glob rather than by a hand-written list
+// so a new script cannot escape the count by not being named here.
+func attestationSensitiveFiles(t *testing.T) []string {
+	t.Helper()
+	paths := []string{filepath.Join("..", "..", DefaultWorkflowDirectory, "release-go.yml")}
+	scripts, err := filepath.Glob(filepath.Join("..", "..", "scripts", "*.sh"))
+	if err != nil {
+		t.Fatalf("glob the toolkit's scripts: %v", err)
+	}
+	if len(scripts) == 0 {
+		t.Fatal("no scripts found; the glob is wrong and this test would pass vacuously")
+	}
+	paths = append(paths, scripts...)
+
+	sources := make([]string, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		sources = append(sources, string(data))
+	}
+	return sources
+}
+
 func releaseWorkflowSource(t *testing.T) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", DefaultWorkflowDirectory, "release-go.yml"))
@@ -37,40 +63,58 @@ func TestImmutableReleaseVerifyIsSkippedWhenTheReleaseIsNotAttested(t *testing.T
 		t.Fatal("the immutability step does not derive RELEASE_ATTESTED from the same visibility expression as the attest step")
 	}
 
-	// EVERY call must be guarded, not just the one a reviewer happened to name.
-	// There are two: the immutability loop in the release job, and the
-	// homebrew-only recovery path in validate. The second was missed by review
-	// and found only because this test counted instead of checking the one call
-	// it had been told about.
+	// EVERY call must be guarded, everywhere, not just the one a reviewer
+	// happened to name. This defect was reported three times, and each report
+	// named one site:
+	//
+	//   1. the immutability loop in the release job      (reported)
+	//   2. the homebrew-only path in validate            (found by counting)
+	//   3. scripts/publish-release.sh, retry branch      (reported, third round)
+	//
+	// Two of the three were found only because something counted rather than
+	// checking the site it had been told about. So this counts, and it counts
+	// the shell scripts too: the workflow file alone would still be missing (3).
 	//
 	// A call is a line that invokes the command; mentions inside comments are
-	// not. Splitting on lines and ignoring comment lines keeps the two apart
-	// without making the test depend on byte offsets.
-	var calls, guards int
-	for _, line := range strings.Split(source, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if strings.Contains(trimmed, "gh release verify") {
-			calls++
-		}
-		if strings.Contains(trimmed, `"$RELEASE_ATTESTED" == "true"`) ||
-			strings.Contains(trimmed, `"$RELEASE_ATTESTED" != "true"`) {
-			guards++
+	// not. Ignoring comment lines keeps prose about the command from satisfying
+	// or breaking the count.
+	calls, guards := 0, 0
+	for _, file := range attestationSensitiveFiles(t) {
+		for _, line := range strings.Split(file, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(trimmed, "gh release verify") {
+				calls++
+			}
+			if strings.Contains(trimmed, `"$RELEASE_ATTESTED" == "true"`) ||
+				strings.Contains(trimmed, `"$RELEASE_ATTESTED" != "true"`) ||
+				strings.Contains(trimmed, `"$RELEASE_ATTESTED" == true`) {
+				guards++
+			}
 		}
 	}
-	if calls != 2 {
-		t.Fatalf("expected exactly 2 gh release verify calls, found %d; a new one needs its own RELEASE_ATTESTED guard", calls)
+	if calls != 3 {
+		t.Fatalf("expected exactly 3 gh release verify calls across the workflow and scripts, found %d; a new one needs its own RELEASE_ATTESTED guard", calls)
 	}
 	if guards != calls {
 		t.Fatalf("found %d gh release verify calls but %d RELEASE_ATTESTED guards", calls, guards)
 	}
-	// Every step that calls it must also derive the flag, or the guard reads an
-	// unset variable and silently takes the unattested branch for a public
-	// repository, skipping a check that should have run.
-	if got := strings.Count(source, "RELEASE_ATTESTED: ${{ !"+attestationVisibilityExpression+" }}"); got != calls {
-		t.Fatalf("%d gh release verify calls but %d steps derive RELEASE_ATTESTED", calls, got)
+	// Every workflow step that reaches a call must also derive the flag, or the
+	// guard reads an unset variable. Two steps call it directly and one calls
+	// the publisher, so three steps derive it.
+	if got := strings.Count(source, "RELEASE_ATTESTED: ${{ !"+attestationVisibilityExpression+" }}"); got != 3 {
+		t.Fatalf("expected 3 steps to derive RELEASE_ATTESTED, found %d", got)
+	}
+	// The publisher must refuse to run without it rather than assuming a
+	// default, because either default is silently wrong for half the adopters.
+	publisherData, err := os.ReadFile(filepath.Join("..", "..", "scripts", "publish-release.sh"))
+	if err != nil {
+		t.Fatalf("read the publisher: %v", err)
+	}
+	if !strings.Contains(string(publisherData), "RELEASE_ATTESTED must be exported as true or false") {
+		t.Fatal("publish-release.sh does not require RELEASE_ATTESTED")
 	}
 
 	// The immutability assertion itself is NOT conditional. An unattested
@@ -100,8 +144,8 @@ func TestAttestationVisibilityConditionsAgree(t *testing.T) {
 	// The attest and notice conditions are complements, so exactly one of them
 	// runs. Counting guards against someone adding a third consumer of the
 	// expression without reading this test.
-	if count := strings.Count(source, attestationVisibilityExpression); count != 4 {
-		t.Errorf("expected 4 uses of %q (attest, notice, and RELEASE_ATTESTED in both steps that verify), found %d",
+	if count := strings.Count(source, attestationVisibilityExpression); count != 5 {
+		t.Errorf("expected 5 uses of %q (attest, notice, and RELEASE_ATTESTED in the three steps that reach a verify), found %d",
 			attestationVisibilityExpression, count)
 	}
 }
