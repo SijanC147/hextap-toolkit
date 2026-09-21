@@ -36,6 +36,9 @@ const (
 	maxVerifyUncompressedSize int64 = maxBinarySize + maxLicenseSize + maxReadmeSize + maxZshCompletionSize + 4<<10
 	verifyCommandTimeout            = 10 * time.Second
 	maxVerifyCommandOutput          = 16 << 10
+	// cpuSubtypeMask is Mach-O's CPU_SUBTYPE_MASK: the top byte of cpusubtype
+	// holds capability flags such as CPU_SUBTYPE_LIB64, not the subtype itself.
+	cpuSubtypeMask uint32 = 0xff000000
 )
 
 var verifyCommitPattern = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
@@ -546,8 +549,15 @@ func verifyExecutable(data []byte, targetOS, targetArch string) error {
 		if targetArch == "arm64" {
 			wantSubCPU = 0 // CPU_SUBTYPE_ARM64_ALL.
 		}
-		if file.Cpu != want || file.SubCpu != wantSubCPU {
-			return fmt.Errorf("Mach-O architecture is %s, want %s", file.Cpu, want)
+		if file.Cpu != want {
+			return fmt.Errorf("Mach-O cpu is %s, want %s", file.Cpu, want)
+		}
+		// The top byte of cpusubtype is CPU_SUBTYPE_MASK, which carries
+		// capability flags rather than the subtype. bun sets CPU_SUBTYPE_LIB64
+		// (0x80000000) on darwin-x64, so a correct x86_64 binary reads
+		// 0x80000003. Mask the flags off before comparing the subtype.
+		if gotSubCPU := file.SubCpu &^ cpuSubtypeMask; gotSubCPU != wantSubCPU {
+			return fmt.Errorf("Mach-O cpusubtype is 0x%08x (masked 0x%x), want 0x%x", file.SubCpu, gotSubCPU, wantSubCPU)
 		}
 		hasExecutableSegment := false
 		for _, load := range file.Loads {
