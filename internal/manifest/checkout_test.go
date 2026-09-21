@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -89,5 +90,73 @@ func TestCheckoutIsOptionalAndDefaultsToNoSubmodules(t *testing.T) {
 	}
 	if got := project.Release.SubmodulesMode(); got != SubmodulesNone {
 		t.Fatalf("SubmodulesMode() = %q, want %q", got, SubmodulesNone)
+	}
+}
+
+// The Go validator is authoritative, but the checked-in machine schema is what
+// an editor shows an adopter. If the two disagree on release.checkout, an
+// adopter sees a green editor and a rejected release, or the reverse. The
+// shape cross-check in schema_test.go proves only that the property names and
+// the required list match. This runs whole documents through both and requires
+// the same answer, which is the difference between arguing it from reading the
+// schema and having run it.
+func TestCheckoutAgreesBetweenGoAndMachineSchema(t *testing.T) {
+	schema := loadProjectSchema(t)
+	for name, testCase := range map[string]struct {
+		body  string
+		valid bool
+	}{
+		"valid false":             {body: `{"submodules": "false"}`, valid: true},
+		"valid true":              {body: `{"submodules": "true"}`, valid: true},
+		"valid recursive":         {body: `{"submodules": "recursive"}`, valid: true},
+		"invalid capital True":    {body: `{"submodules": "True"}`},
+		"invalid recurse":         {body: `{"submodules": "recurse"}`},
+		"invalid empty string":    {body: `{"submodules": ""}`},
+		"invalid boolean":         {body: `{"submodules": true}`},
+		"invalid unknown field":   {body: `{"submodules": "true", "depth": 1}`},
+		"invalid missing field":   {body: `{}`},
+		"invalid mis-cased field": {body: `{"Submodules": "true"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			encoded := []byte(withCheckout(testCase.body))
+			_, goError := Parse(encoded)
+			var schemaValue any
+			if err := json.Unmarshal(encoded, &schemaValue); err != nil {
+				t.Fatalf("Unmarshal(fixture): %v", err)
+			}
+			schemaError := validateFixtureShape(schema, schema, schemaValue, "$")
+			if testCase.valid {
+				if goError != nil || schemaError != nil {
+					t.Fatalf("valid case rejected: Go=%v schema=%v", goError, schemaError)
+				}
+				return
+			}
+			if goError == nil || schemaError == nil {
+				t.Fatalf("invalid case accepted: Go=%v schema=%v", goError, schemaError)
+			}
+		})
+	}
+}
+
+// Schema 1 predates release.checkout, so the field is unknown there. Both the
+// Go validator and the machine schema must say so, or an adopter on the legacy
+// contract sets a field that does nothing.
+func TestCheckoutOnSchemaOneIsRejectedByBothContracts(t *testing.T) {
+	legacy := strings.Replace(validManifest, `    "build_script": "scripts/hextap-build",`,
+		`    "build_script": "scripts/hextap-build",
+    "checkout": {"submodules": "recursive"},`, 1)
+	if legacy == validManifest {
+		t.Fatal("schema 1 fixture no longer carries the expected build_script line")
+	}
+	if _, err := Parse([]byte(legacy)); err == nil {
+		t.Fatal("the Go validator accepted release.checkout on schema 1")
+	}
+	var schemaValue any
+	if err := json.Unmarshal([]byte(legacy), &schemaValue); err != nil {
+		t.Fatalf("Unmarshal(legacy fixture): %v", err)
+	}
+	schema := loadProjectSchema(t)
+	if err := validateFixtureShape(schema, schema, schemaValue, "$"); err == nil {
+		t.Fatal("the machine schema accepted release.checkout on schema 1")
 	}
 }

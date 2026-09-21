@@ -285,6 +285,9 @@ func TestManifestConformanceCorpus(t *testing.T) {
 		{name: "invalid caveats terminator", mutate: func(value map[string]any) {
 			object(t, value["homebrew"], "homebrew")["caveats"] = "before\nEOS\nafter"
 		}},
+		{name: "invalid schema 1 release checkout", mutate: func(value map[string]any) {
+			object(t, value["release"], "release")["checkout"] = map[string]any{"submodules": "recursive"}
+		}},
 	}
 
 	schema := loadProjectSchema(t)

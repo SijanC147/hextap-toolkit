@@ -19,15 +19,34 @@ const submodulesThread = "submodules: ${{ inputs.submodules }}"
 
 // checkoutStep is one actions/checkout call, with enough context to say where
 // it is and what it is checking out.
+//
+// keys holds the step's directive lines, trimmed, with comment lines dropped,
+// and every test asks whether a whole key is present rather than whether the
+// step's text contains a substring. A substring match reads a commented-out
+// `# submodules: ...` as threaded, which YAML ignores, so the original defect
+// could be restored with this file still green. Found by the reviewer of
+// PR #23, who commented out the build job's line and watched the test print
+// ok. A prefix match has the same hole from the other side: it reads
+// `submodules: ${{ inputs.submodules }}-typo` as threaded.
 type checkoutStep struct {
 	job        string
 	line       int
-	body       string
+	keys       []string
 	toolkit    bool
 	taggedRef  bool
 	threaded   bool
 	stepLabel  string
 	jobAndLine string
+}
+
+// declares reports whether the step carries this exact directive line.
+func (s checkoutStep) declares(key string) bool {
+	for _, line := range s.keys {
+		if line == key {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSubmodulesInputReachesOnlyTheTaggedCallerSourceCheckouts(t *testing.T) {
@@ -38,19 +57,38 @@ func TestSubmodulesInputReachesOnlyTheTaggedCallerSourceCheckouts(t *testing.T) 
 		t.Fatalf("release-go.yml has %d actions/checkout calls, want 9; the classification below was written against those nine and must be re-read, not re-counted", len(steps))
 	}
 
-	var threaded, toolkitThreaded, untaggedThreaded, taggedSourceMissing []string
+	var threaded, toolkitThreaded, untaggedThreaded, taggedSourceMissing, unclassified []string
 	for _, step := range steps {
 		if step.threaded {
 			threaded = append(threaded, step.jobAndLine)
 		}
 		switch {
-		case step.toolkit && step.threaded:
-			toolkitThreaded = append(toolkitThreaded, step.jobAndLine)
-		case !step.toolkit && !step.taggedRef && step.threaded:
-			untaggedThreaded = append(untaggedThreaded, step.jobAndLine)
-		case !step.toolkit && step.taggedRef && !step.threaded:
-			taggedSourceMissing = append(taggedSourceMissing, step.jobAndLine)
+		case step.toolkit:
+			if step.threaded {
+				toolkitThreaded = append(toolkitThreaded, step.jobAndLine)
+			}
+		case step.taggedRef:
+			if !step.threaded {
+				taggedSourceMissing = append(taggedSourceMissing, step.jobAndLine)
+			}
+		case step.job == "validate":
+			if step.threaded {
+				untaggedThreaded = append(untaggedThreaded, step.jobAndLine)
+			}
+		default:
+			unclassified = append(unclassified, step.jobAndLine)
 		}
+	}
+
+	// Without this, a caller-source checkout written with the resolved tag in
+	// some other form, through an env var or a differently named job output,
+	// matches no case and is accepted in silence. That is exactly the shape
+	// that needs the input.
+	if len(unclassified) > 0 {
+		t.Errorf("the checkout at %s fits none of the three kinds this test knows.\n"+
+			"It does not check out the pinned toolkit, it does not carry ref: ${{ needs.validate.outputs.sha }}, and it is not the validate job's detached caller checkout. "+
+			"Classify it here before merging: if it runs project-owned commands against the caller source, it needs %s, and if it does not, say why in this test rather than leaving it to fall through.",
+			strings.Join(unclassified, ", "), submodulesThread)
 	}
 
 	if len(toolkitThreaded) > 0 {
@@ -114,6 +152,45 @@ func TestInvalidSubmodulesInputFailsBeforeAnyCheckout(t *testing.T) {
 	}
 }
 
+// The reviewer of PR #23 commented the build job's submodules line out, which
+// is the original defect restored, and this test printed ok. The classifier
+// matched a substring of the step's raw text, and YAML ignores a comment. This
+// pins the repair so the hole cannot come back through a refactor, without
+// needing the mutation to be re-run by hand.
+func TestACommentedOutDirectiveIsNotADirective(t *testing.T) {
+	lines := strings.Split(`      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          path: source
+          persist-credentials: false
+          # submodules: ${{ inputs.submodules }}
+`, "\n")
+	step := checkoutStep{keys: checkoutStepKeys(lines, 0)}
+
+	if step.declares(submodulesThread) {
+		t.Fatalf("a commented-out %s was read as threaded; keys = %q", submodulesThread, step.keys)
+	}
+	if !step.declares("ref: ${{ needs.validate.outputs.sha }}") {
+		t.Fatalf("the real ref directive was dropped; keys = %q", step.keys)
+	}
+}
+
+// A prefix match has the same hole from the other side. actions/checkout would
+// coerce this value, and an adopter would be back to empty component
+// directories with the test green.
+func TestACorruptedValueIsNotTheDirective(t *testing.T) {
+	lines := strings.Split(`      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          submodules: ${{ inputs.submodules }}-typo
+`, "\n")
+	step := checkoutStep{keys: checkoutStepKeys(lines, 0)}
+
+	if step.declares(submodulesThread) {
+		t.Fatalf("a corrupted value was read as threaded; keys = %q", step.keys)
+	}
+}
+
 // parseCheckoutSteps splits the workflow into its actions/checkout steps. A
 // step runs from its uses: line to the next step marker at the same indent or
 // the next job, which is enough to read the with: block that follows it.
@@ -130,40 +207,45 @@ func parseCheckoutSteps(t *testing.T, workflow string) []checkoutStep {
 		if !strings.Contains(line, "uses: actions/checkout@") {
 			continue
 		}
-		body := checkoutStepBody(lines, index)
+		keys := checkoutStepKeys(lines, index)
 		label := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
 		if start := index - 1; start >= 0 && strings.Contains(lines[start], "- name:") {
 			label = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[start]), "- "))
 		}
-		steps = append(steps, checkoutStep{
+		step := checkoutStep{
 			job:        job,
 			line:       index + 1,
-			body:       body,
-			toolkit:    strings.Contains(body, "repository: SijanC147/hextap-toolkit"),
-			taggedRef:  strings.Contains(body, "ref: ${{ needs.validate.outputs.sha }}"),
-			threaded:   strings.Contains(body, submodulesThread),
+			keys:       keys,
 			stepLabel:  label,
 			jobAndLine: fmt.Sprintf("%s job, line %d (%s)", job, index+1, label),
-		})
+		}
+		step.toolkit = step.declares("repository: SijanC147/hextap-toolkit")
+		step.taggedRef = step.declares("ref: ${{ needs.validate.outputs.sha }}")
+		step.threaded = step.declares(submodulesThread)
+		steps = append(steps, step)
 	}
 	return steps
 }
 
-// checkoutStepBody returns the step beginning at the uses: line, stopping at
-// the next step or the next job.
-func checkoutStepBody(lines []string, start int) string {
-	body := []string{lines[start]}
+// checkoutStepKeys returns the step's directive lines, trimmed, beginning at
+// the uses: line and stopping at the next step or the next job. Blank lines
+// and comment lines are dropped: YAML ignores a comment, so this must too, or
+// commenting a directive out reads as leaving it in.
+func checkoutStepKeys(lines []string, start int) []string {
+	keys := []string{strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[start]), "- "))}
 	for index := start + 1; index < len(lines); index++ {
 		line := lines[index]
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
-			body = append(body, line)
 			continue
 		}
 		if strings.HasPrefix(trimmed, "- ") || !strings.HasPrefix(line, "        ") {
 			break
 		}
-		body = append(body, line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		keys = append(keys, trimmed)
 	}
-	return strings.Join(body, "\n")
+	return keys
 }
