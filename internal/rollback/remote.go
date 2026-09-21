@@ -21,8 +21,20 @@ var (
 	formulaBoundary   = regexp.MustCompile(`^  (?:def install|service do|def caveats|test do|resource\s+)`)
 	caskBoundary      = regexp.MustCompile(`^  (?:app|binary|pkg|installer|artifact|suite|qlplugin|prefpane|font|audio_unit_plugin|vst_plugin|vst3_plugin|screen_saver|dictionary|colorpicker|input_method|internet_plugin|keyboard_layout|mdimporter)\s+`)
 	profileToken      = regexp.MustCompile(`@[^@\t \r\n]+@`)
-	quotedURLLine     = regexp.MustCompile(`^\s*url "([^"]+)"\s*$`)
-	quotedSHALine     = regexp.MustCompile(`^\s*sha256 "([0-9a-f]{64})"\s*$`)
+	// The optional suffix is a Homebrew download strategy, the only thing a
+	// tap-owned template is allowed to put after the URL token, and the same
+	// shape internal/formula accepts in the canonical architecture block
+	// (SB23-2540). Without it this pattern matched zero of the two url lines in
+	// a Formula for a private release asset, profileMetadata below reported
+	// "expected exactly two literal URL and checksum directives", and rollback
+	// failed for exactly the adopter most likely to need it (SB23-2542).
+	//
+	// The end anchor stays. Dropping it would admit a url line with arbitrary
+	// trailing text, which is the property the anchor exists for, and the
+	// capture group still holds the URL alone.
+	quotedURLLine = regexp.MustCompile(
+		`^\s*url "([^"]+)"(?:, using: [A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*)?\s*$`)
+	quotedSHALine = regexp.MustCompile(`^\s*sha256 "([0-9a-f]{64})"\s*$`)
 )
 
 var requiredProfileTokens = []string{"@ARM64_URL@", "@ARM64_SHA256@", "@AMD64_URL@", "@AMD64_SHA256@"}
