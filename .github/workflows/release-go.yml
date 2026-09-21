@@ -202,10 +202,22 @@ jobs:
           RELEASE_SHA: ${{ steps.source.outputs.sha }}
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
           RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          # Same expression as the attest step, for the same reason; see the
+          # comment on "Require immutable release".
+          RELEASE_ATTESTED: ${{ !github.event.repository.private }}
         run: |
           state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease --jq '[.isDraft,.isImmutable,.isPrerelease] | @tsv')"
           [[ "$state" == $'false\ttrue\tfalse' ]]
-          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          # The SECOND call to `gh release verify`, and the one the review did
+          # not name. This is the homebrew-only path: the re-dispatch that
+          # republishes a Formula for a tag whose release already exists. For a
+          # private, deliberately unattested release it fails here, which means
+          # the recovery route for a failed `homebrew` job is broken in exactly
+          # the situation that needs it. Fixed with the other call rather than
+          # left for the release that would have found it.
+          if [[ "$RELEASE_ATTESTED" == "true" ]]; then
+            gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          fi
           mkdir "$RUNNER_TEMP/recovery-assets"
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
@@ -615,15 +627,41 @@ jobs:
             "$RELEASE_TAG" \
             "$RUNNER_TEMP/dist" \
             "$RELEASE_PRERELEASE"
+      # RELEASE_ATTESTED MUST STAY THE SAME EXPRESSION AS THE ATTEST STEP ABOVE.
+      #
+      # `gh release verify` does not check that a release exists or is immutable.
+      # It checks for "a valid cryptographically signed attestation" (gh 2.x,
+      # `gh release verify --help`). So for a release this workflow deliberately
+      # did not attest, it can never succeed: the loop below would exhaust all
+      # twenty attempts and fail the job AFTER the release had been published,
+      # and `homebrew` would never run. The release exists, the assets are
+      # right, and the pipeline reports failure.
+      #
+      # That is the same shape of bug as the attestation failure this PR fixes,
+      # one step later, and it would have wasted a second tag to discover. Found
+      # by review rather than by a release, which is the only reason it did not.
+      #
+      # The two conditions are kept textually identical so the pair cannot drift
+      # into a state where the release is unattested but still verified for an
+      # attestation. internal/workflow pins that equality.
       - name: Require immutable release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_ATTESTED: ${{ !github.event.repository.private }}
         run: |
           for _ in {1..20}; do
             if state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')"; then
-              if [[ "$state" == $'false\ttrue' ]] && gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
-                exit 0
+              if [[ "$state" == $'false\ttrue' ]]; then
+                # Immutability is required either way; only the attestation
+                # half is conditional. An unattested release still has to be
+                # published and immutable before this step passes.
+                if [[ "$RELEASE_ATTESTED" != "true" ]]; then
+                  exit 0
+                fi
+                if gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
+                  exit 0
+                fi
               fi
             fi
             sleep 3
