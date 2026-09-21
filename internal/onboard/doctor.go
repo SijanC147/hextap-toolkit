@@ -121,8 +121,12 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		return nil, errors.New("online doctor: immutable releases are not enabled")
 	}
 	secretNames, err := ghRead(64<<10, "api", "--paginate", "repos/"+repository+"/actions/secrets", "--jq", ".secrets[].name")
+	// A listing that could not be read is not a listing without the name in
+	// it. A network failure, a token without the scope, or a response over
+	// ghRead's cap would otherwise tell an adopter whose secret exists that it
+	// does not, which is the same class of wrong report as the one below.
 	if err != nil {
-		return nil, errors.New("online doctor: required Actions secret name OP_SERVICE_ACCOUNT_TOKEN is missing")
+		return nil, errors.New("online doctor: the Actions secret listing could not be read")
 	}
 	declaredNames := lineSet(secretNames)
 	if !declaredNames["OP_SERVICE_ACCOUNT_TOKEN"] {

@@ -113,11 +113,7 @@ case "$*" in
   "api --hostname github.com repos/SijanC147/example-tool/immutable-releases --jq .enabled")
     if [ "$mode" = immutable ]; then printf '%s\n' false; else printf '%s\n' true; fi ;;
   "api --hostname github.com --paginate repos/SijanC147/example-tool/actions/secrets --jq .secrets[].name")
-    case "$mode" in
-      secret) ;;
-      secret-submodules) printf '%s\n' OP_SERVICE_ACCOUNT_TOKEN SUBMODULES_TOKEN ;;
-      *) printf '%s\n' OP_SERVICE_ACCOUNT_TOKEN ;;
-    esac ;;
+    if [ "$mode" != secret ]; then printf '%s\n' OP_SERVICE_ACCOUNT_TOKEN; fi ;;
   "api --hostname github.com --paginate --slurp repos/SijanC147/example-tool/rulesets?per_page=100")
     case "$mode" in
       ruleset-missing) printf '%s\n' '[[{"id":101,"name":"hextap/main","target":"branch","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}]]' ;;
@@ -556,12 +552,24 @@ func TestSubmoduleCredentialCheckReportsThreeDistinctStates(t *testing.T) {
 	}
 }
 
-// TestDoctorOnlineReportsTheSubmoduleCredentialFromTheSecretListing holds the
-// wiring the unit test above cannot see: the line reaches the reported checks,
-// it is derived from the manifest's own checkout mode, and the name is read
-// from the one Actions-secret listing the OP token already pays for. GitHub
-// does not serve a secret value, so a call shaped to ask for one is the only
-// way reading a value could regress.
+// TestDoctorOnlineReportsTheSubmoduleCredentialFromTheSecretListing holds what
+// the unit test above cannot see: the line reaches the reported checks, and the
+// name is read from the one Actions-secret listing the OP token already pays
+// for. GitHub does not serve a secret value, so a call shaped to ask for one is
+// the only way reading a value could regress.
+//
+// What it does NOT hold, stated rather than implied: the arguments at the call
+// site. This fixture's manifest omits release.checkout, so only the skipped
+// state runs end to end, and a call site that hardcoded the mode or dropped the
+// listing would still pass. Both mutations were run against this suite and both
+// survived.
+//
+// The gap is a fixture problem, not an oversight. release.checkout is schema 2
+// only, every schema 2 manifest must carry a tap-owned Formula profile, and
+// writeFakeGH renders its tap Formula with formulaengine.Render, which refuses
+// a profile manifest. Closing it needs a Formula template fixture that this
+// repository does not have. SB23-2559 carries the work and the two mutations
+// as its acceptance line.
 func TestDoctorOnlineReportsTheSubmoduleCredentialFromTheSecretListing(t *testing.T) {
 	project := writeGoProject(t)
 	if _, err := Onboard(validOptions(project)); err != nil {
@@ -588,8 +596,11 @@ func TestDoctorOnlineReportsTheSubmoduleCredentialFromTheSecretListing(t *testin
 	if len(reported) != 1 {
 		t.Fatalf("checks = %v, want exactly one line naming the submodule credential, got %d", checks, len(reported))
 	}
-	if reported[0] != submoduleCredentialCheck(manifest.SubmodulesNone, map[string]bool{}) {
-		t.Fatalf("reported %q, want the line the manifest's own checkout mode produces", reported[0])
+	// Compared against the literal rather than against another call of the
+	// function under test: the earlier form put the same expression on both
+	// sides, so it held nothing at all.
+	if reported[0] != "submodule credential: not required, this manifest checks out no submodules" {
+		t.Fatalf("reported %q, want the skipped line for a manifest with no checkout", reported[0])
 	}
 	log, err := os.ReadFile(logPath)
 	if err != nil {
