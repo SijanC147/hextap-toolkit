@@ -150,7 +150,15 @@ func TestSetupInstructionsNameEverySecretTheCallerMaps(t *testing.T) {
 			// owner, so the instructions have to name a credential type that
 			// can span owners. Also Codex, P2.
 			"selects repositories under **one** resource owner",
-			"a GitHub App installation token or a classic token",
+			// A GitHub App installation belongs to one account, so its
+			// token cannot span owners, and it expires after an hour while
+			// this workflow reads one statically stored secret. Recommending
+			// it was wrong advice this lane introduced and Codex caught on
+			// PR #24. The document must name the classic token and say what
+			// accepting it costs.
+			"A GitHub App installation token does not work",
+			"must be a **classic** personal access token",
+			"**Move the submodule under one owner if you can.**",
 		} {
 			if !strings.Contains(setup, required) {
 				t.Fatalf("the setup document for submodules = %q is missing %q:\n%s", mode, required, setup)

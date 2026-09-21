@@ -564,10 +564,18 @@ scope.
 A fine-grained token selects repositories under **one** resource owner. If the
 caller and a private submodule sit under different owners, no fine-grained
 token can cover both, and nothing in the manifest constrains a submodule URL to
-the caller's owner. That configuration needs a credential type that spans
-owners, a GitHub App installation token or a classic token, scoped as narrowly
-as that type allows. Moving the submodule under one owner is the cheaper fix
-where it is possible.
+the caller's owner. Move the submodule under one owner if you can: that
+keeps the fine-grained token and its narrow scope, and it is the only option
+that does not widen the credential.
+
+If you cannot, the credential must be a **classic** personal access token
+belonging to a user who can read every repository involved. A GitHub App
+installation token does not work here: an installation belongs to one account,
+so its token cannot reach repositories owned by another, and it expires after
+an hour while the workflow reads one statically stored secret. A classic
+token's `repo` scope covers every repository that user can reach rather than
+the ones you list, so it is far broader than the release needs; give it a short
+expiry and rotate it.
 
 A project with **public** submodules maps the secret but never has to set it.
 The caller maps `submodules_token` whenever `release.checkout.submodules` is
