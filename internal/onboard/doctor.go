@@ -121,9 +121,14 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		return nil, errors.New("online doctor: immutable releases are not enabled")
 	}
 	secretNames, err := ghRead(64<<10, "api", "--paginate", "repos/"+repository+"/actions/secrets", "--jq", ".secrets[].name")
-	if err != nil || !lineSet(secretNames)["OP_SERVICE_ACCOUNT_TOKEN"] {
+	if err != nil {
 		return nil, errors.New("online doctor: required Actions secret name OP_SERVICE_ACCOUNT_TOKEN is missing")
 	}
+	declaredNames := lineSet(secretNames)
+	if !declaredNames["OP_SERVICE_ACCOUNT_TOKEN"] {
+		return nil, errors.New("online doctor: required Actions secret name OP_SERVICE_ACCOUNT_TOKEN is missing")
+	}
+	submoduleCredential := submoduleCredentialCheck(validated.Manifest.Release.SubmodulesMode(), declaredNames)
 	if err := validateOnlineRulesets(repository, validated.RequiredChecks); err != nil {
 		return nil, err
 	}
@@ -178,6 +183,7 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		"default branch main",
 		"immutable releases",
 		"Actions secret name",
+		submoduleCredential,
 		"owned active ruleset bodies",
 		provenance,
 		"canonical tap registration and Formula contract",
@@ -284,6 +290,9 @@ func normalizeRuleset(body remoteRulesetDetail, actors []normalizedBypassActor) 
 	if err := decodeJSON(body.Rules, &rules); err != nil {
 		return normalizedRuleset{}, errors.New("malformed ruleset rules")
 	}
+	if body.Target == "tag" {
+		restoreTagUpdateDefault(rules)
+	}
 	if actors == nil {
 		actors = []normalizedBypassActor{}
 	}
@@ -295,6 +304,66 @@ func normalizeRuleset(body remoteRulesetDetail, actors []normalizedBypassActor) 
 		Conditions:   conditions,
 		Rules:        rules,
 	}, nil
+}
+
+// submoduleCredentialCheck names what happened to the conditional Actions
+// secret, in the three states it actually has. SB23-873 fixed the same defect
+// on the provenance check: a check that was skipped, reported as one that
+// passed. SB23-2505 is that defect wearing a new field, so the fix takes the
+// same shape, a line that says which of the three happened.
+//
+// The absent name is reported as not verified rather than as a failure. The
+// reusable workflow falls back to github.token, which is the correct
+// credential for public submodules, and nothing readable from here says
+// whether a submodule is private. Failing the run would also stop every check
+// that follows for an adopter whose configuration is correct.
+//
+// Only the name is ever read, from the listing the OP token already uses.
+// GitHub does not serve an Actions secret value, and no call here asks for one.
+func submoduleCredentialCheck(mode string, declaredNames map[string]bool) string {
+	if mode == manifest.SubmodulesNone {
+		return "submodule credential: not required, this manifest checks out no submodules"
+	}
+	if declaredNames["SUBMODULES_TOKEN"] {
+		return "Actions secret name SUBMODULES_TOKEN for the declared submodule checkout"
+	}
+	return "submodule credential SUBMODULES_TOKEN is absent: private submodules NOT verified"
+}
+
+// restoreTagUpdateDefault puts back the one parameter GitHub declines to store.
+// A tag-target `update` rule submitted with
+// `{"update_allows_fetch_and_merge": false}` is accepted and then stored with
+// no `parameters` object at all, measured on 2026-09-21 across three live
+// rulesets: the two written in August carry the parameter, the one written in
+// September does not, and a PUT of the generated body neither restores it nor
+// records a new version in the ruleset's history. The generated body is what
+// GitHub normalizes away, so re-applying the file cannot fix the drift.
+//
+// The absent parameter is GitHub's own default, so the two shapes describe the
+// same protection and only the comparison needs to know that. Generation keeps
+// writing the explicit form: dropping it there would make every ruleset written
+// before the change drift instead.
+//
+// Restoring the default rather than stripping the parameter is what keeps a
+// stored `true` reported as drift, which is a real weakening of tag protection
+// and the thing this check exists to catch. The tolerance is confined to a
+// tag-target `update` rule: a branch-target ruleset round-trips every
+// parameter, so an absent `parameters` there stays drift.
+func restoreTagUpdateDefault(rules any) {
+	entries, ok := rules.([]any)
+	if !ok {
+		return
+	}
+	for _, entry := range entries {
+		rule, ok := entry.(map[string]any)
+		if !ok || rule["type"] != "update" {
+			continue
+		}
+		if _, present := rule["parameters"]; present {
+			continue
+		}
+		rule["parameters"] = map[string]any{"update_allows_fetch_and_merge": false}
+	}
 }
 
 // selfCallerPin reports the toolkit's own relative same-repository caller, by
