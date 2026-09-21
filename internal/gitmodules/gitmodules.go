@@ -51,6 +51,18 @@ func Parse(data []byte) ([]Submodule, error) {
 	if !utf8.Valid(data) {
 		return nil, fmt.Errorf("gitmodules: is not valid UTF-8")
 	}
+	// A bare carriage return, one not followed by a newline, is refused
+	// outright. Git folds CR into a line ending only when LF follows and
+	// otherwise keeps it inside the value, while the scanner below treats CR
+	// as padding at three separate positions. That difference would let a
+	// declared URL read here as the sealed string while git fetches a
+	// different one, which defeats the comparison by construction rather
+	// than by degree. Raised by the security reviewer of PR #30 as P2.
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\r' && (i+1 == len(data) || data[i+1] != '\n') {
+			return nil, fmt.Errorf("gitmodules: byte %d: bare carriage return; git keeps it in the value and this reader would not, so the two would disagree about what is fetched", i)
+		}
+	}
 
 	p := &parser{src: string(data), line: 1}
 	sections := make(map[string]*Submodule)
@@ -234,7 +246,10 @@ func (p *parser) parseSectionHeader() (section, subsection string, named bool, e
 			return "", "", false, fmt.Errorf("gitmodules: line %d: empty subsection name", startLine)
 		}
 		p.skipHeaderPadding()
-		return name.String(), sub.String(), true, nil
+		// git-config converts the deprecated dotted subsection name to lower
+		// case, while a quoted subsection stays case-sensitive. Keeping the
+		// written form would split or merge sections differently from git.
+		return name.String(), strings.ToLower(sub.String()), true, nil
 	case ' ', '\t':
 		for p.peek() == ' ' || p.peek() == '\t' {
 			p.next()

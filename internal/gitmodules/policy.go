@@ -69,14 +69,34 @@ func ValidateAllowedURL(raw string) error {
 			return fmt.Errorf("has a relative path segment %q", segment)
 		}
 	}
-	// The strongest exactness rule: what the adopter wrote must already be
-	// the canonical form. A percent-encoded or otherwise redundant spelling
-	// of the same URL would compare unequal to the plain one git writes, so
-	// it is refused rather than silently normalised into the seal.
+	// A percent-encoded path survives the round trip below unchanged, because
+	// url.Parse keeps RawPath and String re-emits it. So the round trip does
+	// NOT reduce a URL to one spelling, and the earlier version of this
+	// comment claimed it did. Both spellings reach the same repository once
+	// the path is decoded, so the encoded form is refused here explicitly.
+	// Raised by the security reviewer of PR #30 as P2: the code failed closed
+	// by luck, and the comment asserted an invariant the code did not hold.
+	if strings.Contains(parsed.EscapedPath(), "%") {
+		return fmt.Errorf("carries a percent-encoded path segment; write the decoded form, because both spellings reach the same repository and the comparison is by string")
+	}
+	// What the adopter wrote must already be the canonical form, so a
+	// redundant spelling is refused rather than silently normalised into the
+	// seal.
 	if parsed.String() != raw {
 		return fmt.Errorf("is not in canonical form; write it exactly as %q", parsed.String())
 	}
 	return nil
+}
+
+// parsedHost returns the host of a URL that ValidateAllowedURL has already
+// accepted. It cannot fail for such a string, and returns the empty string
+// rather than an error for one it has not, which never matches a caller host.
+func parsedHost(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return strings.ToLower(parsed.Host)
 }
 
 // Host returns the host of an allowed or declared URL, for comparing a
@@ -120,11 +140,11 @@ func CheckDeclared(declared []Submodule, allowed []string, callerHost string) er
 			problems = append(problems, fmt.Sprintf("submodule %q at %q declares url %q, which %v", submodule.Name, submodule.Path, submodule.URL, err))
 			continue
 		}
-		host, err := Host(submodule.URL)
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("submodule %q declares url %q, which %v", submodule.Name, submodule.URL, err))
-			continue
-		}
+		// One parse, not two. ValidateAllowedURL above already accepted this
+		// string, and its rules guarantee a lower-case host, so re-parsing
+		// here would be a second chance for the package whose whole point is
+		// one answer to disagree with itself. Raised by the reviewer as P3.
+		host := parsedHost(submodule.URL)
 		if host != callerHost {
 			problems = append(problems, fmt.Sprintf("submodule %q declares url %q on host %q, but the credential is scoped to the caller's own server %q and cannot authenticate another host (SB23-2506)", submodule.Name, submodule.URL, host, callerHost))
 			continue

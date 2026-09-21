@@ -131,6 +131,7 @@ func TestCheckoutAgreesBetweenGoAndMachineSchema(t *testing.T) {
 		"invalid fetching with an empty seal": {body: `{"submodules": "true", "submodules_allowed": []}`},
 		"invalid seal without fetching":       {body: `{"submodules": "false", "submodules_allowed": ["` + sealedSubmoduleURL + `"]}`},
 		"invalid seal that is not https":      {body: `{"submodules": "true", "submodules_allowed": ["git@github.com:SijanC147/x.git"]}`},
+		"invalid seal percent-encoded":        {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/%78.git"]}`},
 		"invalid seal carrying a pattern":     {body: `{"submodules": "true", "submodules_allowed": ["https://github.com/SijanC147/*"]}`},
 		"invalid missing field":               {body: `{}`},
 		"invalid mis-cased field":             {body: `{"Submodules": "true"}`},

@@ -60,6 +60,26 @@ func runReleaseSubmodules(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	// The seal covers exactly one file: the top-level .gitmodules at the tag.
+	// Under "recursive", actions/checkout also updates submodules of
+	// submodules, whose URLs come from a nested .gitmodules inside a sealed
+	// submodule, at the gitlink commit the tag pins. This check never reads
+	// that file, and reading it would mean cloning the submodule first, which
+	// is the very step the credential is presented at. So the set below the
+	// top level is decided by the tagged gitlink and not by this list, which
+	// is the same defect one level down.
+	//
+	// Refusing is the honest position while the nested set is unsealed.
+	// "true" fetches the top-level submodules, which the list does bound.
+	// Raised by the security reviewer of PR #30 as P1; sealing the nested set
+	// is SB23-2555.
+	if mode == manifest.SubmodulesRecursive {
+		return fail(stderr, "check submodules: release.checkout.submodules is %q, and this check reads only the top-level .gitmodules. "+
+			"A nested .gitmodules, at the gitlink commit the tag pins inside a sealed submodule, would steer the credential at a repository nothing sealed. "+
+			"Set release.checkout.submodules to %q, which fetches the top-level submodules this list does bound, or seal the nested set first (SB23-2555)",
+			mode, manifest.SubmodulesTop)
+	}
+
 	host, err := callerHost(*serverURL)
 	if err != nil {
 		return fail(stderr, "check submodules: --server-url %q %v", *serverURL, err)

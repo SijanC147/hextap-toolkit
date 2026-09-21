@@ -375,9 +375,9 @@
       ]
     },
     "submoduleURL": {
-      "description": "An exact https:// clone URL, in canonical form, with no credentials, query, fragment or pattern character. https only because the submodule credential is an http.<origin>/.extraheader, which an ssh, scp-like, relative or file URL cannot carry.",
+      "description": "An exact https:// clone URL, in canonical form, with no credentials, query, fragment, percent-encoding or pattern character. https only because the submodule credential is an http.<origin>/.extraheader, which an ssh, scp-like, relative or file URL cannot carry.",
       "type": "string",
-      "pattern": "^https://[a-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._~%!$&'()+,;=:@/-]+$"
+      "pattern": "^https://[a-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._~!$&'()+,;=:@/-]+$"
     },
     "releaseLegacy": {
       "type": "object",

@@ -114,7 +114,7 @@ var suiteURLs = []string{
 // The adopter this exists for passes once its manifest seals what its
 // .gitmodules declares.
 func TestTheSuiteManifestIsAcceptedOnceTheFieldIsFilled(t *testing.T) {
-	code, stdout, stderr := runSubmodules(t, suiteManifest(t, "recursive", suiteURLs), suiteGitmodules)
+	code, stdout, stderr := runSubmodules(t, suiteManifest(t, "true", suiteURLs), suiteGitmodules)
 	if code != 0 {
 		t.Fatalf("exit %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
 	}
@@ -127,7 +127,7 @@ func TestTheSuiteManifestIsAcceptedOnceTheFieldIsFilled(t *testing.T) {
 // SB23-2504: a tagged commit that adds a submodule outside the sealed list
 // fails in the validate job, before any checkout that carries the credential.
 func TestAManifestWhoseListOmitsOneURLIsRejected(t *testing.T) {
-	code, stdout, stderr := runSubmodules(t, suiteManifest(t, "recursive", suiteURLs[:2]), suiteGitmodules)
+	code, stdout, stderr := runSubmodules(t, suiteManifest(t, "true", suiteURLs[:2]), suiteGitmodules)
 	if code == 0 {
 		t.Fatalf("exit 0, want failure; the credential would be presented to a repository nothing sealed\nstdout: %s", stdout)
 	}
@@ -143,7 +143,7 @@ func TestATaggedCommitThatAddsAnUnsealedSubmoduleIsRejected(t *testing.T) {
 	path = components/exfiltrated
 	url = https://github.com/SijanC147/some-other-private-repo.git
 `
-	code, _, stderr := runSubmodules(t, suiteManifest(t, "recursive", suiteURLs), hostile)
+	code, _, stderr := runSubmodules(t, suiteManifest(t, "true", suiteURLs), hostile)
 	if code == 0 {
 		t.Fatal("exit 0, want failure; a tagged commit steered the credential at a repository the manifest never sealed")
 	}
@@ -161,7 +161,7 @@ func TestASubmoduleOnAnotherHostIsRejectedByName(t *testing.T) {
 	url = https://gitlab.example.com/SijanC147/vendor.git
 `
 	code, _, stderr := runSubmodules(t,
-		suiteManifest(t, "recursive", []string{"https://gitlab.example.com/SijanC147/vendor.git"}),
+		suiteManifest(t, "true", []string{"https://gitlab.example.com/SijanC147/vendor.git"}),
 		elsewhere)
 	if code == 0 {
 		t.Fatal("exit 0, want failure; the credential cannot authenticate another host and the release would fail at checkout")
@@ -179,7 +179,7 @@ func TestAnSSHSubmoduleURLIsRejected(t *testing.T) {
 		"relative": "[submodule \"c\"]\n\tpath = c\n\turl = ../x.git\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			code, _, stderr := runSubmodules(t, suiteManifest(t, "recursive", suiteURLs), body)
+			code, _, stderr := runSubmodules(t, suiteManifest(t, "true", suiteURLs), body)
 			if code == 0 {
 				t.Fatalf("exit 0, want failure; stderr: %s", stderr)
 			}
@@ -203,12 +203,27 @@ func TestAProjectWithoutSubmodulesPassesAndSaysWhy(t *testing.T) {
 // parsing to a shorter list, because a declaration it skipped is a repository
 // the credential reaches unsealed.
 func TestAnUnreadableGitmodulesFailsTheRelease(t *testing.T) {
-	code, _, stderr := runSubmodules(t, suiteManifest(t, "recursive", suiteURLs),
+	code, _, stderr := runSubmodules(t, suiteManifest(t, "true", suiteURLs),
 		"[submodule \"c\"\n\turl = https://github.com/SijanC147/x.git\n")
 	if code == 0 {
 		t.Fatal("exit 0, want failure; a .gitmodules that cannot be read in full must not be summarised")
 	}
 	if !strings.Contains(stderr, "gitmodules") {
 		t.Errorf("the error does not name the file: %s", stderr)
+	}
+}
+
+// The seal reads one file. Under "recursive", checkout also fetches
+// submodules of submodules, whose URLs live in a nested .gitmodules that this
+// check never sees, so the set below the top level is chosen by the tagged
+// gitlink rather than by the sealed list. Refusing is the honest position
+// while that is true. Raised by the security reviewer of PR #30 as P1.
+func TestRecursiveIsRefusedWhileTheNestedSetIsUnsealed(t *testing.T) {
+	code, _, stderr := runSubmodules(t, suiteManifest(t, "recursive", suiteURLs), suiteGitmodules)
+	if code == 0 {
+		t.Fatal("exit 0, want failure; a nested .gitmodules would steer the credential at a repository nothing sealed, which is the same defect one level down")
+	}
+	if !strings.Contains(stderr, "nested") || !strings.Contains(stderr, "SB23-2555") {
+		t.Errorf("the error does not say why recursive is refused or where the follow-up is: %s", stderr)
 	}
 }

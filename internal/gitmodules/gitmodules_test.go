@@ -83,7 +83,8 @@ func TestGitGrammarThisReaderMustNotDropOnTheFloor(t *testing.T) {
 			content: "[submodule \"x\"]\n\tpath = x\n\turl = " + target + " # components\n",
 		},
 		{
-			// Windows line endings.
+			// Windows line endings. CR immediately before LF is a line
+			// ending; a CR anywhere else is refused, which is the case below.
 			name:    "CRLF line endings",
 			content: "[submodule \"x\"]\r\n\tpath = x\r\n\turl = " + target + "\r\n",
 		},
@@ -200,5 +201,42 @@ func TestACommentCharacterInsideQuotesIsPartOfTheValue(t *testing.T) {
 	}
 	if len(declared) != 1 || declared[0].URL != "https://example.com/x.git#frag" {
 		t.Fatalf("read %+v, want the whole quoted value", declared)
+	}
+}
+
+// A bare carriage return, one not followed by a newline, is kept inside the
+// value by git and was silently dropped here at three separate positions.
+// This reader would then report the sealed string while git fetched a
+// different one, which defeats the comparison by construction. Raised by the
+// security reviewer of PR #30 as P2.
+func TestABareCarriageReturnIsRefused(t *testing.T) {
+	for name, content := range map[string]string{
+		"inside a value":     "[submodule \"x\"]\n\tpath = x\n\turl = https://github.com/SijanC147/\rsealed.git\n",
+		"before a section":   "\r[submodule \"x\"]\n\tpath = x\n\turl = https://github.com/SijanC147/x.git\n",
+		"after a section":    "[submodule \"x\"]\r\tpath = x\n\turl = https://github.com/SijanC147/x.git\n",
+		"at end of the file": "[submodule \"x\"]\n\tpath = x\n\turl = https://github.com/SijanC147/x.git\n\r",
+	} {
+		t.Run(name, func(t *testing.T) {
+			declared, err := gitmodules.Parse([]byte(content))
+			if err == nil {
+				t.Fatalf("read %+v without error; git keeps a bare CR and this reader dropped it, so the two disagree about what is fetched", declared)
+			}
+			if !strings.Contains(err.Error(), "carriage return") {
+				t.Errorf("error %q does not name the cause", err)
+			}
+		})
+	}
+}
+
+// git-config lower-cases the deprecated dotted subsection name while a quoted
+// one stays case-sensitive, so the two forms must land in the same section
+// here exactly when they do in git. Reviewer finding P3.
+func TestTheDottedSubsectionNameIsLowerCased(t *testing.T) {
+	declared, err := gitmodules.Parse([]byte("[submodule.X]\n\tpath = x\n\turl = https://github.com/SijanC147/x.git\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(declared) != 1 || declared[0].Name != "x" {
+		t.Fatalf("read %+v, want one submodule named %q", declared, "x")
 	}
 }
