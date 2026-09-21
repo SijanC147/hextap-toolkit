@@ -42,6 +42,14 @@ func writeFakeGH(t *testing.T, project string) (logPath string) {
 	t.Helper()
 	directory := t.TempDir()
 	logPath = filepath.Join(directory, "gh.log")
+	manifestData, err := os.ReadFile(filepath.Join(project, ".hextap.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectManifest, err := manifest.Parse(manifestData)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mainRemote := filepath.Join(directory, "main.json")
 	tagRemote := filepath.Join(directory, "tags.json")
 	mainDrift := filepath.Join(directory, "main-drift.json")
@@ -73,14 +81,6 @@ func writeFakeGH(t *testing.T, project string) (logPath string) {
 	formulaHostilePath := filepath.Join(directory, "formula-hostile.rb")
 	formulaStalePath := filepath.Join(directory, "formula-stale.rb")
 	formulaNoncanonicalPath := filepath.Join(directory, "formula-noncanonical.rb")
-	manifestData, err := os.ReadFile(filepath.Join(project, ".hextap.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	projectManifest, err := manifest.Parse(manifestData)
-	if err != nil {
-		t.Fatal(err)
-	}
 	formula, err := formulaengine.Render(projectManifest, "1.2.3", strings.Repeat("a", 64), strings.Repeat("b", 64))
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +113,11 @@ case "$*" in
   "api --hostname github.com repos/SijanC147/example-tool/immutable-releases --jq .enabled")
     if [ "$mode" = immutable ]; then printf '%s\n' false; else printf '%s\n' true; fi ;;
   "api --hostname github.com --paginate repos/SijanC147/example-tool/actions/secrets --jq .secrets[].name")
-    if [ "$mode" != secret ]; then printf '%s\n' OP_SERVICE_ACCOUNT_TOKEN; fi ;;
+    case "$mode" in
+      secret) ;;
+      secret-submodules) printf '%s\n' OP_SERVICE_ACCOUNT_TOKEN SUBMODULES_TOKEN ;;
+      *) printf '%s\n' OP_SERVICE_ACCOUNT_TOKEN ;;
+    esac ;;
   "api --hostname github.com --paginate --slurp repos/SijanC147/example-tool/rulesets?per_page=100")
     case "$mode" in
       ruleset-missing) printf '%s\n' '[[{"id":101,"name":"hextap/main","target":"branch","source_type":"Repository","source":"SijanC147/example-tool","enforcement":"active"}]]' ;;
@@ -216,7 +220,7 @@ func TestDoctorLocalMakesNoGHCallsAndOnlineIsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Doctor(online) error = %v", err)
 	}
-	if len(online.Checks) != 11 {
+	if len(online.Checks) != 12 {
 		t.Fatalf("online checks = %v", online.Checks)
 	}
 	log, err := os.ReadFile(logPath)
@@ -501,5 +505,102 @@ func TestCompareRemoteRulesetToleranceIsTagUpdateOnly(t *testing.T) {
 	}
 	if err := compareRemoteRuleset(remote, expected, repository, summary); err == nil {
 		t.Fatal("compareRemoteRuleset(branch ruleset, parameters stripped) = nil, want drift")
+	}
+}
+
+// TestSubmoduleCredentialCheckReportsThreeDistinctStates guards SB23-2505,
+// which is SB23-873 wearing a new field: a conditional check that was never
+// performed, reported as a pass. doctorOnline checked only
+// OP_SERVICE_ACCOUNT_TOKEN and then reported the Actions-secret check as
+// successful, so an adopter with private submodules could run the documented
+// readiness command, read a clean result, and discover the missing credential
+// when the release fell back to github.token and the checkout failed.
+//
+// Three states, three lines. Collapsing the absent case into the checked one
+// is the original defect. Collapsing it into the skipped one hides a
+// credential the adopter probably needs. The absent case says "NOT verified"
+// because brewcli prints every check behind "OK ", so the line itself has to
+// carry the qualification, exactly as the provenance line does.
+func TestSubmoduleCredentialCheckReportsThreeDistinctStates(t *testing.T) {
+	present := map[string]bool{"OP_SERVICE_ACCOUNT_TOKEN": true, "SUBMODULES_TOKEN": true}
+	absent := map[string]bool{"OP_SERVICE_ACCOUNT_TOKEN": true}
+	skipped := submoduleCredentialCheck(manifest.SubmodulesNone, absent)
+	if !strings.Contains(skipped, "not required") || strings.Contains(skipped, "SUBMODULES_TOKEN") {
+		t.Fatalf("skipped = %q, want it to say not required and claim nothing about a name never looked for", skipped)
+	}
+	for _, mode := range []string{manifest.SubmodulesTop, manifest.SubmodulesRecursive} {
+		checked := submoduleCredentialCheck(mode, present)
+		unverified := submoduleCredentialCheck(mode, absent)
+		if !strings.Contains(checked, "SUBMODULES_TOKEN") || strings.Contains(checked, "NOT verified") {
+			t.Fatalf("checked(%q) = %q, want the checked name reported as checked", mode, checked)
+		}
+		if !strings.Contains(unverified, "NOT verified") {
+			t.Fatalf("unverified(%q) = %q, want an unchecked conditional credential reported as not verified", mode, unverified)
+		}
+		// The assertion that carries SB23-2505. A conditional secret that was
+		// looked for and not found must not be reported with the line a found
+		// one gets, and neither may borrow the line for a check that never
+		// applied.
+		if checked == unverified {
+			t.Fatalf("an absent conditional secret reported as %q, the same line as a checked one", unverified)
+		}
+		if skipped == unverified || skipped == checked {
+			t.Fatalf("skipped = %q collapses into checked = %q or unverified = %q", skipped, checked, unverified)
+		}
+	}
+	// A mode the manifest validator rejects must not fall through to the
+	// skipped line: only the declared "false" means the credential does not
+	// apply, and anything else is a checkout that fetches something.
+	if got := submoduleCredentialCheck("", absent); strings.Contains(got, "not required") {
+		t.Fatalf("submoduleCredentialCheck(%q) = %q, want an undeclared mode not treated as no submodules", "", got)
+	}
+}
+
+// TestDoctorOnlineReportsTheSubmoduleCredentialFromTheSecretListing holds the
+// wiring the unit test above cannot see: the line reaches the reported checks,
+// it is derived from the manifest's own checkout mode, and the name is read
+// from the one Actions-secret listing the OP token already pays for. GitHub
+// does not serve a secret value, so a call shaped to ask for one is the only
+// way reading a value could regress.
+func TestDoctorOnlineReportsTheSubmoduleCredentialFromTheSecretListing(t *testing.T) {
+	project := writeGoProject(t)
+	if _, err := Onboard(validOptions(project)); err != nil {
+		t.Fatal(err)
+	}
+	logPath := writeFakeGH(t, project)
+	validated, err := Validate(ValidateOptions{Project: project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := validated.Manifest.Release.SubmodulesMode(); got != manifest.SubmodulesNone {
+		t.Fatalf("fixture checkout mode = %q, want the default %q", got, manifest.SubmodulesNone)
+	}
+	checks, err := doctorOnline(validated)
+	if err != nil {
+		t.Fatalf("doctorOnline() = %v", err)
+	}
+	var reported []string
+	for _, check := range checks {
+		if strings.Contains(check, "submodule") {
+			reported = append(reported, check)
+		}
+	}
+	if len(reported) != 1 {
+		t.Fatalf("checks = %v, want exactly one line naming the submodule credential, got %d", checks, len(reported))
+	}
+	if reported[0] != submoduleCredentialCheck(manifest.SubmodulesNone, map[string]bool{}) {
+		t.Fatalf("reported %q, want the line the manifest's own checkout mode produces", reported[0])
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "actions/secrets") != 1 {
+		t.Fatalf("want exactly one Actions secret listing covering both names:\n%s", log)
+	}
+	for _, forbidden := range []string{"secret get", "secret list", "/actions/secrets/SUBMODULES_TOKEN", "/actions/secrets/OP_SERVICE_ACCOUNT_TOKEN"} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("online doctor asked for a secret by value with %q:\n%s", forbidden, log)
+		}
 	}
 }

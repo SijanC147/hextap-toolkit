@@ -121,9 +121,14 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		return nil, errors.New("online doctor: immutable releases are not enabled")
 	}
 	secretNames, err := ghRead(64<<10, "api", "--paginate", "repos/"+repository+"/actions/secrets", "--jq", ".secrets[].name")
-	if err != nil || !lineSet(secretNames)["OP_SERVICE_ACCOUNT_TOKEN"] {
+	if err != nil {
 		return nil, errors.New("online doctor: required Actions secret name OP_SERVICE_ACCOUNT_TOKEN is missing")
 	}
+	declaredNames := lineSet(secretNames)
+	if !declaredNames["OP_SERVICE_ACCOUNT_TOKEN"] {
+		return nil, errors.New("online doctor: required Actions secret name OP_SERVICE_ACCOUNT_TOKEN is missing")
+	}
+	submoduleCredential := submoduleCredentialCheck(validated.Manifest.Release.SubmodulesMode(), declaredNames)
 	if err := validateOnlineRulesets(repository, validated.RequiredChecks); err != nil {
 		return nil, err
 	}
@@ -178,6 +183,7 @@ func doctorOnline(validated ValidateResult) ([]string, error) {
 		"default branch main",
 		"immutable releases",
 		"Actions secret name",
+		submoduleCredential,
 		"owned active ruleset bodies",
 		provenance,
 		"canonical tap registration and Formula contract",
@@ -298,6 +304,30 @@ func normalizeRuleset(body remoteRulesetDetail, actors []normalizedBypassActor) 
 		Conditions:   conditions,
 		Rules:        rules,
 	}, nil
+}
+
+// submoduleCredentialCheck names what happened to the conditional Actions
+// secret, in the three states it actually has. SB23-873 fixed the same defect
+// on the provenance check: a check that was skipped, reported as one that
+// passed. SB23-2505 is that defect wearing a new field, so the fix takes the
+// same shape, a line that says which of the three happened.
+//
+// The absent name is reported as not verified rather than as a failure. The
+// reusable workflow falls back to github.token, which is the correct
+// credential for public submodules, and nothing readable from here says
+// whether a submodule is private. Failing the run would also stop every check
+// that follows for an adopter whose configuration is correct.
+//
+// Only the name is ever read, from the listing the OP token already uses.
+// GitHub does not serve an Actions secret value, and no call here asks for one.
+func submoduleCredentialCheck(mode string, declaredNames map[string]bool) string {
+	if mode == manifest.SubmodulesNone {
+		return "submodule credential: not required, this manifest checks out no submodules"
+	}
+	if declaredNames["SUBMODULES_TOKEN"] {
+		return "Actions secret name SUBMODULES_TOKEN for the declared submodule checkout"
+	}
+	return "submodule credential SUBMODULES_TOKEN is absent: private submodules NOT verified"
 }
 
 // restoreTagUpdateDefault puts back the one parameter GitHub declines to store.
