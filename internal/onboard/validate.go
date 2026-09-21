@@ -150,7 +150,7 @@ func Validate(options ValidateOptions) (ValidateResult, error) {
 	if err != nil {
 		return ValidateResult{}, err
 	}
-	if !exactFileMode(setupInfo, 0o644) || !bytes.Equal(setup, setupDocument(repository, project.Formula.Name, toolkitVersion, toolkitSHA)) {
+	if !exactFileMode(setupInfo, 0o644) || !bytes.Equal(setup, setupDocument(repository, project.Formula.Name, toolkitVersion, toolkitSHA, project.Release.SubmodulesMode())) {
 		return ValidateResult{}, errors.New("SETUP.md does not match the exact safe follow-up instructions")
 	}
 
@@ -292,8 +292,8 @@ jobs:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}%s
     secrets:
-      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-`, submodulesInput(submodules)))
+      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}%s
+`, submodulesInput(submodules), submodulesSecret(submodules)))
 }
 
 func validateMainRuleset(data []byte) ([]string, error) {

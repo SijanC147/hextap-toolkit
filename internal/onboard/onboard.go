@@ -133,7 +133,7 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 		{path: tapPath, data: append([]byte(nil), manifestData...), mode: 0o644, generatedText: generatedManifest},
 		{path: mainRulesetPath, data: mainRuleset, mode: 0o644, generatedText: true},
 		{path: tagRulesetPath, data: tagRuleset, mode: 0o644, generatedText: true},
-		{path: setupPath, data: setupDocument(repository, project.Formula.Name, options.ToolkitVersion, options.ToolkitSHA), mode: 0o644, generatedText: true},
+		{path: setupPath, data: setupDocument(repository, project.Formula.Name, options.ToolkitVersion, options.ToolkitSHA, project.Release.SubmodulesMode()), mode: 0o644, generatedText: true},
 	}
 	for _, item := range artifacts {
 		if len(item.data) > maximumLocalFile {

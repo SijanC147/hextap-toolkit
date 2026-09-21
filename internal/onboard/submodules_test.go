@@ -58,3 +58,120 @@ func TestCallerQuotesTheSubmodulesValue(t *testing.T) {
 		t.Fatalf("the caller does not quote the submodules value:\n%s", caller)
 	}
 }
+
+// Every generated caller is compared byte for byte by validate and by doctor.
+// Mapping the credential unconditionally would change the expected bytes for
+// every existing adopter, including ones with no submodules and no interest in
+// them, and the first thing each would see is their own caller reported as
+// drifted from what the toolkit now generates. That is a breaking change to
+// people who gain nothing from the feature.
+func TestTheCredentialMappingIsAbsentForAdoptersWithoutSubmodules(t *testing.T) {
+	for _, mode := range []string{"", manifest.SubmodulesNone} {
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		if strings.Contains(caller, "submodules_token") {
+			t.Fatalf("the caller for submodules = %q maps a credential it never uses:\n%s", mode, caller)
+		}
+		if strings.Contains(string(selfCallerBytes(mode)), "submodules_token") {
+			t.Fatalf("the self-caller for submodules = %q maps a credential it never uses", mode)
+		}
+	}
+}
+
+func TestTheCredentialMappingIsPresentForAdoptersWithSubmodules(t *testing.T) {
+	for _, mode := range []string{manifest.SubmodulesTop, manifest.SubmodulesRecursive} {
+		want := "      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}\n      submodules_token: ${{ secrets.SUBMODULES_TOKEN }}\n"
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		if !strings.Contains(caller, want) {
+			t.Fatalf("the caller for submodules = %q does not map submodules_token inside the secrets block:\n%s", mode, caller)
+		}
+		if !strings.Contains(string(selfCallerBytes(mode)), want) {
+			t.Fatalf("the self-caller for submodules = %q does not map submodules_token", mode)
+		}
+	}
+}
+
+// The mapping and the input are keyed off the same value, so a caller can
+// never ask for submodules without the credential that private ones need, or
+// map a credential for a checkout that fetches nothing.
+func TestTheCredentialMappingAndTheInputAppearTogetherOrNotAtAll(t *testing.T) {
+	for _, mode := range []string{"", manifest.SubmodulesNone, manifest.SubmodulesTop, manifest.SubmodulesRecursive} {
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		hasInput := strings.Contains(caller, "submodules: ")
+		hasSecret := strings.Contains(caller, "submodules_token:")
+		if hasInput != hasSecret {
+			t.Fatalf("submodules = %q produced input=%v secret=%v; they must agree:\n%s", mode, hasInput, hasSecret, caller)
+		}
+	}
+}
+
+// The generated SETUP.md is the adopter's checklist, and it is compared byte
+// for byte like every other generated file. A caller that maps
+// SUBMODULES_TOKEN while the setup document names only one secret leaves the
+// adopter setting one of two, falling back to the job's GITHUB_TOKEN, and both
+// source checkouts failing on the first private submodule. Raised by Codex on
+// PR #24 as P1.
+func TestSetupInstructionsNameEverySecretTheCallerMaps(t *testing.T) {
+	for _, mode := range []string{"", manifest.SubmodulesNone} {
+		setup := string(setupDocument("SijanC147/example", "example", "v1.2.3", testToolkitSHA, mode))
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		if strings.Contains(setup, "SUBMODULES_TOKEN") {
+			t.Fatalf("the setup document for submodules = %q tells the adopter to set a secret the caller never maps", mode)
+		}
+		if !strings.Contains(setup, "the one required Actions secret") {
+			t.Fatalf("the setup document for submodules = %q lost its single-secret wording:\n%s", mode, setup)
+		}
+		if strings.Contains(caller, "SUBMODULES_TOKEN") {
+			t.Fatalf("the caller for submodules = %q maps a secret the setup document does not name", mode)
+		}
+	}
+
+	for _, mode := range []string{manifest.SubmodulesTop, manifest.SubmodulesRecursive} {
+		setup := string(setupDocument("SijanC147/example", "example", "v1.2.3", testToolkitSHA, mode))
+		caller := string(workflowBytes("v1.2.3", testToolkitSHA, mode))
+		if !strings.Contains(caller, "SUBMODULES_TOKEN") {
+			t.Fatalf("the caller for submodules = %q does not map SUBMODULES_TOKEN", mode)
+		}
+		for _, required := range []string{
+			"gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/SijanC147/example",
+			"gh secret set SUBMODULES_TOKEN --repo github.com/SijanC147/example",
+			// Assert the RULE, not the cases. This paragraph produced five
+			// defects in one pull request, every one a wrong statement about
+			// which credential fits which configuration: under-scoped, then
+			// over-provisioned for public submodules, then an impossible
+			// cross-owner case, then a token type that cannot span owners,
+			// then over-broadening a public caller. Enumerating
+			// configurations is what kept it wrong, because every
+			// enumeration is a claim and there are more layouts than anyone
+			// enumerates correctly. A test that pinned the cases would lock
+			// the enumeration in, so these assert the rule that derives them.
+			"must be able to read, privately, every repository this workflow clones",
+			"Whatever it cannot read privately, it cannot clone",
+			"A **public** repository imposes no constraint",
+			"selects repositories under a single resource owner",
+			"suffices exactly when every repository that must be read privately sits under one owner",
+			"strike the public ones, and what remains is the scope",
+			"must not be conflated",
+			// The cross-owner case is documented as unsupported rather
+			// than answered with a broader credential. A classic repo-scoped
+			// PAT would authenticate every submodule a tagged .gitmodules
+			// names, and nothing seals that list, so a later commit could
+			// point it at any private repository its owner can read while the
+			// quality job runs project-declared commands with network.
+			// Removing the recommendation deletes that path; containing it
+			// needs the allowlist in SB23-2504.
+			"**that configuration is not supported yet**",
+			"Do not reach for a broader credential instead",
+			"SB23-2504",
+		} {
+			if !strings.Contains(setup, required) {
+				t.Fatalf("the setup document for submodules = %q is missing %q:\n%s", mode, required, setup)
+			}
+		}
+		if strings.Contains(setup, "classic") {
+			t.Fatalf("the setup document for submodules = %q recommends a broader credential; a tagged .gitmodules can point one at any repository its owner can read, and nothing seals that list yet", mode)
+		}
+		if strings.Contains(setup, "the two required Actions secrets") {
+			t.Fatalf("the setup document for submodules = %q calls the submodule credential required; it is needed only when a submodule is private", mode)
+		}
+	}
+}

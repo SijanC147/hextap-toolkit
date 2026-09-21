@@ -94,6 +94,26 @@ func submodulesInput(submodules string) string {
 	return fmt.Sprintf("\n      submodules: %q", submodules)
 }
 
+// submodulesSecret renders the caller's submodules_token mapping, or nothing,
+// on the same condition as submodulesInput. Keying both off the effective
+// checkout mode is deliberate: every generated caller is compared byte for
+// byte by validate and by doctor, so mapping the secret unconditionally would
+// change the expected bytes for every existing adopter, including ones with no
+// submodules, and the first thing each would see is their own caller reported
+// as drifted from what the toolkit generates. An adopter who does not use
+// submodules never learns this exists.
+//
+// The secret is optional in the reusable workflow and falls back to
+// github.token when unset, so a caller that maps a repository secret which
+// does not exist yet still runs; it fails on the private submodule rather than
+// on the mapping.
+func submodulesSecret(submodules string) string {
+	if submodules == "" || submodules == manifest.SubmodulesNone {
+		return ""
+	}
+	return "\n      submodules_token: ${{ secrets.SUBMODULES_TOKEN }}"
+}
+
 func workflowBytes(toolkitVersion, toolkitSHA, submodules string) []byte {
 	return []byte(fmt.Sprintf(`name: Hextap release
 
@@ -121,8 +141,8 @@ jobs:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       mode: ${{ github.event_name == 'workflow_dispatch' && 'homebrew-only' || 'full' }}%s
     secrets:
-      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-`, toolkitSHA, toolkitVersion, submodulesInput(submodules)))
+      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}%s
+`, toolkitSHA, toolkitVersion, submodulesInput(submodules), submodulesSecret(submodules)))
 }
 
 func mainRulesetBytes(checks []string) ([]byte, error) {
@@ -183,7 +203,7 @@ func encodeJSON(value any) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-func setupDocument(repository, formula, toolkitVersion, toolkitSHA string) []byte {
+func setupDocument(repository, formula, toolkitVersion, toolkitSHA, submodules string) []byte {
 	var result bytes.Buffer
 	result.WriteString(`# Hextap setup
 
@@ -197,12 +217,36 @@ Before releasing, make `)
 	result.WriteString("`.")
 	result.WriteString(`
 
-Set the one required Actions secret. This command prompts securely; do not put a value in argv or a file:
-
 `)
-	result.WriteString("```sh\n")
-	fmt.Fprintf(&result, "gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/%s\n", repository)
-	result.WriteString("```\n\n")
+	// A caller that checks out submodules maps a second secret, so the
+	// instructions have to name both or the adopter sets one and the checkout
+	// falls back to github.token, which cannot read a sibling private
+	// repository. Raised by Codex on PR #24 as P1: the document said "the one
+	// required Actions secret" for every project, including ones whose
+	// generated caller already referenced SUBMODULES_TOKEN.
+	if submodules == "" || submodules == manifest.SubmodulesNone {
+		result.WriteString("Set the one required Actions secret. This command prompts securely; do not put a value in argv or a file:\n\n")
+		result.WriteString("```sh\n")
+		fmt.Fprintf(&result, "gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/%s\n", repository)
+		result.WriteString("```\n\n")
+	} else {
+		result.WriteString("Set the required Actions secret. This command prompts securely; do not put a value in argv or a file:\n\n")
+		result.WriteString("```sh\n")
+		fmt.Fprintf(&result, "gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo github.com/%s\n", repository)
+		result.WriteString("```\n\n")
+		fmt.Fprintf(&result, "This project declares `release.checkout.submodules: %q`, so its caller also maps a second secret, `SUBMODULES_TOKEN`. **Set it only if any of those submodules is private.** Leave it unset for public submodules: the caller then falls back to the job's `GITHUB_TOKEN`, which clones a public submodule perfectly well, and you have not created a long-lived credential nothing needs.\n\n", submodules)
+		result.WriteString("If any submodule is private, set it too, because `GITHUB_TOKEN` cannot read a sibling private repository:\n\n")
+		result.WriteString("```sh\n")
+		fmt.Fprintf(&result, "gh secret set SUBMODULES_TOKEN --repo github.com/%s\n", repository)
+		result.WriteString("```\n\n")
+		result.WriteString("Work out what the credential needs from one rule rather than from a list of cases. **The credential must be able to read, privately, every repository this workflow clones: this one and each submodule. Whatever it cannot read privately, it cannot clone.** `actions/checkout` presents it for the primary clone as well as for the submodule fetches, which is why this repository is in the rule and not only its submodules.\n\n")
+		result.WriteString("Two consequences follow, and between them they answer any layout:\n\n")
+		result.WriteString("1. A **public** repository imposes no constraint, because cloning it needs no credential at all. Only the private ones determine the scope.\n")
+		result.WriteString("2. A **fine-grained** personal access token selects repositories under a single resource owner, so it suffices exactly when every repository that must be read privately sits under one owner.\n\n")
+		result.WriteString("To apply it: list this repository and every submodule, strike the public ones, and what remains is the scope. If the remainder shares one owner, use a fine-grained token limited to exactly those repositories with Contents read and nothing else. It is a different credential from the tap publisher token and the two must not be conflated.\n\n")
+		result.WriteString("If the remainder spans owners, a fine-grained token cannot express it, and **that configuration is not supported yet**. Move those repositories under one owner: nothing in the manifest constrains a submodule URL, so that is a choice about layout rather than something the toolkit enforces.\n\n")
+		result.WriteString("Do not reach for a broader credential instead. This workflow does not yet validate the submodule URLs a tagged commit declares, so a credential that can read more than the repositories above is a credential a later commit can point somewhere else, and the quality job runs project-declared commands with network after the checkout. Support for that configuration needs a sealed allowlist of submodule URLs first, tracked as SB23-2504. Until it lands, keep the credential narrow or keep the repositories under one owner.\n\n")
+	}
 	result.WriteString("Review the two owned ruleset payloads:\n\n```sh\n")
 	result.WriteString("cat .hextap/rulesets/main.json\n")
 	result.WriteString("cat .hextap/rulesets/release-tags.json\n")

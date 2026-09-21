@@ -7,7 +7,12 @@ repository, secret, or local-runtime boundary.
 
 ### Secrets
 
-- Preserve `OP_SERVICE_ACCOUNT_TOKEN` as the sole source-repository secret name.
+- Preserve `OP_SERVICE_ACCOUNT_TOKEN` as a source-repository secret name, and
+  never as the sole one without checking the manifest. A project whose
+  `release.checkout.submodules` is not `false` also maps `SUBMODULES_TOKEN`,
+  which its generated caller references. Removing it breaks the release of
+  every project with private submodules, so treat the manifest as the authority
+  for which secrets belong rather than any fixed list.
 - Let the Homebrew job retrieve the tap credential from the configured
   1Password reference. Never retrieve, echo, log, copy, persist, or pass that
   credential in command arguments.

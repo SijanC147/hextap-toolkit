@@ -284,3 +284,162 @@ func TestTheCallerSubmoduleModeIsBoundToTheSealedManifest(t *testing.T) {
 		}
 	}
 }
+
+// The credential is placed only on the checkouts that fetch submodules. Read
+// the next sentence before citing that as the blast radius, because it is not.
+//
+// token: is not a submodule-only credential. actions/checkout writes it into
+// an http.<origin>/.extraheader in configureAuth() before any fetch, so on the
+// steps that carry it it replaces GITHUB_TOKEN for the PRIMARY CLONE of the
+// caller's own repository as well. A token scoped to the submodule
+// repositories alone therefore fails the primary clone before reaching a
+// submodule. The security reviewer of PR #24 found that the README documented
+// the narrower scope, which would have broken the release for the normal case
+// and pushed the adopter to widen the token until it went green, which is the
+// over-scoping SB23-736 exists to undo.
+//
+// The job's GITHUB_TOKEN cannot read a sibling private repository, and seven
+// of the eight repositories in this family are private, so for those adopters
+// the input alone produces a clone error rather than an empty tree.
+const submodulesToken = "token: ${{ secrets.submodules_token || github.token }}"
+
+func TestTheSubmoduleCredentialReachesOnlyTheCheckoutsThatFetchSubmodules(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	steps := parseCheckoutSteps(t, workflow)
+
+	var tokened, threadedWithoutToken, tokenedWithoutThread []string
+	for _, step := range steps {
+		carries := step.declares(submodulesToken)
+		if carries {
+			tokened = append(tokened, step.jobAndLine)
+		}
+		if step.threaded && !carries {
+			threadedWithoutToken = append(threadedWithoutToken, step.jobAndLine)
+		}
+		if carries && !step.threaded {
+			tokenedWithoutThread = append(tokenedWithoutThread, step.jobAndLine)
+		}
+	}
+
+	if len(threadedWithoutToken) > 0 {
+		t.Errorf("the checkout at %s fetches submodules but carries no %s.\n"+
+			"Every adopter repository in this family except the toolkit is private, so without the credential this checkout fails on the first private submodule with a clone error.",
+			strings.Join(threadedWithoutToken, ", "), submodulesToken)
+	}
+
+	if len(tokenedWithoutThread) > 0 {
+		t.Errorf("the checkout at %s carries %s but fetches no submodules.\n"+
+			"A credential belongs only where it is used, and this one is not narrow: actions/checkout authenticates the primary clone with it too, so every step that carries it presents the adopter's token for the whole repository. "+
+			"Every other checkout here either pins the toolkit, which is the trust boundary, or is the validate caller checkout whose submodules would be stale anyway.",
+			strings.Join(tokenedWithoutThread, ", "), submodulesToken)
+	}
+
+	if len(tokened) != 2 {
+		t.Errorf("%s appears on %d checkout calls (%s), want exactly 2, the same two that carry %s.",
+			submodulesToken, len(tokened), strings.Join(tokened, ", "), submodulesThread)
+	}
+}
+
+// The secret is optional and falls back to github.token. A caller that maps
+// nothing must keep working exactly as it did, which is what makes this
+// landable before the credential itself exists.
+func TestTheSubmoduleCredentialIsOptionalAndFallsBackToTheJobToken(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	secrets := textBetween(t, workflow, "    secrets:\n", "\nconcurrency:\n")
+
+	assertContains(t, secrets, "      submodules_token:\n")
+	assertContains(t, secrets, "        required: false\n")
+	assertNotContains(t, secrets, "      submodules_token:\n        required: true")
+	assertContains(t, workflow, "secrets.submodules_token || github.token")
+}
+
+// persist-credentials: false is what stops the credential surviving the step
+// that used it, and it has to hold on all nine after the change, not only on
+// the two that now carry a token.
+func TestEveryCheckoutStillRefusesToPersistCredentials(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	steps := parseCheckoutSteps(t, workflow)
+
+	var persisting []string
+	for _, step := range steps {
+		if !step.declares("persist-credentials: false") {
+			persisting = append(persisting, step.jobAndLine)
+		}
+	}
+	if len(persisting) > 0 {
+		t.Fatalf("the checkout at %s does not set persist-credentials: false.\n"+
+			"A credential written into the runner's git config outlives the step that wrote it, and the build runs later in the same job.",
+			strings.Join(persisting, ", "))
+	}
+	if len(steps) != 9 {
+		t.Fatalf("expected 9 checkout calls, got %d", len(steps))
+	}
+}
+
+// The credential's safety argument is a property of this exact action version,
+// not of anything in this repository.
+//
+// The security reviewer of PR #24 read actions/checkout at the pinned sha and
+// established, from its source, that the file holding the token is deleted
+// under await before the checkout step returns, that no submodule config can
+// name it because the only code that writes one is gated on persistCredentials
+// at its call site, and that the token never enters the job environment. That
+// is what makes it safe for the quality job to run adopter-declared commands
+// after a checkout that held a credential.
+//
+// TestEveryCheckoutStillRefusesToPersistCredentials asserts persist-credentials:
+// false, which is the input to that cleanup rather than its outcome. A bump to
+// a version that persisted submodule auth differently would break the argument
+// and nothing else here would go red. So the pin itself is the control, and
+// changing it has to be deliberate.
+//
+// The offline boundary is not what protects the credential. It stops network
+// egress from the build adapter. The credential is protected by the cleanup
+// inside the checkout step and by never entering the environment, which are
+// independent of it: the Go path has no unshare and is equally safe on this
+// point. Anyone citing "the offline boundary contains the credential" is
+// citing the wrong mechanism.
+func TestTheCredentialBearingCheckoutsUseTheAuditedActionVersion(t *testing.T) {
+	const auditedCheckout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+
+	for _, step := range parseCheckoutSteps(t, workflow) {
+		if !step.declares(submodulesToken) {
+			continue
+		}
+		if !step.declares("uses: " + auditedCheckout) {
+			t.Fatalf("the credential-bearing checkout at %s does not use %s.\n"+
+				"The credential cleanup argument was verified by reading that exact version's source, not this repository's code. "+
+				"Re-read git-source-provider.ts and git-auth-helper.ts at the new version and confirm the token file is still removed under await and that submodule auth is still gated on persistCredentials, then update this test and say so in the pull request.",
+				step.jobAndLine, auditedCheckout)
+		}
+	}
+}
+
+// The workflow's own secret description is the fourth place this credential's
+// scope is written down, after the README, the generated setup document and
+// the contract test comment. Codex found the first three wrong in turn and
+// then found this one still wrong after the others were fixed, which is what a
+// derived set looks like when it is audited one file at a time.
+//
+// An adopter reading the reusable workflow rather than the README gets this
+// text, so it has to carry the same claim: the token authenticates the primary
+// clone, therefore the caller repository belongs in its scope.
+func TestTheSecretDescriptionNamesTheCallerRepositoryInItsScope(t *testing.T) {
+	workflow := readRepositoryFile(t, ".github/workflows/release-go.yml")
+	description := textBetween(t, workflow, "      submodules_token:\n", "\n        required: false")
+
+	for _, required := range []string{
+		"Contents read on the CALLER repository and on each",
+		"submodule repository",
+		"replaces\n          GITHUB_TOKEN for the primary clone",
+		"fails that clone before reaching one",
+		"falls back to github.token",
+	} {
+		if !strings.Contains(description, required) {
+			t.Fatalf("the submodules_token description is missing %q.\n"+
+				"This text is what an adopter reading the workflow provisions a credential from, so it carries the same scope claim as the README and the generated setup document.\n%s",
+				required, description)
+		}
+	}
+}

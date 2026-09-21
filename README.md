@@ -528,13 +528,81 @@ boundary. `release.build_script` must never fetch: the build runs inside
 missing component. A manifest that omits the block behaves exactly as it did
 before the field existed, so nothing changes for a project without submodules.
 
-The input alone is not enough for a **private** submodule. `actions/checkout`
-authenticates with the job's `GITHUB_TOKEN`, which cannot read a sibling
-private repository, so a private submodule fails the checkout with a clone
-error rather than producing an empty tree. That needs a credential with
-Contents read on each submodule repository, a fine-grained PAT mapped into the
-workflow, and it is tracked separately as SB23-2470. Until it lands, this input
-covers public submodules.
+A **private** submodule needs a credential as well as the input.
+`actions/checkout` authenticates with the job's `GITHUB_TOKEN`, which cannot
+read a sibling private repository, so a private submodule fails the checkout
+with a clone error rather than producing an empty tree.
+
+The workflow owns that credential, not the build adapter. It takes an optional
+`submodules_token` secret and passes it as `token:` on the same two checkouts
+that fetch submodules, falling back to `github.token` when it is unset. A
+caller generated for a project that declares `release.checkout` maps it:
+
+```yaml
+    secrets:
+      op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+      submodules_token: ${{ secrets.SUBMODULES_TOKEN }}
+```
+
+Work out what the credential needs from one rule rather than from a list of
+cases. **It must be able to read, privately, every repository the workflow
+clones: the caller and each submodule. Whatever it cannot read privately, it
+cannot clone.** `actions/checkout` writes the token into an
+`http.<origin>/.extraheader` before it fetches anything, so it presents the
+same credential for the primary clone as for the submodule fetches, which is
+why the caller is in the rule and not only its submodules.
+
+Two consequences follow, and between them they answer any layout:
+
+1. A **public** repository imposes no constraint, because cloning it needs no
+   credential at all. Only the private ones determine the scope.
+2. A **fine-grained** personal access token selects repositories under a single
+   resource owner, so it suffices exactly when every repository that must be
+   read privately sits under one owner.
+
+To apply it: list the caller and every submodule, strike the public ones, and
+what remains is the scope. If the remainder shares one owner, use a
+fine-grained token limited to exactly those repositories with Contents read and
+nothing else.
+
+If the remainder spans owners, a fine-grained token cannot express it, and
+**that configuration is not supported yet**. Move those repositories under one
+owner: nothing in the manifest constrains a submodule URL, so that is a choice
+about repository layout rather than something the toolkit enforces.
+
+Do not reach for a broader credential instead. The workflow does not yet
+validate the submodule URLs a tagged commit declares, so a credential that can
+read more than the repositories above is a credential a later commit can point
+somewhere else, and the quality job runs project-declared commands with network
+after the checkout. Supporting a cross-owner layout needs a sealed allowlist of
+submodule URLs first, tracked as SB23-2504. Until it lands, keep the credential
+narrow or keep the repositories under one owner.
+
+A private submodule on a host other than the caller's own GitHub server is also
+unsupported, tracked as SB23-2506: `actions/checkout` scopes the token's
+authorization header to one server, so a single `submodules_token` cannot
+authenticate a second host.
+
+Getting this wrong in the safe direction is expensive too. A token that cannot
+read the caller fails the primary clone with an authentication error before it
+reaches a single submodule, and that error resembles the private-submodule
+failure this feature fixes closely enough that the obvious repair is to keep
+widening the token until the release goes green.
+
+It is a different credential from the tap publisher token and the two must not
+be conflated. `GITHUB_TOKEN` cannot substitute for it, whatever permissions the
+caller grants the job, because the limit is repository ownership rather than
+scope.
+
+A project with **public** submodules maps the secret but never has to set it.
+The caller maps `submodules_token` whenever `release.checkout.submodules` is
+not `"false"`, and an unset repository secret passes an empty value, which
+falls back to `github.token`. That clones a public submodule perfectly well, so
+the credential is worth creating only when a submodule is actually private.
+
+A project with **no** submodules maps nothing at all, and its generated caller
+and `.hextap/SETUP.md` are byte-identical to the ones written before any of
+this existed.
 
 The documented interim workaround, initialising submodules from
 `release.profile.prepare`, is narrower than it looks. `prepare` runs only when

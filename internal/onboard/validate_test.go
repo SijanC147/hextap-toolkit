@@ -269,7 +269,7 @@ func writeToolkitSelfProject(t *testing.T) string {
 	if err := os.WriteFile(reusable, []byte("name: Hextap release\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", reusableWorkflowPath, err)
 	}
-	setup := setupDocument(toolkitSelfRepository, options.Formula, "", "")
+	setup := setupDocument(toolkitSelfRepository, options.Formula, "", "", "")
 	if err := os.WriteFile(filepath.Join(project, filepath.FromSlash(setupPath)), setup, 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", setupPath, err)
 	}
@@ -283,8 +283,8 @@ func writeToolkitSelfProject(t *testing.T) string {
 // generator, so without a variant .hextap/SETUP.md could never match for the
 // toolkit itself.
 func TestSetupDocumentHasASelfAdopterVariant(t *testing.T) {
-	selfAdopter := string(setupDocument(toolkitSelfRepository, "hextap", "", ""))
-	external := string(setupDocument("SijanC147/example-tool", "example-tool", "v1.2.3", testToolkitSHA))
+	selfAdopter := string(setupDocument(toolkitSelfRepository, "hextap", "", "", ""))
+	external := string(setupDocument("SijanC147/example-tool", "example-tool", "v1.2.3", testToolkitSHA, ""))
 
 	if strings.Contains(selfAdopter, "pinned to stable toolkit tag") {
 		t.Fatalf("self-adopter document claims an external pin:\n%s", selfAdopter)
@@ -309,7 +309,7 @@ func TestSetupDocumentHasASelfAdopterVariant(t *testing.T) {
 		"an empty SHA alone":     {"v1.2.3", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			document := string(setupDocument(toolkitSelfRepository, "hextap", half[0], half[1]))
+			document := string(setupDocument(toolkitSelfRepository, "hextap", half[0], half[1], ""))
 			if strings.Contains(document, "owns the reusable release workflow") {
 				t.Fatalf("%s was treated as a self-adopter:\n%s", name, document)
 			}
