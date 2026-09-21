@@ -575,11 +575,11 @@ validate the submodule URLs a tagged commit declares, so a credential that can
 read more than the repositories above is a credential a later commit can point
 somewhere else, and the quality job runs project-declared commands with network
 after the checkout. Supporting a cross-owner layout needs a sealed allowlist of
-submodule URLs first, tracked as SB23-2483. Until it lands, keep the credential
+submodule URLs first, tracked as SB23-2504. Until it lands, keep the credential
 narrow or keep the repositories under one owner.
 
 A private submodule on a host other than the caller's own GitHub server is also
-unsupported, tracked as SB23-2485: `actions/checkout` scopes the token's
+unsupported, tracked as SB23-2506: `actions/checkout` scopes the token's
 authorization header to one server, so a single `submodules_token` cannot
 authenticate a second host.
 

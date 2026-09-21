@@ -158,10 +158,10 @@ func TestSetupInstructionsNameEverySecretTheCallerMaps(t *testing.T) {
 			// point it at any private repository its owner can read while the
 			// quality job runs project-declared commands with network.
 			// Removing the recommendation deletes that path; containing it
-			// needs the allowlist in SB23-2483.
+			// needs the allowlist in SB23-2504.
 			"**that configuration is not supported yet**",
 			"Do not reach for a broader credential instead",
-			"SB23-2483",
+			"SB23-2504",
 		} {
 			if !strings.Contains(setup, required) {
 				t.Fatalf("the setup document for submodules = %q is missing %q:\n%s", mode, required, setup)
