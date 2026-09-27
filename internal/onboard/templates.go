@@ -204,6 +204,12 @@ func encodeJSON(value any) ([]byte, error) {
 }
 
 func setupDocument(repository, formula, toolkitVersion, toolkitSHA, submodules string) []byte {
+	return setupDocumentWith(repository, formula, toolkitVersion, toolkitSHA, submodules, false)
+}
+
+// setupDocumentWith renders SETUP.md. cask is true for a schema 3 project whose
+// tap entry is a reviewed Cask rather than a rendered Formula.
+func setupDocumentWith(repository, formula, toolkitVersion, toolkitSHA, submodules string, cask bool) []byte {
 	var result bytes.Buffer
 	result.WriteString(`# Hextap setup
 
@@ -254,12 +260,21 @@ Before releasing, make `)
 	fmt.Fprintf(&result, "gh api --hostname github.com --method POST repos/%s/rulesets --input .hextap/rulesets/main.json\n", repository)
 	fmt.Fprintf(&result, "gh api --hostname github.com --method POST repos/%s/rulesets --input .hextap/rulesets/release-tags.json\n", repository)
 	result.WriteString("```\n\n")
-	fmt.Fprintf(&result, "The tap registration destination is exactly `Projects/%s.json`, but the initial tap pull request must not contain that JSON alone. It must pair the byte-exact `.hextap/tap-registration.json` with `Formula/%s.rb`, and that Formula must declare `class %s < Formula`. The tap remains the Formula registry; the paired pull request and merge are owner-controlled manual actions.\n\n", formula, formula, classForFormula(formula))
+	if cask {
+		fmt.Fprintf(&result, "The tap registration destination is exactly `Projects/%s.json`, but the initial tap pull request must not contain that JSON alone. It must pair the byte-exact `.hextap/tap-registration.json` with a reviewed `Casks/%s.rb`. The tap refuses a Formula for a `cask_profile` project. The Cask is written and reviewed by hand; the release publisher later rewrites only its single `version \"x\"` line and its single `sha256 arm: \"<64 hex>\", intel: \"<64 hex>\"` line, so it must carry exactly one of each. The paired pull request and merge are owner-controlled manual actions.\n\n", formula, formula)
+	} else {
+		fmt.Fprintf(&result, "The tap registration destination is exactly `Projects/%s.json`, but the initial tap pull request must not contain that JSON alone. It must pair the byte-exact `.hextap/tap-registration.json` with `Formula/%s.rb`, and that Formula must declare `class %s < Formula`. The tap remains the Formula registry; the paired pull request and merge are owner-controlled manual actions.\n\n", formula, formula, classForFormula(formula))
+	}
 	result.WriteString("Coordinator bootstrap/recovery is an external adopter task:\n\n")
 	result.WriteString("1. Merge the reviewed onboarding files to `main`, apply the two reviewed rulesets, set the required secret, and enable immutable releases.\n")
 	result.WriteString("2. Push the first stable tag and let the full caller create and verify the immutable source release. When the project is not registered yet, the initial Homebrew publication can stop at the tap registry gate; do not replace or recreate that release.\n")
-	result.WriteString("3. From that immutable release and its verified `SHA256SUMS`, have the coordinator use the trusted pinned toolkit to render the exact Formula. Do not invent checksums or commit a placeholder Formula.\n")
-	fmt.Fprintf(&result, "4. Open one tap pull request that adds both `Projects/%s.json` and the release-backed `Formula/%s.rb`; merge only after tap CI passes.\n", formula, formula)
+	if cask {
+		result.WriteString("3. From that immutable release and its verified `SHA256SUMS`, write the Cask's two checksum values. Do not invent checksums or commit a placeholder Cask.\n")
+		fmt.Fprintf(&result, "4. Open one tap pull request that adds both `Projects/%s.json` and the release-backed `Casks/%s.rb`; merge only after tap CI passes.\n", formula, formula)
+	} else {
+		result.WriteString("3. From that immutable release and its verified `SHA256SUMS`, have the coordinator use the trusted pinned toolkit to render the exact Formula. Do not invent checksums or commit a placeholder Formula.\n")
+		fmt.Fprintf(&result, "4. Open one tap pull request that adds both `Projects/%s.json` and the release-backed `Formula/%s.rb`; merge only after tap CI passes.\n", formula, formula)
+	}
 	result.WriteString("5. Dispatch the existing stable tag in `homebrew-only` mode to finish or recover publication. Do not create a replacement tag.\n\n")
 	// The toolkit's own caller is relative and carries no external pin, so the
 	// pinned-caller paragraph cannot be written for it: both values are empty by

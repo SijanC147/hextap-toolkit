@@ -88,11 +88,15 @@ func RunProfile(options ProfileOptions) error {
 		cacheDirectory = resolvedCache
 	}
 	environment := profileEnvironment(cacheDirectory)
-	if err := requireProfileRuntimeVersion(sourceDir, project.Release.Profile.RuntimeVersion, environment, stdout); err != nil {
-		return err
-	}
-	if err := runProfileCommand(sourceDir, project.Release.Profile.Install, environment, stdout, stderr); err != nil {
-		return err
+	// A schema 3 Xcode profile has no managed runtime and no install command:
+	// the runner's Xcode is the toolchain, so only its quality commands run.
+	if project.Schema == manifest.ProfileSchema {
+		if err := requireProfileRuntimeVersion(sourceDir, project.Release.Profile.RuntimeVersion, environment, stdout); err != nil {
+			return err
+		}
+		if err := runProfileCommand(sourceDir, project.Release.Profile.Install, environment, stdout, stderr); err != nil {
+			return err
+		}
 	}
 	if options.Phase == ProfileBuild {
 		if err := prefetchBunRuntimes(sourceDir, project, environment, stdout, stderr); err != nil {
