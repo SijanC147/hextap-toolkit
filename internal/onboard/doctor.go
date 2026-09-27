@@ -91,6 +91,9 @@ func Doctor(options DoctorOptions) (DoctorResult, error) {
 	runtimeTool := "go"
 	if validated.Manifest.Release.Profile != nil {
 		runtimeTool = validated.Manifest.Release.Profile.Runtime
+		if runtimeTool == manifest.RuntimeXcode {
+			runtimeTool = "xcodebuild"
+		}
 	}
 	if _, err := exec.LookPath(runtimeTool); err != nil {
 		return DoctorResult{}, fmt.Errorf("required tool %q was not found on PATH", runtimeTool)
