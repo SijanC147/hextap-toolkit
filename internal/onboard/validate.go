@@ -59,13 +59,15 @@ func Validate(options ValidateOptions) (ValidateResult, error) {
 	if err != nil {
 		return ValidateResult{}, err
 	}
-	owner, _, err := parseRepository(repository)
+	owner, repositoryName, err := parseRepository(repository)
 	if err != nil {
 		return ValidateResult{}, err
 	}
-	if owner != supportedOwner {
+	if !strings.EqualFold(owner, supportedOwner) {
 		return ValidateResult{}, fmt.Errorf("repository owner %q is unsupported; the current publisher contract supports only %s", owner, supportedOwner)
 	}
+	// GitHub owners are case-insensitive; the manifest records the canonical spelling.
+	repository = supportedOwner + "/" + repositoryName
 	manifestData, manifestInfo, err := readLocalFile(filepath.Join(root, manifestPath), "manifest", maximumLocalFile, true)
 	if err != nil {
 		return ValidateResult{}, err
@@ -398,6 +400,10 @@ func validateBuildSmoke(root string, project manifest.Manifest) error {
 }
 
 func hostDeclaredTarget(project manifest.Manifest) string {
+	if project.Schema == manifest.XcodeSchema {
+		// An .app bundle is not a command-line executable to smoke-run.
+		return ""
+	}
 	if project.Schema == manifest.ProfileSchema {
 		key := runtime.GOOS + "_" + runtime.GOARCH
 		if _, exists := project.Release.Targets[key]; exists {
