@@ -232,8 +232,8 @@ func TestPublishHomebrewContract(t *testing.T) {
 	assertContains(t, script, `basename -- "$amd64_asset"`)
 	assertNotContains(t, script, `$formula-darwin-`)
 
-	assertContains(t, script, `git -C "$attempt_dir" add "Formula/$formula.rb"`)
-	assertContains(t, script, `[[ "$changed" == "Formula/$formula.rb" ]]`)
+	assertContains(t, script, `git -C "$attempt_dir" add "$package_path"`)
+	assertContains(t, script, `[[ "$changed" == "$package_path" ]]`)
 	assertNotContains(t, script, `git -C "$attempt_dir" add .`)
 	assertContains(t, script, `for attempt in 1 2 3; do`)
 	assertContains(t, script, `push origin HEAD:main`)

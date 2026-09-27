@@ -266,7 +266,7 @@ jobs:
     name: Source quality
     needs: validate
     if: needs.validate.outputs.mode == 'full'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.validate.outputs.runtime == 'xcode' && 'macos-15' || 'ubuntu-latest' }}
     permissions:
       contents: read
     steps:
@@ -278,7 +278,7 @@ jobs:
           submodules: ${{ inputs.submodules }}
           token: ${{ secrets.submodules_token || github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: needs.validate.outputs.runtime == 'bun'
+        if: needs.validate.outputs.runtime == 'bun' || needs.validate.outputs.runtime == 'xcode'
         with:
           repository: SijanC147/hextap-toolkit
           ref: ${{ job.workflow_sha }}
@@ -290,7 +290,7 @@ jobs:
           cache: false
           go-version-file: source/go.mod
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: needs.validate.outputs.runtime == 'bun'
+        if: needs.validate.outputs.runtime == 'bun' || needs.validate.outputs.runtime == 'xcode'
         with:
           cache: false
           go-version-file: toolkit/go.mod
@@ -299,7 +299,7 @@ jobs:
         with:
           bun-version: ${{ needs.validate.outputs.runtime_version }}
       - name: Download validated manifest by ID
-        if: needs.validate.outputs.runtime == 'bun'
+        if: needs.validate.outputs.runtime == 'bun' || needs.validate.outputs.runtime == 'xcode'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.validate.outputs.manifest_artifact_id }}
@@ -307,7 +307,7 @@ jobs:
           digest-mismatch: error
           merge-multiple: true
       - name: Verify validated profile manifest
-        if: needs.validate.outputs.runtime == 'bun'
+        if: needs.validate.outputs.runtime == 'bun' || needs.validate.outputs.runtime == 'xcode'
         env:
           EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
         run: |
@@ -336,7 +336,7 @@ jobs:
           go build -trimpath ./...
         working-directory: source
       - name: Run tagged Bun profile
-        if: needs.validate.outputs.runtime == 'bun'
+        if: needs.validate.outputs.runtime == 'bun' || needs.validate.outputs.runtime == 'xcode'
         env:
           EXPECTED_MANIFEST_SHA256: ${{ needs.validate.outputs.manifest_sha256 }}
         run: |
@@ -358,7 +358,7 @@ jobs:
     name: Build release assets
     needs: validate
     if: needs.validate.outputs.mode == 'full'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.validate.outputs.runtime == 'xcode' && 'macos-15' || 'ubuntu-latest' }}
     permissions:
       contents: read
     outputs:

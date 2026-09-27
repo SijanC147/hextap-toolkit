@@ -97,9 +97,11 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 	if err != nil {
 		return onboardingState{}, err
 	}
-	if owner != supportedOwner {
+	if !strings.EqualFold(owner, supportedOwner) {
 		return onboardingState{}, fmt.Errorf("repository owner %q is unsupported; the current publisher contract supports only %s", owner, supportedOwner)
 	}
+	// GitHub owners are case-insensitive; the manifest records the canonical spelling.
+	repository = supportedOwner + "/" + repositoryName
 	if err := validateToolkitPin(options.ToolkitVersion, options.ToolkitSHA); err != nil {
 		return onboardingState{}, err
 	}
@@ -192,6 +194,51 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 		return nil, manifest.Manifest{}, false, errors.New("--license is required when .hextap.json is absent")
 	}
 	owner, name, _ := parseRepository(repository)
+	xcodeProject, err := detectXcodeProject(filepath.Dir(path))
+	if err != nil {
+		return nil, manifest.Manifest{}, false, err
+	}
+	if xcodeProject != "" {
+		if options.LinuxSet && options.Linux {
+			return nil, manifest.Manifest{}, false, errors.New("--linux cannot be enabled for a schema 3 Xcode application")
+		}
+		if options.GoPackageSet || options.VersionSymbolSet || options.CommitSymbolSet {
+			return nil, manifest.Manifest{}, false, errors.New("Go adapter generation flags cannot be used with a schema 3 Xcode application")
+		}
+		scheme := strings.TrimSuffix(xcodeProject, ".xcodeproj")
+		archiveARM64 := formula + "-darwin-arm64.zip"
+		archiveAMD64 := formula + "-darwin-amd64.zip"
+		project := manifest.Manifest{
+			Schema: manifest.XcodeSchema,
+			Formula: manifest.Formula{
+				Name:        formula,
+				Class:       classForFormula(formula),
+				Description: options.Description,
+				Homepage:    "https://github.com/" + repository,
+				License:     options.License,
+				Repository:  manifest.Repository{Owner: owner, Name: name},
+				Binary:      formula,
+				Assets:      manifest.Assets{DarwinARM64: archiveARM64, DarwinAMD64: archiveAMD64},
+			},
+			Release: manifest.Release{
+				BuildScript: defaultAdapterPath,
+				Profile: &manifest.ReleaseProfile{
+					Runtime:       manifest.RuntimeXcode,
+					Project:       xcodeProject,
+					Scheme:        scheme,
+					Configuration: "Release",
+					App:           formula + ".app",
+					Quality:       []manifest.Command{},
+				},
+				Targets: map[string]manifest.TargetArtifacts{
+					"darwin_arm64": {Archive: archiveARM64, ArchiveContents: manifest.ArchiveContentsApp},
+					"darwin_amd64": {Archive: archiveAMD64, ArchiveContents: manifest.ArchiveContentsApp},
+				},
+			},
+			Homebrew: manifest.Homebrew{MacOSOnly: true, CaskProfile: formula},
+		}
+		return finishGeneratedManifest(project)
+	}
 	linux := options.Linux
 	project := manifest.Manifest{
 		Schema: manifest.LegacySchema,
@@ -216,6 +263,10 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 			Caveats:   "",
 		},
 	}
+	return finishGeneratedManifest(project)
+}
+
+func finishGeneratedManifest(project manifest.Manifest) ([]byte, manifest.Manifest, bool, error) {
 	if err := project.Validate(); err != nil {
 		return nil, manifest.Manifest{}, false, err
 	}
@@ -230,8 +281,9 @@ func resolveManifest(path, repository, repositoryName string, options Options) (
 }
 
 func generationFlagsAgree(project manifest.Manifest, options Options) error {
-	if project.Schema == manifest.ProfileSchema && (options.GoPackageSet || options.VersionSymbolSet || options.CommitSymbolSet) {
-		return errors.New("Go adapter generation flags cannot be used with an authoritative schema 2 manifest")
+	profileSchema := project.Schema == manifest.ProfileSchema || project.Schema == manifest.XcodeSchema
+	if profileSchema && (options.GoPackageSet || options.VersionSymbolSet || options.CommitSymbolSet) {
+		return fmt.Errorf("Go adapter generation flags cannot be used with an authoritative schema %d manifest", project.Schema)
 	}
 	tests := []struct {
 		name     string
@@ -249,8 +301,8 @@ func generationFlagsAgree(project manifest.Manifest, options Options) error {
 			return fmt.Errorf("%s conflicts with authoritative .hextap.json", test.name)
 		}
 	}
-	if project.Schema == manifest.ProfileSchema && options.LinuxSet {
-		return errors.New("--linux is a schema 1 generation flag and cannot be used with an authoritative schema 2 manifest")
+	if profileSchema && options.LinuxSet {
+		return fmt.Errorf("--linux is a schema 1 generation flag and cannot be used with an authoritative schema %d manifest", project.Schema)
 	}
 	if options.LinuxSet && options.Linux != project.Release.LinuxEnabled() {
 		return fmt.Errorf("--linux value conflicts with authoritative .hextap.json value %t", project.Release.LinuxEnabled())
@@ -268,6 +320,23 @@ func resolveAdapter(root string, project manifest.Manifest, options Options) (ar
 	exists := statErr == nil
 	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
 		return artifact{}, fmt.Errorf("inspect build adapter %q: %w", path, statErr)
+	}
+	if project.Schema == manifest.XcodeSchema {
+		expected := xcodeAdapterBytes(*project.Release.Profile, xcodeEntitlements(root, project.Release.Profile.Project))
+		if !exists {
+			return artifact{path: relative, data: expected, mode: 0o755, generatedText: true}, nil
+		}
+		_, info, err := readLocalFile(path, "build adapter", maximumLocalFile, true)
+		if err != nil {
+			return artifact{}, err
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			return artifact{}, errors.New("existing build adapter must be executable")
+		}
+		if hasSpecialFileMode(info) {
+			return artifact{}, errors.New("existing build adapter has unsafe special mode bits")
+		}
+		return artifact{path: relative, data: expected, mode: 0o755, customAdapter: true}, nil
 	}
 	goPackage := options.GoPackage
 	if goPackage == "" {

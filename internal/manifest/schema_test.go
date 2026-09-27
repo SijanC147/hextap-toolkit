@@ -92,12 +92,12 @@ func TestMachineReadableSchemaMatchesGoFieldContract(t *testing.T) {
 	assertRequired(t, definition(t, definitions, "releaseProfile"), "runtime", "runtime_version", "install", "quality", "prepare")
 	assertRequired(t, definition(t, definitions, "command"), "name", "argv")
 	assertRequired(t, definition(t, definitions, "releaseTargets"), "darwin_arm64", "darwin_amd64")
-	assertRequired(t, definition(t, definitions, "homebrew"), "macos_only", "test_args")
+	assertRequired(t, definition(t, definitions, "homebrew"), "macos_only")
 	assertRequired(t, definition(t, definitions, "serviceEnabled"), "enabled", "run_args", "keep_alive", "restart_delay", "environment", "log_path", "error_log_path")
 	assertRequired(t, definition(t, definitions, "serviceDisabled"), "enabled")
 
 	schemaVersions := object(t, schema["properties"], "properties")["schema"].(map[string]any)["oneOf"].([]any)
-	if len(schemaVersions) != 2 || nestedNumber(t, schemaVersions[0].(map[string]any), "const") != LegacySchema || nestedNumber(t, schemaVersions[1].(map[string]any), "const") != ProfileSchema {
+	if len(schemaVersions) != 3 || nestedNumber(t, schemaVersions[0].(map[string]any), "const") != LegacySchema || nestedNumber(t, schemaVersions[1].(map[string]any), "const") != ProfileSchema || nestedNumber(t, schemaVersions[2].(map[string]any), "const") != XcodeSchema {
 		t.Fatalf("schema versions = %#v", schemaVersions)
 	}
 	assertDefinitionPattern(t, definitions, "formulaName", formulaNamePattern.String())

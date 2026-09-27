@@ -123,6 +123,8 @@ func verifyWithHook(options VerifyOptions, afterChecksums func()) (VerifyResult,
 			switch artifact.Format {
 			case artifactBinary:
 				binary, err = verifyRawBinary(assetBytes[artifact.Name], item.OS, item.Arch)
+			case artifactAppZip:
+				binary, err = verifyAppZip(assetBytes[artifact.Name], item.Executable, project.Formula.Binary, item.OS, item.Arch)
 			case artifactBinaryArchive, artifactBundleArchive:
 				binary, err = verifyArchive(assetBytes[artifact.Name], project.Formula.Binary, project.Homebrew.ZshCompletion, item.OS, item.Arch, artifact.Format)
 			default:
@@ -141,7 +143,12 @@ func verifyWithHook(options VerifyOptions, afterChecksums func()) (VerifyResult,
 		}
 		binaries[key] = targetBinary
 	}
-	if selected != nil {
+	if selected != nil && project.Schema == manifest.XcodeSchema {
+		key := selected.OS + "-" + selected.Arch
+		if err := verifyAppSignature(assetBytes[executionAssets[key]], selected.Executable); err != nil {
+			return VerifyResult{}, err
+		}
+	} else if selected != nil {
 		key := selected.OS + "-" + selected.Arch
 		if err := executeVerifiedBinary(selected.Executable, project.Formula.Binary, options.Version, options.Commit, executionAssets[key], binaries[key]); err != nil {
 			return VerifyResult{}, err
