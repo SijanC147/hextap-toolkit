@@ -234,6 +234,9 @@ func TestPublishHomebrewContract(t *testing.T) {
 
 	assertContains(t, script, `git -C "$attempt_dir" add "$package_path"`)
 	assertContains(t, script, `[[ "$changed" == "$package_path" ]]`)
+	assertContains(t, script, `package_path="Formula/$formula.rb"`)
+	assertContains(t, script, `package_path="Casks/$formula.rb"`)
+	assertContains(t, script, `tap-owned Cask profile must already have a reviewed Cask`)
 	assertNotContains(t, script, `git -C "$attempt_dir" add .`)
 	assertContains(t, script, `for attempt in 1 2 3; do`)
 	assertContains(t, script, `push origin HEAD:main`)
