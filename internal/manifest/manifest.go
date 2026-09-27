@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	LegacySchema           = 1
-	ProfileSchema          = 2
+	LegacySchema  = 1
+	ProfileSchema = 2
+	// XcodeSchema describes a macOS application bundle built with xcodebuild
+	// and published as a zip of the .app for a tap-owned Cask profile.
+	XcodeSchema            = 3
 	CurrentSchema          = ProfileSchema
 	maxPathComponentBytes  = 255
 	maxRelativePathBytes   = 1024
@@ -188,6 +191,33 @@ type ReleaseProfile struct {
 	Install        Command   `json:"install"`
 	Quality        []Command `json:"quality"`
 	Prepare        []Command `json:"prepare"`
+	// Xcode fields, schema 3 only. Project is the .xcodeproj relative to the
+	// repository root, App is the product bundle basename the scheme builds.
+	Project       string `json:"project,omitempty"`
+	Scheme        string `json:"scheme,omitempty"`
+	Configuration string `json:"configuration,omitempty"`
+	App           string `json:"app,omitempty"`
+}
+
+// MarshalJSON emits exactly the field set of the declared runtime.
+func (p ReleaseProfile) MarshalJSON() ([]byte, error) {
+	if p.Runtime == RuntimeXcode {
+		return json.Marshal(struct {
+			Runtime       string    `json:"runtime"`
+			Project       string    `json:"project"`
+			Scheme        string    `json:"scheme"`
+			Configuration string    `json:"configuration"`
+			App           string    `json:"app"`
+			Quality       []Command `json:"quality"`
+		}{p.Runtime, p.Project, p.Scheme, p.Configuration, p.App, p.Quality})
+	}
+	return json.Marshal(struct {
+		Runtime        string    `json:"runtime"`
+		RuntimeVersion string    `json:"runtime_version"`
+		Install        Command   `json:"install"`
+		Quality        []Command `json:"quality"`
+		Prepare        []Command `json:"prepare"`
+	}{p.Runtime, p.RuntimeVersion, p.Install, p.Quality, p.Prepare})
 }
 
 // Command is one named direct argv invocation. Shell command strings are not
@@ -208,7 +238,8 @@ type TargetArtifacts struct {
 
 type Homebrew struct {
 	MacOSOnly      bool     `json:"macos_only"`
-	TestArgs       []string `json:"test_args"`
+	TestArgs       []string `json:"test_args,omitempty"`
+	CaskProfile    string   `json:"cask_profile,omitempty"`
 	Service        *Service `json:"service,omitempty"`
 	Caveats        string   `json:"caveats"`
 	BinaryAliases  []string `json:"binary_aliases,omitempty"`
@@ -251,6 +282,27 @@ func (m Manifest) MarshalJSON() ([]byte, error) {
 				Linux       bool   `json:"linux"`
 			}{BuildScript: m.Release.BuildScript, Linux: m.Release.LinuxEnabled()},
 			Homebrew: m.Homebrew,
+		})
+	}
+	if m.Schema == XcodeSchema {
+		return json.Marshal(struct {
+			Schema   int     `json:"schema"`
+			Formula  Formula `json:"formula"`
+			Release  any     `json:"release"`
+			Homebrew any     `json:"homebrew"`
+		}{
+			Schema:  m.Schema,
+			Formula: m.Formula,
+			Release: struct {
+				BuildScript string                     `json:"build_script"`
+				Checkout    *ReleaseCheckout           `json:"checkout,omitempty"`
+				Profile     *ReleaseProfile            `json:"profile"`
+				Targets     map[string]TargetArtifacts `json:"targets"`
+			}{BuildScript: m.Release.BuildScript, Checkout: m.Release.Checkout, Profile: m.Release.Profile, Targets: m.Release.Targets},
+			Homebrew: struct {
+				MacOSOnly   bool   `json:"macos_only"`
+				CaskProfile string `json:"cask_profile"`
+			}{MacOSOnly: m.Homebrew.MacOSOnly, CaskProfile: m.Homebrew.CaskProfile},
 		})
 	}
 	return json.Marshal(struct {
@@ -457,12 +509,49 @@ func validateRequiredFields(data []byte) error {
 				}
 			}
 		}
+	case XcodeSchema:
+		release, err := requireExactObjectFields(root["release"], "release", []string{"build_script", "profile", "targets"}, []string{"checkout"})
+		if err != nil {
+			return err
+		}
+		if checkout, declared := release["checkout"]; declared {
+			if _, err := requireExactObjectFields(checkout, "release.checkout", []string{"submodules"}, []string{"submodules_allowed"}); err != nil {
+				return err
+			}
+		}
+		profile, err := requireExactObjectFields(release["profile"], "release.profile", []string{"runtime", "project", "scheme", "configuration", "app", "quality"}, nil)
+		if err != nil {
+			return err
+		}
+		if trimmed := bytes.TrimSpace(profile["quality"]); len(trimmed) == 0 || trimmed[0] != '[' {
+			return errors.New("validate manifest: release.profile.quality must be an array")
+		}
+		var commands []json.RawMessage
+		if err := json.Unmarshal(profile["quality"], &commands); err != nil {
+			return errors.New("validate manifest: release.profile.quality must be an array")
+		}
+		for index, command := range commands {
+			if err := validateCommandObjectFields(command, fmt.Sprintf("release.profile.quality[%d]", index)); err != nil {
+				return err
+			}
+		}
+		targets, err := requireExactObjectFields(release["targets"], "release.targets", []string{"darwin_arm64", "darwin_amd64"}, nil)
+		if err != nil {
+			return err
+		}
+		for name, target := range targets {
+			if _, err := requireExactObjectFields(target, "release.targets."+name, []string{"archive", "archive_contents"}, nil); err != nil {
+				return err
+			}
+		}
 	default:
-		return fmt.Errorf("validate manifest: schema must be %d or %d", LegacySchema, ProfileSchema)
+		return fmt.Errorf("validate manifest: schema must be %d, %d, or %d", LegacySchema, ProfileSchema, XcodeSchema)
 	}
 	var homebrew map[string]json.RawMessage
 	if schema == LegacySchema {
 		homebrew, err = requireExactObjectFields(root["homebrew"], "homebrew", []string{"macos_only", "test_args", "caveats"}, []string{"service", "binary_aliases", "zsh_completion"})
+	} else if schema == XcodeSchema {
+		homebrew, err = requireExactObjectFields(root["homebrew"], "homebrew", []string{"macos_only", "cask_profile"}, nil)
 	} else {
 		homebrew, err = requireExactObjectFields(root["homebrew"], "homebrew", []string{"macos_only", "test_args", "formula_profile", "service_enabled"}, nil)
 	}
@@ -557,8 +646,8 @@ func validateExactObjectFields(values map[string]json.RawMessage, object string,
 // Validate checks every manifest value before it may enter Ruby, shell, URL,
 // filesystem, or release metadata contexts.
 func (m Manifest) Validate() error {
-	if m.Schema != LegacySchema && m.Schema != ProfileSchema {
-		return fmt.Errorf("validate manifest: schema must be %d or %d", LegacySchema, ProfileSchema)
+	if m.Schema != LegacySchema && m.Schema != ProfileSchema && m.Schema != XcodeSchema {
+		return fmt.Errorf("validate manifest: schema must be %d, %d, or %d", LegacySchema, ProfileSchema, XcodeSchema)
 	}
 	if len(m.Formula.Name) > maxFormulaNameBytes || !formulaNamePattern.MatchString(m.Formula.Name) {
 		return errors.New("validate manifest: formula.name must be lowercase kebab-case")
@@ -587,10 +676,14 @@ func (m Manifest) Validate() error {
 	if len(m.Formula.Binary) > maxPathComponentBytes || !fileNamePattern.MatchString(m.Formula.Binary) || m.Formula.Binary == "." || m.Formula.Binary == ".." {
 		return errors.New("validate manifest: formula.binary must be a safe basename")
 	}
-	if err := validateAsset("formula.assets.darwin_arm64", m.Formula.Assets.DarwinARM64); err != nil {
+	assetSuffix := ".tar.gz"
+	if m.Schema == XcodeSchema {
+		assetSuffix = ".zip"
+	}
+	if err := validateAssetSuffix("formula.assets.darwin_arm64", m.Formula.Assets.DarwinARM64, assetSuffix); err != nil {
 		return err
 	}
-	if err := validateAsset("formula.assets.darwin_amd64", m.Formula.Assets.DarwinAMD64); err != nil {
+	if err := validateAssetSuffix("formula.assets.darwin_amd64", m.Formula.Assets.DarwinAMD64, assetSuffix); err != nil {
 		return err
 	}
 	if m.Formula.Assets.DarwinARM64 == m.Formula.Assets.DarwinAMD64 {
@@ -619,6 +712,36 @@ func (m Manifest) Validate() error {
 		if err := validateProfileTargets(m.Formula.Assets, m.Release.Targets); err != nil {
 			return err
 		}
+	case XcodeSchema:
+		if m.Release.Linux != nil || m.Release.Profile == nil || m.Release.Targets == nil {
+			return errors.New("validate manifest: schema 3 release requires build_script, profile, and targets")
+		}
+		if m.Release.Checkout != nil {
+			if err := m.Release.Checkout.validate(); err != nil {
+				return err
+			}
+		}
+		if err := m.Release.Profile.validateXcode(m.Formula.Binary); err != nil {
+			return err
+		}
+		if err := validateXcodeTargets(m.Formula.Assets, m.Release.Targets); err != nil {
+			return err
+		}
+	}
+	if m.Schema == XcodeSchema {
+		if !m.Homebrew.MacOSOnly {
+			return errors.New("validate manifest: homebrew.macos_only must be true for Darwin Formula assets")
+		}
+		if m.Homebrew.TestArgs != nil || m.Homebrew.Service != nil || m.Homebrew.Caveats != "" || m.Homebrew.BinaryAliases != nil || m.Homebrew.ZshCompletion != "" || m.Homebrew.FormulaProfile != "" || m.Homebrew.ServiceEnabled != nil {
+			return errors.New("validate manifest: schema 3 homebrew requires only macos_only and a tap-owned cask_profile")
+		}
+		if m.Homebrew.CaskProfile != m.Formula.Name {
+			return errors.New("validate manifest: homebrew.cask_profile must equal formula.name")
+		}
+		return nil
+	}
+	if m.Homebrew.CaskProfile != "" {
+		return errors.New("validate manifest: homebrew.cask_profile requires schema 3")
 	}
 	if len(m.Homebrew.TestArgs) == 0 {
 		return errors.New("validate manifest: homebrew.test_args must contain at least one argument")
@@ -696,6 +819,9 @@ func (r Release) LinuxEnabled() bool {
 func (p ReleaseProfile) validate() error {
 	if p.Runtime != "bun" {
 		return errors.New("validate manifest: release.profile.runtime must be bun")
+	}
+	if p.Project != "" || p.Scheme != "" || p.Configuration != "" || p.App != "" {
+		return errors.New("validate manifest: Xcode profile fields require schema 3")
 	}
 	if !stableVersionRE.MatchString(p.RuntimeVersion) {
 		return errors.New("validate manifest: release.profile.runtime_version must be a pinned stable version")
@@ -923,8 +1049,12 @@ func validateHomepage(value string) error {
 }
 
 func validateAsset(field, value string) error {
-	if len(value) > maxPathComponentBytes || !fileNamePattern.MatchString(value) || !strings.HasSuffix(value, ".tar.gz") || value == "." || value == ".." {
-		return fmt.Errorf("validate manifest: %s must be a safe .tar.gz basename", field)
+	return validateAssetSuffix(field, value, ".tar.gz")
+}
+
+func validateAssetSuffix(field, value, suffix string) error {
+	if len(value) > maxPathComponentBytes || !fileNamePattern.MatchString(value) || !strings.HasSuffix(value, suffix) || value == "." || value == ".." {
+		return fmt.Errorf("validate manifest: %s must be a safe %s basename", field, suffix)
 	}
 	return nil
 }

@@ -1,0 +1,51 @@
+{
+  "schema": 3,
+  "formula": {
+    "name": "a-bar",
+    "class": "ABar",
+    "description": "Menu bar replacement for macOS",
+    "homepage": "https://github.com/SijanC147/a-bar",
+    "license": "GPL-3.0",
+    "repository": {
+      "owner": "SijanC147",
+      "name": "a-bar"
+    },
+    "binary": "a-bar",
+    "assets": {
+      "darwin_arm64": "a-bar-darwin-arm64.zip",
+      "darwin_amd64": "a-bar-darwin-amd64.zip"
+    }
+  },
+  "release": {
+    "build_script": "scripts/hextap-build",
+    "profile": {
+      "runtime": "xcode",
+      "project": "a-bar.xcodeproj",
+      "scheme": "a-bar",
+      "configuration": "Release",
+      "app": "a-bar.app",
+      "quality": [
+        {
+          "name": "test-membership",
+          "argv": [
+            "./scripts/check-test-membership.sh"
+          ]
+        }
+      ]
+    },
+    "targets": {
+      "darwin_arm64": {
+        "archive": "a-bar-darwin-arm64.zip",
+        "archive_contents": "app"
+      },
+      "darwin_amd64": {
+        "archive": "a-bar-darwin-amd64.zip",
+        "archive_contents": "app"
+      }
+    }
+  },
+  "homebrew": {
+    "macos_only": true,
+    "cask_profile": "a-bar"
+  }
+}

@@ -452,3 +452,47 @@ func parseManifestBytes(data []byte) (manifest.Manifest, error) {
 	}
 	return project, nil
 }
+
+// detectXcodeProject returns the single root-level .xcodeproj of a project
+// that has no go.mod or package.json, or "" when the project is not an Xcode
+// application. The scheme named after the project stem must be shared.
+func detectXcodeProject(root string) (string, error) {
+	for _, marker := range []string{"go.mod", "package.json"} {
+		if _, err := os.Lstat(filepath.Join(root, marker)); err == nil {
+			return "", nil
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", fmt.Errorf("inspect project directory: %w", err)
+	}
+	found := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasSuffix(entry.Name(), ".xcodeproj") {
+			found = append(found, entry.Name())
+		}
+	}
+	if len(found) != 1 {
+		return "", nil
+	}
+	project := found[0]
+	stem := strings.TrimSuffix(project, ".xcodeproj")
+	scheme := filepath.Join(root, project, "xcshareddata", "xcschemes", stem+".xcscheme")
+	info, err := os.Lstat(scheme)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("Xcode project %s has no shared scheme %s.xcscheme under xcshareddata/xcschemes", project, stem)
+	}
+	return project, nil
+}
+
+// xcodeEntitlements returns <stem>/<stem>.entitlements when that single
+// regular file exists beside the project, and "" otherwise.
+func xcodeEntitlements(root, project string) string {
+	stem := strings.TrimSuffix(filepath.Base(project), ".xcodeproj")
+	relative := filepath.ToSlash(filepath.Join(filepath.Dir(project), stem, stem+".entitlements"))
+	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(relative)))
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return relative
+}

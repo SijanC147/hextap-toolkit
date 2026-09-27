@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/SijanC147/hextap-toolkit/schema/project-manifest.schema.json",
   "title": "Hextap project manifest",
-  "description": "Declarative project metadata consumed by hextapctl. Schema 1 preserves Go archives; schema 2 adds a pinned Bun profile, explicit targets, optional Windows amd64, and a tap-owned Formula profile. Go validation remains authoritative for cross-field identity.",
+  "description": "Declarative project metadata consumed by hextapctl. Schema 1 preserves Go archives; schema 2 adds a pinned Bun profile, explicit targets, optional Windows amd64, and a tap-owned Formula profile; schema 3 builds a macOS .app with xcodebuild, publishes zip archives, and names a tap-owned Cask profile. Go validation remains authoritative for cross-field identity.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -19,6 +19,9 @@
         },
         {
           "const": 2
+        },
+        {
+          "const": 3
         }
       ]
     },
@@ -46,6 +49,24 @@
             },
             "homebrew": {
               "$ref": "#/$defs/homebrewLegacy"
+            },
+            "formula": {
+              "type": "object",
+              "properties": {
+                "assets": {
+                  "type": "object",
+                  "properties": {
+                    "darwin_arm64": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.tar\\.gz$"
+                    },
+                    "darwin_amd64": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.tar\\.gz$"
+                    }
+                  }
+                }
+              }
             }
           }
         },
@@ -60,6 +81,56 @@
             },
             "homebrew": {
               "$ref": "#/$defs/homebrewProfile"
+            },
+            "formula": {
+              "type": "object",
+              "properties": {
+                "assets": {
+                  "type": "object",
+                  "properties": {
+                    "darwin_arm64": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.tar\\.gz$"
+                    },
+                    "darwin_amd64": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.tar\\.gz$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": 3
+            },
+            "release": {
+              "$ref": "#/$defs/releaseXcodeContract"
+            },
+            "homebrew": {
+              "$ref": "#/$defs/homebrewCask"
+            },
+            "formula": {
+              "type": "object",
+              "properties": {
+                "assets": {
+                  "type": "object",
+                  "properties": {
+                    "darwin_arm64": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.zip$"
+                    },
+                    "darwin_amd64": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.zip$"
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -95,7 +166,7 @@
     "assetName": {
       "type": "string",
       "maxLength": 255,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.tar\\.gz$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.(?:tar\\.gz|zip)$"
     },
     "relativePath": {
       "type": "string",
@@ -292,7 +363,14 @@
           "$ref": "#/$defs/releaseCheckout"
         },
         "profile": {
-          "$ref": "#/$defs/releaseProfile"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/releaseProfile"
+            },
+            {
+              "$ref": "#/$defs/releaseProfileXcode"
+            }
+          ]
         },
         "targets": {
           "$ref": "#/$defs/releaseTargets"
@@ -470,8 +548,60 @@
           "items": {
             "$ref": "#/$defs/command"
           }
+        },
+        "project": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "scheme": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "configuration": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "app": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 255
         }
-      }
+      },
+      "allOf": [
+        {
+          "not": {
+            "type": "object",
+            "required": [
+              "project"
+            ]
+          }
+        },
+        {
+          "not": {
+            "type": "object",
+            "required": [
+              "scheme"
+            ]
+          }
+        },
+        {
+          "not": {
+            "type": "object",
+            "required": [
+              "configuration"
+            ]
+          }
+        },
+        {
+          "not": {
+            "type": "object",
+            "required": [
+              "app"
+            ]
+          }
+        }
+      ]
     },
     "targetArtifacts": {
       "type": "object",
@@ -490,6 +620,9 @@
             },
             {
               "const": "bundle"
+            },
+            {
+              "const": "app"
             }
           ]
         }
@@ -630,8 +763,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "macos_only",
-        "test_args"
+        "macos_only"
       ],
       "properties": {
         "macos_only": {
@@ -667,6 +799,9 @@
         },
         "service_enabled": {
           "type": "boolean"
+        },
+        "cask_profile": {
+          "$ref": "#/$defs/formulaName"
         }
       }
     },
@@ -734,6 +869,118 @@
         },
         "service_enabled": {
           "type": "boolean"
+        }
+      }
+    },
+    "releaseProfileXcode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "project",
+        "scheme",
+        "configuration",
+        "app",
+        "quality"
+      ],
+      "properties": {
+        "runtime": {
+          "const": "xcode"
+        },
+        "project": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "scheme": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "configuration": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "app": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 255
+        },
+        "quality": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        }
+      }
+    },
+    "releaseXcodeTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive",
+        "archive_contents"
+      ],
+      "properties": {
+        "archive": {
+          "$ref": "#/$defs/assetName"
+        },
+        "archive_contents": {
+          "const": "app"
+        }
+      }
+    },
+    "releaseXcodeTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "darwin_arm64",
+        "darwin_amd64"
+      ],
+      "properties": {
+        "darwin_arm64": {
+          "$ref": "#/$defs/releaseXcodeTarget"
+        },
+        "darwin_amd64": {
+          "$ref": "#/$defs/releaseXcodeTarget"
+        }
+      }
+    },
+    "releaseXcodeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build_script",
+        "profile",
+        "targets"
+      ],
+      "properties": {
+        "build_script": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "checkout": {
+          "$ref": "#/$defs/releaseCheckout"
+        },
+        "profile": {
+          "$ref": "#/$defs/releaseProfileXcode"
+        },
+        "targets": {
+          "$ref": "#/$defs/releaseXcodeTargets"
+        }
+      }
+    },
+    "homebrewCask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "macos_only",
+        "cask_profile"
+      ],
+      "properties": {
+        "macos_only": {
+          "const": true
+        },
+        "cask_profile": {
+          "$ref": "#/$defs/formulaName"
         }
       }
     }

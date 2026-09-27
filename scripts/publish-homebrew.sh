@@ -36,6 +36,7 @@ for attempt in 1 2 3; do
   gh repo clone "$tap_repository" "$attempt_dir" -- --branch main --depth 1 >/dev/null
   manifest="$attempt_dir/Projects/$formula.json"
   formula_path="$attempt_dir/Formula/$formula.rb"
+  package_path="Formula/$formula.rb"
   [[ -f "$manifest" && ! -L "$manifest" ]] || {
     echo "tap project is not registered: Projects/$formula.json" >&2
     exit 1
@@ -59,6 +60,17 @@ for attempt in 1 2 3; do
   }
 
   formula_profile="$(ruby -rjson -e 'puts(JSON.parse(File.read(ARGV.fetch(0))).dig("homebrew", "formula_profile") || "")' "$manifest")"
+  cask_profile="$(ruby -rjson -e 'puts(JSON.parse(File.read(ARGV.fetch(0))).dig("homebrew", "cask_profile") || "")' "$manifest")"
+  asset_suffix='\.tar\.gz'
+  if [[ -n "$cask_profile" ]]; then
+    [[ "$cask_profile" == "$formula" && -z "$formula_profile" ]]
+    package_path="Casks/$formula.rb"
+    asset_suffix='\.zip'
+    [[ -f "$attempt_dir/$package_path" && ! -L "$attempt_dir/$package_path" ]] || {
+      echo "tap-owned Cask profile must already have a reviewed Cask: $package_path" >&2
+      exit 1
+    }
+  fi
   if [[ -n "$formula_profile" ]]; then
     [[ "$formula_profile" == "$formula" ]]
     template_directory="$attempt_dir/packaging"
@@ -77,8 +89,8 @@ for attempt in 1 2 3; do
     assets=JSON.parse(File.read(ARGV.fetch(0))).fetch("formula").fetch("assets")
     puts [assets.fetch("darwin_arm64"), assets.fetch("darwin_amd64")].join("\t")
   ' "$manifest")"
-  [[ "$arm64_asset" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.tar\.gz$ ]]
-  [[ "$amd64_asset" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.tar\.gz$ ]]
+  [[ "$arm64_asset" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*${asset_suffix}$ ]]
+  [[ "$amd64_asset" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*${asset_suffix}$ ]]
   [[ "$(basename -- "$arm64_asset")" == "$arm64_asset" ]]
   [[ "$(basename -- "$amd64_asset")" == "$amd64_asset" ]]
   [[ "$arm64_asset" != "$amd64_asset" ]]
@@ -89,7 +101,22 @@ for attempt in 1 2 3; do
   amd64_sha="$(awk -v file="$amd64_asset" '$2 == file { print $1 }' "$checksums")"
   [[ "$arm64_sha" =~ ^[0-9a-f]{64}$ && "$amd64_sha" =~ ^[0-9a-f]{64}$ ]]
 
-  if [[ -f "$formula_path" ]]; then
+  if [[ -n "$cask_profile" ]]; then
+    # The reviewed Cask owns its url, app stanza and everything else; a
+    # release rewrites only the version line and the per-architecture sha256.
+    # shellcheck disable=SC2016
+    ruby -e '
+      path, version, arm, intel = ARGV
+      text = File.read(path)
+      version_lines = text.scan(/^\s*version "[^"\n]*"$/)
+      sha_lines = text.scan(/^\s*sha256 arm:\s+"[0-9a-f]{64}",\s+intel:\s+"[0-9a-f]{64}"$/)
+      abort "Cask must carry exactly one version line" unless version_lines.length == 1
+      abort "Cask must carry exactly one sha256 arm:/intel: line" unless sha_lines.length == 1
+      text = text.sub(/^(\s*)version "[^"\n]*"$/) { "#{$1}version \"#{version}\"" }
+      text = text.sub(/^(\s*)sha256 arm:(\s+)"[0-9a-f]{64}",(\s+)intel:(\s+)"[0-9a-f]{64}"$/) { "#{$1}sha256 arm:#{$2}\"#{arm}\",#{$3}intel:#{$4}\"#{intel}\"" }
+      File.write(path, text)
+    ' "$attempt_dir/$package_path" "$version" "$arm64_sha" "$amd64_sha"
+  elif [[ -f "$formula_path" ]]; then
     if [[ -n "$formula_profile" ]]; then
       "$hextapctl" formula update --manifest "$manifest" --formula "$formula_path" \
         --template "$template_path" --version "$version" \
@@ -108,7 +135,7 @@ for attempt in 1 2 3; do
       --version "$version" --arm64-sha "$arm64_sha" --amd64-sha "$amd64_sha"
   fi
 
-  git -C "$attempt_dir" add "Formula/$formula.rb"
+  git -C "$attempt_dir" add "$package_path"
   if git -C "$attempt_dir" diff --cached --quiet; then
     status="already-current"
     tap_commit="$(git -C "$attempt_dir" rev-parse HEAD)"
@@ -116,7 +143,7 @@ for attempt in 1 2 3; do
   fi
 
   changed="$(git -C "$attempt_dir" diff --cached --name-only)"
-  [[ "$changed" == "Formula/$formula.rb" ]]
+  [[ "$changed" == "$package_path" ]]
   git -C "$attempt_dir" config user.name "GitHub Actions"
   git -C "$attempt_dir" config user.email "actions@github.com"
   git -C "$attempt_dir" commit -m "Update $formula to $version" >/dev/null

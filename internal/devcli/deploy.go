@@ -22,10 +22,33 @@ type pullRequest struct {
 	StatusChecks     []statusCheck `json:"statusCheckRollup"`
 }
 
+// statusCheck is one statusCheckRollup entry. A CheckRun carries name,
+// status and conclusion; a StatusContext (a commit status, such as GitBook's)
+// carries context and state instead.
 type statusCheck struct {
+	Typename   string `json:"__typename"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
 	Name       string `json:"name"`
+	Context    string `json:"context"`
+	State      string `json:"state"`
+}
+
+// requireSuccessfulChecks refuses the first rollup entry that is not green,
+// naming it by check name or status context.
+func requireSuccessfulChecks(checks []statusCheck) error {
+	for _, check := range checks {
+		if check.Typename == "StatusContext" {
+			if check.State != "SUCCESS" {
+				return fmt.Errorf("pull request status %q is not successful", check.Context)
+			}
+			continue
+		}
+		if check.Status != "COMPLETED" || check.Conclusion != "SUCCESS" {
+			return fmt.Errorf("pull request check %q is not successful", check.Name)
+		}
+	}
+	return nil
 }
 
 type mergedPullRequest struct {
@@ -249,10 +272,8 @@ func (service Service) requireMergeReadyPullRequest(ctx context.Context, number 
 	if pr.State != "OPEN" || pr.HeadRefOID != head || pr.Mergeable != "MERGEABLE" || pr.MergeStateStatus != "CLEAN" || len(pr.StatusChecks) == 0 {
 		return pullRequest{}, fmt.Errorf("pull request %d is not clean and merge-ready", number)
 	}
-	for _, check := range pr.StatusChecks {
-		if check.Status != "COMPLETED" || check.Conclusion != "SUCCESS" {
-			return pullRequest{}, fmt.Errorf("pull request check %q is not successful", check.Name)
-		}
+	if err := requireSuccessfulChecks(pr.StatusChecks); err != nil {
+		return pullRequest{}, err
 	}
 	return pr, nil
 }

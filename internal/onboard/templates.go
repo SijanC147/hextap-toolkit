@@ -296,3 +296,56 @@ func classForFormula(name string) string {
 	}
 	return strings.Join(parts, "")
 }
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+// xcodeAdapterBytes renders the schema 3 adapter: an unsigned xcodebuild of
+// the declared scheme for one architecture, copied to HEXTAP_OUTPUT and then
+// ad-hoc signed. entitlements is empty or a repository-relative path.
+func xcodeAdapterBytes(profile manifest.ReleaseProfile, entitlements string) []byte {
+	sign := ""
+	if entitlements != "" {
+		sign = " --entitlements " + shellQuote(entitlements)
+	}
+	return []byte(fmt.Sprintf(`#!/bin/sh
+set -eu
+
+: "${HEXTAP_TARGET_OS:?HEXTAP_TARGET_OS is required}"
+: "${HEXTAP_TARGET_ARCH:?HEXTAP_TARGET_ARCH is required}"
+: "${HEXTAP_OUTPUT:?HEXTAP_OUTPUT is required}"
+: "${HEXTAP_VERSION:?HEXTAP_VERSION is required}"
+: "${HEXTAP_COMMIT:?HEXTAP_COMMIT is required}"
+
+if [ "$HEXTAP_TARGET_OS" != "darwin" ]; then
+  echo "hextap-build: HEXTAP_TARGET_OS must be darwin" >&2
+  exit 64
+fi
+case "$HEXTAP_TARGET_ARCH" in
+  arm64) arch="arm64" ;;
+  amd64) arch="x86_64" ;;
+  *) echo "hextap-build: HEXTAP_TARGET_ARCH must be arm64 or amd64" >&2; exit 64 ;;
+esac
+case "$HEXTAP_OUTPUT" in
+  *.app) ;;
+  *) echo "hextap-build: HEXTAP_OUTPUT must name a .app directory" >&2; exit 64 ;;
+esac
+
+derived="$(mktemp -d)"
+trap 'rm -rf "$derived"' EXIT
+
+CI=1 xcodebuild build \
+  -project %[1]s \
+  -scheme %[2]s \
+  -configuration %[3]s \
+  -destination 'generic/platform=macOS' \
+  -derivedDataPath "$derived" \
+  ARCHS="$arch" ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO \
+  MARKETING_VERSION="$HEXTAP_VERSION"
+
+/usr/bin/ditto "$derived/Build/Products/"%[3]s/%[4]s "$HEXTAP_OUTPUT"
+codesign --force --deep --sign - --options runtime%[5]s "$HEXTAP_OUTPUT"
+codesign --verify --deep --strict "$HEXTAP_OUTPUT"
+`, shellQuote(profile.Project), shellQuote(profile.Scheme), shellQuote(profile.Configuration), shellQuote(profile.App), sign))
+}

@@ -50,8 +50,11 @@ func RunProfile(options ProfileOptions) error {
 	if err != nil {
 		return err
 	}
-	if project.Schema != manifest.ProfileSchema || project.Release.Profile == nil {
-		return errors.New("release profile commands require a schema 2 manifest")
+	if project.Release.Profile == nil || (project.Schema != manifest.ProfileSchema && project.Schema != manifest.XcodeSchema) {
+		return errors.New("release profile commands require a schema 2 or 3 manifest")
+	}
+	if project.Schema == manifest.XcodeSchema && options.Phase != ProfileQuality {
+		return errors.New("schema 3 Xcode profiles run only the quality phase; xcodebuild runs inside the build adapter")
 	}
 	var commands []manifest.Command
 	switch options.Phase {
