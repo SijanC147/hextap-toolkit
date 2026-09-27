@@ -191,6 +191,21 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 			return BuildResult{}, fmt.Errorf("create %s-%s staging directory: %w", buildTarget.OS, buildTarget.Arch, err)
 		}
 		binaryPath := filepath.Join(stageDir, buildTarget.Executable)
+		if project.Schema == manifest.XcodeSchema {
+			if err := runAdapter(adapterPath, sourceDir, binaryPath, buildTarget, options.Version, options.Commit, ""); err != nil {
+				return BuildResult{}, err
+			}
+			if err := validateAppOutput(stageDir, buildTarget.Executable, project.Formula.Binary); err != nil {
+				return BuildResult{}, fmt.Errorf("validate %s-%s adapter output: %w", buildTarget.OS, buildTarget.Arch, err)
+			}
+			for _, artifact := range buildTarget.Artifacts {
+				if err := writeAppZip(filepath.Join(distDir, artifact.Name), binaryPath, buildTarget.Executable); err != nil {
+					return BuildResult{}, fmt.Errorf("package %s-%s asset %s: %w", buildTarget.OS, buildTarget.Arch, artifact.Name, err)
+				}
+				assets = append(assets, artifact.Name)
+			}
+			continue
+		}
 		if err := runAdapter(adapterPath, sourceDir, binaryPath, buildTarget, options.Version, options.Commit, bunCacheDir); err != nil {
 			return BuildResult{}, err
 		}
@@ -296,7 +311,7 @@ func build(options BuildOptions, hooks buildHooks) (result BuildResult, retErr e
 }
 
 func validateProfileCommit(project manifest.Manifest, commit string) error {
-	if project.Schema == manifest.ProfileSchema && len(commit) != 40 && len(commit) != 64 {
+	if (project.Schema == manifest.ProfileSchema || project.Schema == manifest.XcodeSchema) && len(commit) != 40 && len(commit) != 64 {
 		return errors.New("validate release commit: schema 2 requires a full 40- or 64-character source commit")
 	}
 	return nil
@@ -494,6 +509,10 @@ func buildTargets(project manifest.Manifest) ([]target, error) {
 				continue
 			}
 			executable := project.Formula.Binary
+			if project.Schema == manifest.XcodeSchema {
+				result = append(result, target{OS: spec.os, Arch: spec.arch, Executable: project.Release.Profile.App, Artifacts: []targetArtifact{{Name: declared.Archive, Format: artifactAppZip}}})
+				continue
+			}
 			if spec.os == "windows" {
 				executable += ".exe"
 			}
