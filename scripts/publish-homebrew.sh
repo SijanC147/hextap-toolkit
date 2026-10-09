@@ -236,7 +236,24 @@ done
 }
 
 gh run watch "$run_id" --repo "$tap_repository" --exit-status
-run_state="$(gh api --method GET "repos/$tap_repository/actions/runs/$run_id")"
+# The watch can return before the run's API record reads completed, so
+# re-read it until it does and only then judge the conclusion.
+tap_state_interval="${HEXTAP_TAP_STATE_POLL_SECONDS:-3}"
+[[ "$tap_state_interval" =~ ^[0-9]+$ ]]
+run_state=""
+run_status=""
+for state_attempt in {1..10}; do
+  run_state="$(gh api --method GET "repos/$tap_repository/actions/runs/$run_id")"
+  run_status="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("status")' <<<"$run_state")"
+  [[ "$run_status" != "completed" ]] || break
+  if (( state_attempt < 10 )); then
+    sleep "$tap_state_interval"
+  fi
+done
+[[ "$run_status" == "completed" ]] || {
+  echo "tap run $run_id did not read completed after its watch ended; last status: $run_status" >&2
+  exit 1
+}
 ruby -rjson -e '
   run=JSON.parse(STDIN.read)
   abort "tap run identity mismatch" unless run.dig("repository","full_name") == "SijanC147/homebrew-hextap"

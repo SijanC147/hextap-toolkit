@@ -392,6 +392,58 @@ func TestPublishHomebrewRejectsMismatchedTapGateEvent(t *testing.T) {
 	}
 }
 
+func TestPublishHomebrewWaitsForLaggingTapRunState(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		tapState: "lagging",
+	})
+	if result.err != nil {
+		t.Fatalf("publish-homebrew.sh failed on a lagging run record: %v\nstdout:\n%s\nstderr:\n%s", result.err, result.stdout, result.stderr)
+	}
+	if reads := strings.Count(result.ghLog, "actions/runs/42"); reads != 2 {
+		t.Fatalf("run record reads = %d, want 2: %q", reads, result.ghLog)
+	}
+	if result.sleepLog != "3\n" {
+		t.Fatalf("sleep log = %q, want one default 3 second wait", result.sleepLog)
+	}
+}
+
+func TestPublishHomebrewRejectsCompletedFailedTapRunAtOnce(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		tapState: "failure",
+	})
+	if result.err == nil {
+		t.Fatal("publish-homebrew.sh accepted a completed tap run that failed")
+	}
+	if !strings.Contains(result.stderr, "tap run failed") {
+		t.Fatalf("stderr = %q, want tap run failed", result.stderr)
+	}
+	if reads := strings.Count(result.ghLog, "actions/runs/42"); reads != 1 {
+		t.Fatalf("run record reads = %d, want 1 for a completed run: %q", reads, result.ghLog)
+	}
+}
+
+func TestPublishHomebrewBoundsTheTapRunStateWait(t *testing.T) {
+	result := runPublisherWithOptions(t, customManifest, compactJSON(t, customManifest), publisherOptions{
+		tapState:            "never",
+		tapStatePollSeconds: "0",
+	})
+	if result.err == nil {
+		t.Fatal("publish-homebrew.sh accepted a tap run that never read completed")
+	}
+	if !strings.Contains(result.stderr, "did not read completed after its watch ended; last status: in_progress") {
+		t.Fatalf("stderr = %q, want the bounded-wait diagnostic", result.stderr)
+	}
+	if strings.Contains(result.stderr, "tap run failed") {
+		t.Fatalf("stderr = %q, bounded wait must not report a failed run", result.stderr)
+	}
+	if reads := strings.Count(result.ghLog, "actions/runs/42"); reads != 10 {
+		t.Fatalf("run record reads = %d, want 10", reads)
+	}
+	if result.sleepLog != strings.Repeat("0\n", 9) {
+		t.Fatalf("sleep log = %q, want nine injected 0 second waits", result.sleepLog)
+	}
+}
+
 func TestPublishHomebrewFailsFastWithPushDiagnostic(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -479,6 +531,11 @@ type publisherOptions struct {
 	tapStateEvent  string
 	tapFormula     string
 	tapTemplate    string
+	// tapState drives the run record read after the watch: "" reads
+	// completed/success at once, "lagging" reads in_progress first,
+	// "failure" reads completed/failure, "never" never reads completed.
+	tapState            string
+	tapStatePollSeconds string
 }
 
 func runPublisher(t *testing.T, sourceManifest, tapManifest string) publisherResult {
@@ -504,6 +561,7 @@ func runPublisherWithOptions(t *testing.T, sourceManifest, tapManifest string, o
 	ghLogPath := filepath.Join(temporary, "gh.log")
 	pushCountPath := filepath.Join(temporary, "push-count")
 	sleepLogPath := filepath.Join(temporary, "sleep.log")
+	tapStateCountPath := filepath.Join(temporary, "tap-state-count")
 	tapFormulaPath := filepath.Join(temporary, "tap-formula.rb")
 	tapTemplatePath := filepath.Join(temporary, "tap-formula.rb.tmpl")
 	var source struct {
@@ -577,7 +635,23 @@ if [[ "$1" == api ]]; then
 	  printf '{"workflow_runs":[]}\n'
 	fi
   elif [[ "$endpoint" == */actions/runs/42 ]]; then
-	printf '{"repository":{"full_name":"SijanC147/homebrew-hextap"},"path":".github/workflows/tests.yml","head_sha":"%s","event":"%s","status":"completed","conclusion":"success"}\n' "$TEST_TAP_SHA" "$TEST_TAP_STATE_EVENT"
+	reads=0
+	if [[ -f "$TEST_TAP_STATE_COUNT" ]]; then
+	  read -r reads < "$TEST_TAP_STATE_COUNT"
+	fi
+	reads=$((reads + 1))
+	printf '%s\n' "$reads" > "$TEST_TAP_STATE_COUNT"
+	run_status=completed
+	run_conclusion=success
+	case "$TEST_TAP_STATE" in
+	  lagging) if (( reads == 1 )); then run_status=in_progress; run_conclusion=null; fi ;;
+	  failure) run_conclusion=failure ;;
+	  never) run_status=in_progress; run_conclusion=null ;;
+	esac
+	if [[ "$run_conclusion" != null ]]; then
+	  run_conclusion="\"$run_conclusion\""
+	fi
+	printf '{"repository":{"full_name":"SijanC147/homebrew-hextap"},"path":".github/workflows/tests.yml","head_sha":"%s","event":"%s","status":"%s","conclusion":%s}\n' "$TEST_TAP_SHA" "$TEST_TAP_STATE_EVENT" "$run_status" "$run_conclusion"
   else
     printf 'unexpected gh api endpoint: %s\n' "$endpoint" >&2
     exit 1
@@ -689,7 +763,12 @@ printf '%s\n' "$*" >> "$TEST_HEXTAP_LOG"
 		"TEST_TAP_STATE_EVENT="+tapStateEvent,
 		"TEST_PUSH_COUNT="+pushCountPath,
 		"TEST_SLEEP_LOG="+sleepLogPath,
+		"TEST_TAP_STATE="+options.tapState,
+		"TEST_TAP_STATE_COUNT="+tapStateCountPath,
 	)
+	if options.tapStatePollSeconds != "" {
+		command.Env = append(command.Env, "HEXTAP_TAP_STATE_POLL_SECONDS="+options.tapStatePollSeconds)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout
