@@ -264,9 +264,10 @@ func validateSelfCaller(root, repository, submodules string, data []byte) error 
 	return nil
 }
 
-// selfCallerBytes is the exact owned toolkit self-caller. Onboarding never
-// generates it — no adopter may have one — so it is a validation expectation
-// rather than a template in templates.go.
+// selfCallerBytes is the exact owned toolkit self-caller. Onboarding writes it
+// only for the toolkit repository itself (resolveSelfAdopter); no external
+// adopter may have one, so it lives beside the validation that admits it
+// rather than with the adopter templates in templates.go.
 func selfCallerBytes(submodules string) []byte {
 	return []byte(fmt.Sprintf(`name: Hextap toolkit release
 

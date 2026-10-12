@@ -91,6 +91,29 @@ func TestOnboardSelfAdopterRequiresTheReusableWorkflow(t *testing.T) {
 	assertNoManagedWrites(t, project)
 }
 
+// TestOnboardSelfAdopterRequiresAn0644ReusableWorkflow mirrors the mode check
+// validateSelfCaller applies, so onboarding cannot write a caller Validate
+// would then reject.
+func TestOnboardSelfAdopterRequiresAn0644ReusableWorkflow(t *testing.T) {
+	project := writeGoProject(t)
+	setOrigin(t, project, toolkitSelfRepository)
+	reusable := filepath.Join(project, filepath.FromSlash(reusableWorkflowPath))
+	if err := os.MkdirAll(filepath.Dir(reusable), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reusable, []byte("name: Hextap release\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(reusable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Onboard(selfAdopterOptions(project))
+	if err == nil || !strings.Contains(err.Error(), "mode must be 0644") {
+		t.Fatalf("Onboard() error = %v, want reusable workflow mode refusal", err)
+	}
+	assertNoManagedWrites(t, project)
+}
+
 // TestOnboardToolkitRefusesAPinnedCaller keeps the toolkit from being
 // onboarded as an external adopter of a different copy of itself.
 func TestOnboardToolkitRefusesAPinnedCaller(t *testing.T) {
@@ -118,6 +141,7 @@ func TestOnboardExternalAdopterCannotReachTheSelfAdopterPath(t *testing.T) {
 		{"external version only", "SijanC147/example-tool", "v1.2.3", "", "toolkit SHA must be exactly 40"},
 		{"external sha only", "SijanC147/example-tool", "", testToolkitSHA, "toolkit version must be exact stable"},
 		{"lookalike name", "SijanC147/hextap-toolkit-fork", "", "", "toolkit version must be exact stable"},
+		{"case-variant name", "SijanC147/Hextap-Toolkit", "", "", "toolkit version must be exact stable"},
 		{"toolkit version only", toolkitSelfRepository, "v1.2.3", "", "toolkit SHA must be exactly 40"},
 		{"toolkit sha only", toolkitSelfRepository, "", testToolkitSHA, "toolkit version must be exact stable"},
 	}
