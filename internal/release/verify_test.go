@@ -203,7 +203,9 @@ func TestVerifyRejectsChecksumMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data[0] = '0'
+	// Flip a bit rather than assign: an assigned digit is a no-op when the
+	// checksum already starts with it, which depends on the toolchain (SB23-6783).
+	data[0] ^= 1
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
