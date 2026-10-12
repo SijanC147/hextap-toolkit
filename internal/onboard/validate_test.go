@@ -255,23 +255,16 @@ func writeToolkitSelfProject(t *testing.T) string {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git remote set-url: %v: %s", err, output)
 	}
-	options := validOptions(project)
-	options.Repository = toolkitSelfRepository
-	options.Formula = "hextap"
-	options.Binary = "brew-hextap"
-	if _, err := Onboard(options); err != nil {
-		t.Fatalf("Onboard() error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(project, filepath.FromSlash(workflowPath)), selfCallerBytes(""), 0o644); err != nil {
-		t.Fatalf("WriteFile(%s): %v", workflowPath, err)
-	}
 	reusable := filepath.Join(project, filepath.FromSlash(reusableWorkflowPath))
+	if err := os.MkdirAll(filepath.Dir(reusable), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(reusable), err)
+	}
 	if err := os.WriteFile(reusable, []byte("name: Hextap release\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", reusableWorkflowPath, err)
 	}
-	setup := setupDocument(toolkitSelfRepository, options.Formula, "", "", "")
-	if err := os.WriteFile(filepath.Join(project, filepath.FromSlash(setupPath)), setup, 0o644); err != nil {
-		t.Fatalf("WriteFile(%s): %v", setupPath, err)
+	options := selfAdopterOptions(project)
+	if _, err := Onboard(options); err != nil {
+		t.Fatalf("Onboard() error = %v", err)
 	}
 	return project
 }

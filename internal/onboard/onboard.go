@@ -102,7 +102,8 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 	}
 	// GitHub owners are case-insensitive; the manifest records the canonical spelling.
 	repository = supportedOwner + "/" + repositoryName
-	if err := validateToolkitPin(options.ToolkitVersion, options.ToolkitSHA); err != nil {
+	selfAdopter, reusableWorkflow, err := resolveSelfAdopter(root, repositoryName, options.ToolkitVersion, options.ToolkitSHA)
+	if err != nil {
 		return onboardingState{}, err
 	}
 	checks, err := validateRequiredChecks(options.RequiredChecks)
@@ -120,6 +121,9 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 		return onboardingState{}, err
 	}
 	workflow := workflowBytes(options.ToolkitVersion, options.ToolkitSHA, project.Release.SubmodulesMode())
+	if selfAdopter {
+		workflow = selfCallerBytes(project.Release.SubmodulesMode())
+	}
 	mainRuleset, err := mainRulesetBytes(checks)
 	if err != nil {
 		return onboardingState{}, err
@@ -137,6 +141,12 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 		{path: tagRulesetPath, data: tagRuleset, mode: 0o644, generatedText: true},
 		{path: setupPath, data: setupDocumentWith(repository, project.Formula.Name, options.ToolkitVersion, options.ToolkitSHA, project.Release.SubmodulesMode(), project.Homebrew.CaskProfile != ""), mode: 0o644, generatedText: true},
 	}
+	if selfAdopter {
+		// The relative caller is only valid while the workflow it resolves to
+		// stays put, so it joins the plan as an unchanged target: the
+		// transaction snapshots it and refuses to publish if it moves.
+		artifacts = append(artifacts, artifact{path: reusableWorkflowPath, data: reusableWorkflow, mode: 0o644})
+	}
 	for _, item := range artifacts {
 		if len(item.data) > maximumLocalFile {
 			return onboardingState{}, fmt.Errorf("generated artifact %s exceeds %d bytes", item.path, maximumLocalFile)
@@ -152,6 +162,37 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 	}
 	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].path < artifacts[j].path })
 	return onboardingState{root: root, artifacts: artifacts}, nil
+}
+
+// resolveSelfAdopter decides which caller onboarding writes. Every adopter gets
+// a caller pinned to an exact stable toolkit tag and full commit. The one
+// exception is the repository that owns the reusable workflow: it calls that
+// workflow relatively and has no external pin, so writing a pinned caller
+// there would replace its own release path with a different copy of itself.
+//
+// The exception needs both an empty pin and the toolkit repository name, and
+// the same-repository reusable workflow must exist at 0644, the conditions
+// validateSelfCaller applies. Any other repository with an empty or half-empty
+// pin fails validateToolkitPin exactly as before. The toolkit repository with
+// a pin is refused rather than onboarded as an external adopter of itself.
+func resolveSelfAdopter(root, repositoryName, toolkitVersion, toolkitSHA string) (bool, []byte, error) {
+	if repositoryName != toolkitRepositoryName || toolkitVersion != "" || toolkitSHA != "" {
+		if err := validateToolkitPin(toolkitVersion, toolkitSHA); err != nil {
+			return false, nil, err
+		}
+		if repositoryName == toolkitRepositoryName {
+			return false, nil, fmt.Errorf("the %q repository owns the reusable workflow and keeps its relative caller; onboard it with an empty --toolkit-version and --toolkit-sha", toolkitRepositoryName)
+		}
+		return false, nil, nil
+	}
+	data, info, err := readManagedArtifact(root, reusableWorkflowPath)
+	if err != nil {
+		return false, nil, fmt.Errorf("relative caller requires the same-repository reusable workflow %s: %w", reusableWorkflowPath, err)
+	}
+	if !exactFileMode(info, 0o644) {
+		return false, nil, fmt.Errorf("same-repository reusable workflow %s mode must be 0644", reusableWorkflowPath)
+	}
+	return true, data, nil
 }
 
 func resolveManifest(path, repository, repositoryName string, options Options) ([]byte, manifest.Manifest, bool, error) {
