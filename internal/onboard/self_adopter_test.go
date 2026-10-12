@@ -59,6 +59,9 @@ func TestOnboardSelfAdopterWritesTheRelativeCaller(t *testing.T) {
 	if strings.Contains(string(setup), "pinned to stable toolkit tag") {
 		t.Fatalf("self-adopter SETUP.md claims an external pin:\n%s", setup)
 	}
+	if strings.Contains(string(setup), "--method POST") || !strings.Contains(string(setup), "--method PUT") {
+		t.Fatalf("self-adopter SETUP.md must update its existing rulesets in place, never create them:\n%s", setup)
+	}
 	result, err := Validate(ValidateOptions{Project: project})
 	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -67,15 +70,23 @@ func TestOnboardSelfAdopterWritesTheRelativeCaller(t *testing.T) {
 		t.Fatalf("self-adopter validated with a pin: %q %q", result.ToolkitVersion, result.ToolkitSHA)
 	}
 
-	// A second run over the committed relative caller changes nothing.
+	// A second run over the committed relative caller changes nothing, and the
+	// reusable workflow is in the plan, so the transaction snapshots it.
 	again, err := Onboard(selfAdopterOptions(project))
 	if err != nil {
 		t.Fatalf("second Onboard() error = %v", err)
 	}
+	planned := false
 	for _, entry := range again.Entries {
 		if entry.Action == ActionCreate {
 			t.Fatalf("second Onboard() planned a create at %s", entry.Path)
 		}
+		if entry.Path == reusableWorkflowPath {
+			planned = entry.Action == ActionUnchanged
+		}
+	}
+	if !planned {
+		t.Fatalf("reusable workflow is not an unchanged plan entry: %+v", again.Entries)
 	}
 }
 

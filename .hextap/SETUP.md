@@ -17,11 +17,12 @@ cat .hextap/rulesets/main.json
 cat .hextap/rulesets/release-tags.json
 ```
 
-Apply each reviewed payload manually:
+This repository already carries both owned rulesets, `hextap/main` and `hextap/release-tags`. Do not create them again: a second active ruleset of either name makes the online doctor reject the repository as ambiguous. Read each ruleset's id, compare its live body with the reviewed payload, and update that ruleset in place only where they differ:
 
 ```sh
-gh api --hostname github.com --method POST repos/SijanC147/hextap-toolkit/rulesets --input .hextap/rulesets/main.json
-gh api --hostname github.com --method POST repos/SijanC147/hextap-toolkit/rulesets --input .hextap/rulesets/release-tags.json
+gh api --hostname github.com repos/SijanC147/hextap-toolkit/rulesets --jq '.[] | select(.name == "hextap/main" or .name == "hextap/release-tags") | {id, name}'
+gh api --hostname github.com --method PUT repos/SijanC147/hextap-toolkit/rulesets/<hextap/main id> --input .hextap/rulesets/main.json
+gh api --hostname github.com --method PUT repos/SijanC147/hextap-toolkit/rulesets/<hextap/release-tags id> --input .hextap/rulesets/release-tags.json
 ```
 
 The tap registration destination is exactly `Projects/hextap.json`, but the initial tap pull request must not contain that JSON alone. It must pair the byte-exact `.hextap/tap-registration.json` with `Formula/hextap.rb`, and that Formula must declare `class Hextap < Formula`. The tap remains the Formula registry; the paired pull request and merge are owner-controlled manual actions.

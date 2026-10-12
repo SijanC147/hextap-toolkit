@@ -102,7 +102,7 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 	}
 	// GitHub owners are case-insensitive; the manifest records the canonical spelling.
 	repository = supportedOwner + "/" + repositoryName
-	selfAdopter, err := resolveSelfAdopter(root, repositoryName, options.ToolkitVersion, options.ToolkitSHA)
+	selfAdopter, reusableWorkflow, err := resolveSelfAdopter(root, repositoryName, options.ToolkitVersion, options.ToolkitSHA)
 	if err != nil {
 		return onboardingState{}, err
 	}
@@ -141,6 +141,12 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 		{path: tagRulesetPath, data: tagRuleset, mode: 0o644, generatedText: true},
 		{path: setupPath, data: setupDocumentWith(repository, project.Formula.Name, options.ToolkitVersion, options.ToolkitSHA, project.Release.SubmodulesMode(), project.Homebrew.CaskProfile != ""), mode: 0o644, generatedText: true},
 	}
+	if selfAdopter {
+		// The relative caller is only valid while the workflow it resolves to
+		// stays put, so it joins the plan as an unchanged target: the
+		// transaction snapshots it and refuses to publish if it moves.
+		artifacts = append(artifacts, artifact{path: reusableWorkflowPath, data: reusableWorkflow, mode: 0o644})
+	}
 	for _, item := range artifacts {
 		if len(item.data) > maximumLocalFile {
 			return onboardingState{}, fmt.Errorf("generated artifact %s exceeds %d bytes", item.path, maximumLocalFile)
@@ -169,22 +175,24 @@ func prepareOnboardingResolved(options Options, root, originRepository string) (
 // validateSelfCaller applies. Any other repository with an empty or half-empty
 // pin fails validateToolkitPin exactly as before. The toolkit repository with
 // a pin is refused rather than onboarded as an external adopter of itself.
-func resolveSelfAdopter(root, repositoryName, toolkitVersion, toolkitSHA string) (bool, error) {
+func resolveSelfAdopter(root, repositoryName, toolkitVersion, toolkitSHA string) (bool, []byte, error) {
 	if repositoryName != toolkitRepositoryName || toolkitVersion != "" || toolkitSHA != "" {
 		if err := validateToolkitPin(toolkitVersion, toolkitSHA); err != nil {
-			return false, err
+			return false, nil, err
 		}
 		if repositoryName == toolkitRepositoryName {
-			return false, fmt.Errorf("the %q repository owns the reusable workflow and keeps its relative caller; onboard it with an empty --toolkit-version and --toolkit-sha", toolkitRepositoryName)
+			return false, nil, fmt.Errorf("the %q repository owns the reusable workflow and keeps its relative caller; onboard it with an empty --toolkit-version and --toolkit-sha", toolkitRepositoryName)
 		}
-		return false, nil
+		return false, nil, nil
 	}
-	if _, info, err := readManagedArtifact(root, reusableWorkflowPath); err != nil {
-		return false, fmt.Errorf("relative caller requires the same-repository reusable workflow %s: %w", reusableWorkflowPath, err)
-	} else if !exactFileMode(info, 0o644) {
-		return false, fmt.Errorf("same-repository reusable workflow %s mode must be 0644", reusableWorkflowPath)
+	data, info, err := readManagedArtifact(root, reusableWorkflowPath)
+	if err != nil {
+		return false, nil, fmt.Errorf("relative caller requires the same-repository reusable workflow %s: %w", reusableWorkflowPath, err)
 	}
-	return true, nil
+	if !exactFileMode(info, 0o644) {
+		return false, nil, fmt.Errorf("same-repository reusable workflow %s mode must be 0644", reusableWorkflowPath)
+	}
+	return true, data, nil
 }
 
 func resolveManifest(path, repository, repositoryName string, options Options) ([]byte, manifest.Manifest, bool, error) {

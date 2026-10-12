@@ -256,10 +256,22 @@ Before releasing, make `)
 	result.WriteString("Review the two owned ruleset payloads:\n\n```sh\n")
 	result.WriteString("cat .hextap/rulesets/main.json\n")
 	result.WriteString("cat .hextap/rulesets/release-tags.json\n")
-	result.WriteString("```\n\nApply each reviewed payload manually:\n\n```sh\n")
-	fmt.Fprintf(&result, "gh api --hostname github.com --method POST repos/%s/rulesets --input .hextap/rulesets/main.json\n", repository)
-	fmt.Fprintf(&result, "gh api --hostname github.com --method POST repos/%s/rulesets --input .hextap/rulesets/release-tags.json\n", repository)
-	result.WriteString("```\n\n")
+	if toolkitVersion == "" && toolkitSHA == "" {
+		// The toolkit releases itself, so both owned rulesets already exist
+		// there. A second POST would add a duplicate active ruleset of the same
+		// name, which the online doctor rejects as ambiguous. Raised by Codex
+		// on PR #37.
+		result.WriteString("```\n\nThis repository already carries both owned rulesets, `hextap/main` and `hextap/release-tags`. Do not create them again: a second active ruleset of either name makes the online doctor reject the repository as ambiguous. Read each ruleset's id, compare its live body with the reviewed payload, and update that ruleset in place only where they differ:\n\n```sh\n")
+		fmt.Fprintf(&result, "gh api --hostname github.com repos/%s/rulesets --jq '.[] | select(.name == \"hextap/main\" or .name == \"hextap/release-tags\") | {id, name}'\n", repository)
+		fmt.Fprintf(&result, "gh api --hostname github.com --method PUT repos/%s/rulesets/<hextap/main id> --input .hextap/rulesets/main.json\n", repository)
+		fmt.Fprintf(&result, "gh api --hostname github.com --method PUT repos/%s/rulesets/<hextap/release-tags id> --input .hextap/rulesets/release-tags.json\n", repository)
+		result.WriteString("```\n\n")
+	} else {
+		result.WriteString("```\n\nApply each reviewed payload manually:\n\n```sh\n")
+		fmt.Fprintf(&result, "gh api --hostname github.com --method POST repos/%s/rulesets --input .hextap/rulesets/main.json\n", repository)
+		fmt.Fprintf(&result, "gh api --hostname github.com --method POST repos/%s/rulesets --input .hextap/rulesets/release-tags.json\n", repository)
+		result.WriteString("```\n\n")
+	}
 	if cask {
 		fmt.Fprintf(&result, "The tap registration destination is exactly `Projects/%s.json`, but the initial tap pull request must not contain that JSON alone. It must pair the byte-exact `.hextap/tap-registration.json` with a reviewed `Casks/%s.rb`. The tap refuses a Formula for a `cask_profile` project. The Cask is written and reviewed by hand; the release publisher later rewrites only its single `version \"x\"` line and its single `sha256 arm: \"<64 hex>\", intel: \"<64 hex>\"` line, so it must carry exactly one of each. The paired pull request and merge are owner-controlled manual actions.\n\n", formula, formula)
 	} else {
